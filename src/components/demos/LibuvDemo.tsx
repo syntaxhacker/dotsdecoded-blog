@@ -404,7 +404,7 @@ export default function LibuvDemo() {
 
   return (
     <div style={{
-      maxWidth: 600,
+      maxWidth: 820,
       margin: '0 auto',
       fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
     }}>
