@@ -18,12 +18,12 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      - run: bun run build
+      - run: bun x astro build
 
-      - run: bun x pagefind --site dist/client
+      - run: bun x pagefind --site dist
 
       - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist/client --project-name=dotsdecoded-blog
+          command: pages deploy dist --project-name=dotsdecoded-blog --commit-dirty=true
