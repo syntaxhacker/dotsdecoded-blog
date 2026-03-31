@@ -48,6 +48,7 @@ Frontmatter fields:
 - `date` (coerced to Date, required)
 - `tags` (string array, default [])
 - `draft` (boolean, default false) — draft posts are excluded from build
+- `image` (string, optional) — path to custom OG image in `public/`, defaults to `/og-default.svg`
 
 ## Blog Post Rules
 
@@ -200,6 +201,20 @@ When asked to create a new blog post, follow this workflow:
 1. Install if needed (most are bundled with prismjs)
 2. Add `import 'prismjs/components/prism-LANG'` in BaseLayout.astro's Prism `<script>` block
 3. Use the language tag in fenced code blocks: ````LANG`
+
+## Open Graph Meta Tags
+
+Every page automatically gets OG and Twitter Card meta tags via `BaseLayout.astro`:
+
+- `og:title`, `og:description`, `og:type`, `og:url`, `og:image`, `og:site_name`, `og:locale`
+- `twitter:card` (summary_large_image), `twitter:title`, `twitter:description`, `twitter:image`
+- `<link rel="canonical">` for SEO
+
+Blog posts additionally get `article:published_time` and `article:tag` meta tags.
+
+The `site` URL is configured in `astro.config.mjs` (currently `https://dotsdecoded-blog.pages.dev`).
+
+Default OG image is `public/og-default.svg`. Posts can override with a custom image via the `image` frontmatter field.
 
 ## Copy Button
 
