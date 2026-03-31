@@ -1,15 +1,21 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import DemoBoundary from './DemoBoundary'
 
 const s = {
-  bg: '#12121a',
-  bg2: '#1a1a25',
-  text: '#e4e4e7',
-  text2: '#a1a1aa',
-  text3: '#71717a',
-  border: '#27272a',
-  accent: '#3b82f6',
-  green: '#22c55e',
-  red: '#ef4444',
+  bg: '#0a0c0f',
+  bg2: '#15191e',
+  bg3: '#29313d',
+  text: '#f1f2f3',
+  text2: '#acb0b9',
+  text3: '#747c8b',
+  border: '#3e4a5b',
+  border2: '#536279',
+  accent: '#5b8def',
+  green: '#3dd68c',
+  red: '#e85d5d',
+  yellow: '#e0b040',
+  purple: '#9b7bea',
+  orange: '#e8945a',
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 
@@ -38,12 +44,13 @@ function useTerminal(lines: string[], delay = 30) {
 
 function Terminal({ lines, title = 'terminal' }: { lines: string[]; title?: string }) {
   const termRef = useRef<HTMLDivElement>(null)
+  const safeLines = Array.isArray(lines) ? lines.filter(Boolean) : []
 
   useEffect(() => {
     if (termRef.current) {
       termRef.current.scrollTop = termRef.current.scrollHeight
     }
-  }, [lines])
+  }, [safeLines])
 
   return (
     <div style={{
@@ -63,7 +70,7 @@ function Terminal({ lines, title = 'terminal' }: { lines: string[]; title?: stri
       }}>
         <div style={{ display: 'flex', gap: 6 }}>
           <div style={{ width: 10, height: 10, borderRadius: '50%', background: s.red }} />
-          <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#eab308' }} />
+          <div style={{ width: 10, height: 10, borderRadius: '50%', background: s.yellow }} />
           <div style={{ width: 10, height: 10, borderRadius: '50%', background: s.green }} />
         </div>
         <span style={{ color: s.text3, fontSize: 12, fontFamily: s.mono }}>{title}</span>
@@ -80,7 +87,7 @@ function Terminal({ lines, title = 'terminal' }: { lines: string[]; title?: stri
           color: s.text,
         }}
       >
-        {lines.map((line, i) => (
+        {safeLines.map((line, i) => (
           <div key={i} style={{
             color: line.includes('[FAIL]') ? s.red
               : line.includes('[OK]') || line.includes('[SUCCESS]') ? s.green
@@ -90,7 +97,7 @@ function Terminal({ lines, title = 'terminal' }: { lines: string[]; title?: stri
             {line}
           </div>
         ))}
-        {lines.length === 0 && (
+        {safeLines.length === 0 && (
           <div style={{ color: s.text3 }}>waiting for input...</div>
         )}
       </div>
@@ -138,7 +145,7 @@ function PasswordSection() {
         </div>
         {success && (
           <div style={{
-            background: 'rgba(34,197,94,0.1)',
+            background: s.green + '1a',
             border: `1px solid ${s.green}`,
             borderRadius: 6,
             padding: '6px 14px',
@@ -239,7 +246,7 @@ b2RlZC5jb20=
       }}>
         <div style={{
           padding: '10px 14px',
-          background: 'rgba(239,68,68,0.1)',
+          background: s.red + '1a',
           borderBottom: `1px solid ${s.red}`,
           display: 'flex',
           justifyContent: 'space-between',
@@ -298,7 +305,7 @@ b2RlZC5jb20=
       }}>
         <div style={{
           padding: '10px 14px',
-          background: 'rgba(34,197,94,0.1)',
+          background: s.green + '1a',
           borderBottom: `1px solid ${s.green}`,
           display: 'flex',
           justifyContent: 'space-between',
@@ -536,7 +543,7 @@ function CopyIdSection() {
                 disabled={!!copying || alreadyCopied}
                 style={{
                   marginTop: 8,
-                  background: alreadyCopied ? 'rgba(34,197,94,0.15)' : copying === k.algo ? s.bg2 : s.accent,
+                  background: alreadyCopied ? s.green + '26' : copying === k.algo ? s.bg2 : s.accent,
                   border: `1px solid ${alreadyCopied ? s.green : s.border}`,
                   borderRadius: 4,
                   padding: '4px 12px',
@@ -637,7 +644,7 @@ function HandshakeSection() {
       desc: 'Server sends a random challenge string encrypted with the client\'s public key',
       from: 'Server',
       to: 'Client',
-      color: '#eab308',
+      color: s.yellow,
     },
     {
       label: 'Client Signs Challenge',
@@ -651,7 +658,7 @@ function HandshakeSection() {
       desc: 'Server uses the stored public key to verify the client\'s signature',
       from: 'Server',
       to: 'Server',
-      color: '#eab308',
+      color: s.yellow,
     },
     {
       label: 'Access Granted',
@@ -700,7 +707,7 @@ function HandshakeSection() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-          {steps.map((s, i) => {
+          {steps.map((st, i) => {
             const isActive = i === step
             const isDone = i < step
             return (
@@ -726,7 +733,7 @@ function HandshakeSection() {
                   whiteSpace: 'nowrap',
                   transition: 'color 0.4s',
                 }}>
-                  {s.label}
+                  {st.label}
                 </span>
               </div>
             )
@@ -1006,6 +1013,7 @@ function Section({ number, title, children }: { number: number; title: string; c
 
 export default function SshKeysDemo() {
   return (
+    <DemoBoundary name="SSH Key Authentication">
     <div style={{
       maxWidth: 820,
       margin: '0 auto',
@@ -1067,5 +1075,6 @@ export default function SshKeysDemo() {
         <QuickSetupSection />
       </Section>
     </div>
+    </DemoBoundary>
   )
 }

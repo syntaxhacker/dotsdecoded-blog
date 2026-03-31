@@ -119,20 +119,20 @@ Examples:
 
 ```ts
 const s = {
-  bg: '#12121a',
-  bg2: '#1a1a25',
-  bg3: '#1e1e2a',
-  text: '#e4e4e7',
-  text2: '#a1a1aa',
-  text3: '#71717a',
-  border: '#27272a',
-  border2: '#3f3f46',
-  accent: '#3b82f6',
-  green: '#22c55e',
-  red: '#ef4444',
-  yellow: '#eab308',
-  purple: '#a78bfa',
-  orange: '#fb923c',
+  bg: '#0a0c0f',
+  bg2: '#15191e',
+  bg3: '#29313d',
+  text: '#f1f2f3',
+  text2: '#acb0b9',
+  text3: '#747c8b',
+  border: '#3e4a5b',
+  border2: '#536279',
+  accent: '#5b8def',
+  green: '#3dd68c',
+  red: '#e85d5d',
+  yellow: '#e0b040',
+  purple: '#9b7bea',
+  orange: '#e8945a',
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 ```
@@ -146,6 +146,15 @@ const s = {
 13. No comments in code
 14. No emoji in UI text
 15. Rendered in MDX with `<DemoName client:visible />`
+16. Every demo must be wrapped with `<DemoBoundary name="Human Readable Name">` — import from `./DemoBoundary`. This catches render errors and shows a styled error UI with a retry button instead of crashing the page
+17. Add `import DemoBoundary from './DemoBoundary'` after the react import
+
+### Common Demo Pitfalls
+
+- **Never shadow the theme object**: `steps.map((s, i) => ...)` shadows the module-level `s`. Use `(st, i)` or any other name instead
+- **Defensive array handling**: If a component receives an array prop that might contain undefined elements (e.g., from state updates), guard with `Array.isArray(lines) ? lines.filter(Boolean) : []`
+- **JSX text escaping**: Curly braces inside JSX text content must be escaped: `{'{...}'}` not `{...}` (the latter is interpreted as a JSX expression)
+- **Object keys**: Never use duplicate keys in style objects — esbuild will error on `Duplicate key "fontSize"`
 
 ## Creating a New Blog Post (Sub-Agent Guide)
 
@@ -164,6 +173,17 @@ When asked to create a new blog post, follow this workflow:
 3. Write each section with explanation first, then place the demo inline after it
 4. Use analogies and real-world examples before technical details
 5. Include code blocks with proper language tags for Prism highlighting
+
+### Blog Post Structure Template
+
+Each post should follow a layered progression from zero knowledge to mastery:
+
+1. **Foundation Layer (first ~40%)** — Assume NO prior knowledge. Use real-world analogies exclusively to build intuition. Never use jargon without 3+ examples explaining it.
+2. **Concept Layer (next ~30%)** — Introduce formal terms only after analogies are mastered. Show step-by-step: "If you understand [analogy], [technical term] works like..." Include diagrams and manual walkthroughs.
+3. **Implementation Layer (next ~20%)** — Provide code examples. Show code building a concrete case. Explain each parameter simply. Include "what if..." scenarios for common mistakes.
+4. **Mastery Layer (final ~10%)** — Performance analysis. Real-world applications. Advanced variations. Self-check questions.
+
+**Style**: Write like a patient mentor. Use "we" language. End each section with confidence. Include comparison tables and self-check checklists.
 
 ### Step 3: Create demo components
 

@@ -1,19 +1,21 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
+import DemoBoundary from './DemoBoundary'
 
 const s = {
-  bg: '#12121a',
-  bg2: '#1a1a25',
-  bg3: '#1e1e2a',
-  text: '#e4e4e7',
-  text2: '#a1a1aa',
-  text3: '#71717a',
-  border: '#27272a',
-  accent: '#3b82f6',
-  green: '#22c55e',
-  red: '#ef4444',
-  orange: '#f97316',
-  purple: '#a855f7',
-  yellow: '#eab308',
+  bg: '#0a0c0f',
+  bg2: '#15191e',
+  bg3: '#29313d',
+  text: '#f1f2f3',
+  text2: '#acb0b9',
+  text3: '#747c8b',
+  border: '#3e4a5b',
+  border2: '#536279',
+  accent: '#5b8def',
+  green: '#3dd68c',
+  red: '#e85d5d',
+  yellow: '#e0b040',
+  purple: '#9b7bea',
+  orange: '#e8945a',
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 
@@ -53,7 +55,7 @@ const typeDescriptions: Record<OpType, string> = {
 }
 
 const phaseNames = ['timers', 'pending callbacks', 'poll', 'check', 'close']
-const phaseColors = ['#3b82f6', '#8b5cf6', '#22c55e', '#a855f7', '#ef4444']
+const phaseColors = [s.accent, s.purple, s.green, s.yellow, s.red]
 
 const sampleTasks: Array<{ label: string; type: OpType; duration: number }> = [
   { label: 'fs.readFile()', type: 'pool', duration: 2500 },
@@ -129,7 +131,7 @@ function ThreadPool({ activeSlots, total }: { activeSlots: number; total: number
             height: 24,
             borderRadius: 4,
             background: i < activeSlots
-              ? `linear-gradient(135deg, ${s.orange}, #ea580c)`
+              ? `linear-gradient(135deg, ${s.orange}, #b06830)`
               : s.bg2,
             border: `1px solid ${i < activeSlots ? s.orange : s.border}`,
             transition: 'all 0.3s',
@@ -403,6 +405,7 @@ export default function LibuvDemo() {
   const activePool = tasks.filter(t => t.type === 'pool' && t.state === 'running').length
 
   return (
+    <DemoBoundary name="Libuv Event Loop">
     <div style={{
       maxWidth: 820,
       margin: '0 auto',
@@ -447,7 +450,7 @@ export default function LibuvDemo() {
               border: 'none',
               background: running
                 ? s.text3
-                : `linear-gradient(135deg, ${s.accent}, #2563eb)`,
+                : `linear-gradient(135deg, ${s.accent}, #3a6ab5)`,
               color: '#fff',
               fontSize: 12,
               fontWeight: 600,
@@ -537,5 +540,6 @@ export default function LibuvDemo() {
         </div>
       </div>
     </div>
+    </DemoBoundary>
   )
 }

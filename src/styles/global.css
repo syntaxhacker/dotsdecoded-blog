@@ -250,18 +250,22 @@ pre code {
 }
 
 .page {
-  min-height: 100vh;
+  min-height: auto;
+  height: 100vh;
+  height: 100dvh;
   background: var(--bg);
   color: var(--text);
   padding: 0;
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: minmax(180px, 220px) 1fr;
+  overflow: hidden;
 }
 
 .toc {
   position: sticky;
   top: 0;
   height: 100vh;
+  height: 100dvh;
   overflow-y: auto;
   padding: 32px 16px;
   border-right: 1px solid var(--border);
@@ -333,9 +337,25 @@ pre code {
 }
 
 .page-inner {
-  max-width: 840px;
+  max-width: 960px;
   margin: 0 auto;
   padding: 40px 24px 80px;
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
+}
+
+.page-inner::-webkit-scrollbar {
+  width: 4px;
+}
+
+.page-inner::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.page-inner::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
 }
 
 .page-title {
@@ -548,6 +568,7 @@ pre code {
 @media (max-width: 768px) {
   .home {
     grid-template-columns: 1fr;
+    height: auto;
   }
 
   .home-right {
@@ -556,15 +577,24 @@ pre code {
 
   .home-left {
     width: 100%;
+    height: auto;
+  }
+
+  .blog-list {
+    flex: none;
+    overflow-y: visible;
   }
 
   .page {
     grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
   }
 
   .toc {
     position: static;
     width: 100%;
+    height: auto;
     padding: 16px 24px 0;
     background: none;
     border-right: none;
@@ -581,6 +611,24 @@ pre code {
   }
 
   .page-inner {
+    height: auto;
+    overflow-y: visible;
     padding: 0 24px 80px;
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+  .page {
+    grid-template-columns: minmax(140px, 180px) 1fr;
+  }
+
+  .toc {
+    padding: 24px 12px;
+  }
+
+  .page-inner {
+    height: 100vh;
+    height: 100dvh;
+    overflow-y: auto;
   }
 }
