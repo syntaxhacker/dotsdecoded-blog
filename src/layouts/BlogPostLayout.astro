@@ -1,0 +1,41 @@
+---
+import BaseLayout from './BaseLayout.astro'
+
+const { title, date, tags = [], description = '', headings = [] } = Astro.props
+---
+
+<BaseLayout title={`${title} — DotsDecoded`} description={description}>
+  <div class="page">
+    <aside class="toc" id="toc">
+      <a href="/" class="toc-back">&larr; back</a>
+      <nav class="toc-nav" id="toc-nav">
+        {headings.map((h: { id: string; text: string; level: number }) => (
+          <a href={`#${h.id}`} class={`toc-link ${h.level === 3 ? 'toc-h3' : 'toc-h2'}`} data-target={h.id}>
+            {h.text}
+          </a>
+        ))}
+      </nav>
+    </aside>
+    <div class="page-inner">
+      <h1 class="page-title">{title}</h1>
+      <div class="page-meta">
+        <time datetime={date.toISOString()}>
+          {date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+        </time>
+        {tags.length > 0 && (
+          <>
+            <span style="color: var(--text3)">&middot;</span>
+            {tags.map((tag) => (
+              <span class="tag">{tag}</span>
+            ))}
+          </>
+        )}
+      </div>
+      <hr class="page-divider" />
+      <div class="prose">
+        <slot />
+      </div>
+      <hr class="page-divider" />
+    </div>
+  </div>
+</BaseLayout>

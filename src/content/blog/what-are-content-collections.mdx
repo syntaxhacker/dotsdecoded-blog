@@ -1,0 +1,43 @@
+---
+title: "How This Blog Works: Astro Content Collections"
+description: "A behind-the-scenes look at how DotsDecoded serves static HTML with zero JavaScript by default, and loads interactive React demos only when needed."
+date: 2026-03-28
+tags: ["astro", "webdev", "meta"]
+---
+
+Every post on this blog is an MDX file sitting in `src/content/blog/`. That is not an accident -- it is Astro's **content collections** system, and it solves a problem that has plagued developer blogs for years: keeping content consistent, type-safe, and queryable without a database.
+
+In Astro, a content collection is defined by two things: a directory full of Markdown or MDX files, and a schema that validates their frontmatter. Here is the config for this blog's collection:
+
+```typescript
+// src/content/config.ts
+import { defineCollection, z } from 'astro:content';
+
+const blog = defineCollection({
+  type: 'content',
+  schema: z.object({
+    title: z.string(),
+    description: z.string(),
+    date: z.date(),
+    tags: z.array(z.string()),
+    draft: z.boolean().optional(),
+    demo: z.string().optional(),
+  }),
+});
+
+export const collections = { blog };
+```
+
+This schema means every post is guaranteed to have a `title`, `description`, `date`, and `tags`. The `demo` field is optional -- when present, it tells the layout which React component to load for that post's interactive section. If you try to publish a post without a `date`, Astro's build fails with a clear error. This is the kind of mistake that silently slips through on most static site generators.
+
+Astro's **islands architecture** is what makes the performance story work. By default, Astro compiles every MDX file into pure static HTML with zero JavaScript shipped to the browser. Headings, paragraphs, code blocks, lists -- all of it is just HTML. That means the base page weight for a blog post is measured in kilobytes, not megabytes.
+
+Interactive components like the SSH demo only hydrate when instructed. In this blog's layout, demos use the `client:visible` directive:
+
+```astro
+<SshKeysDemo client:visible />
+```
+
+This tells Astro to render the component as static HTML on the server, then send a small JavaScript chunk that only executes when the component scrolls into the viewport. The rest of the page -- all the prose above the demo -- stays as dead-static HTML. The result is a page that loads instantly and only pays the JavaScript tax for the parts that actually need it.
+
+The build output is a set of static files deployed to Cloudflare's edge network. Every visitor hits a cache, not a server. There is no Node runtime, no SSR, no database query, no hydration of content that does not move. The page is just HTML until it is not, and the parts that are not are precisely the parts you interact with.

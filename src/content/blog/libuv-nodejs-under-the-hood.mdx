@@ -1,0 +1,230 @@
+---
+title: "libuv: The Engine That Powers Node.js"
+description: "Every fs.readFile, every HTTP server, every DNS lookup in Node.js goes through libuv. Here's how this C library turns a single thread into a concurrency powerhouse."
+date: 2026-03-31
+tags: ["nodejs", "systems", "concurrency"]
+demo: "LibuvDemo"
+---
+
+import LibuvDemo from '../../components/demos/LibuvDemo'
+
+## What Is libuv?
+
+libuv is a multi-platform C library that provides asynchronous I/O, file system operations, threading, and more. It was originally developed for Node.js but has since become a standalone project used by other runtimes like Deno, Luvit, and Julia.
+
+Node.js itself is essentially: V8 (JavaScript execution) + libuv (event loop and I/O) + a thin C++ binding layer between them.
+
+```c
+// Simplified Node.js architecture
+┌─────────────────────────────────┐
+│          Your JavaScript         │
+├─────────────────────────────────┤
+│       Node.js C++ Bindings       │
+├──────────────────┬──────────────┤
+│       V8         │    libuv     │
+│   (JS Engine)    │  (Event Loop)│
+└──────────────────┴──────────────┘
+```
+
+## The Event Loop
+
+The event loop is libuv's heart. It continuously checks for and processes events: I/O completions, timers, pending callbacks, and more. Despite being single-threaded in JavaScript, libuv manages a pool of OS threads under the hood.
+
+```js
+// This looks synchronous, but it's not
+const fs = require('fs')
+
+fs.readFile('/tmp/data.txt', 'utf8', (err, data) => {
+  // This callback runs later — the thread is free in the meantime
+  console.log(data.length)
+})
+
+console.log('This prints FIRST, even though it is written second')
+```
+
+The event loop has distinct phases, each with its own queue:
+
+```c
+// libuv event loop phases (simplified)
+while (!done) {
+  uv__run_timers(loop);          // 1. Expired setTimeout / setInterval
+  uv__io_poll(loop, timeout);    // 2. Poll for I/O events
+  uv__run_check(loop);           // 3. setImmediate callbacks
+  uv__run_closing_handles(loop); // 4. Close callbacks
+}
+```
+
+Each phase drains its queue before moving to the next. This is why `setImmediate` always fires before `setTimeout(fn, 0)` when both are called inside an I/O callback — `check` runs after `poll`.
+
+## The Thread Pool
+
+Some operations cannot be done asynchronously by the OS itself. File I/O on most platforms, DNS lookups, and compression are blocking at the OS level. libuv handles these with a **thread pool** of 4 workers (configurable via `UV_THREADPOOL_SIZE`).
+
+```bash
+# Increase the thread pool to 8 workers
+UV_THREADPOOL_SIZE=8 node server.js
+```
+
+```js
+const fs = require('fs')
+const crypto = require('crypto')
+
+// These both use the thread pool
+fs.readFile('/large-file.csv', callback)     // file I/O
+crypto.pbkdf2('password', 'salt', 100000, 512, callback) // CPU-bound crypto
+
+// If you run 5+ of these concurrently with the default pool size (4),
+// the 5th operation queues behind the first four
+for (let i = 0; i < 10; i++) {
+  fs.readFile(`/file-${i}.txt`, (err, data) => {
+    console.log(`File ${i} read`)
+  })
+}
+// Output order depends on file sizes, but max 4 run in parallel
+```
+
+This is a common source of confusion. The thread pool is shared across all operations. If you exhaust it with CPU-heavy `crypto.pbkdf2` calls, your `fs.readFile` callbacks will be delayed — even though they seem unrelated.
+
+## File System Operations
+
+libuv uses `uv_fs_t` requests to interact with the file system. On Linux, it uses `epoll` (or `io_uring` in newer versions). On macOS, `kqueue`. On Windows, IOCP.
+
+```js
+const fs = require('fs/promises')
+
+// Async stat — delegates to libuv's thread pool
+const stat = await fs.stat('/etc/hosts')
+console.log(`Size: ${stat.size} bytes`)
+
+// Reading a directory
+const files = await fs.readdir('/tmp')
+console.log(files)
+
+// Watching for changes — uses OS-native file watchers (inotify, FSEvents)
+const watcher = fs.watch('/tmp/project', (eventType, filename) => {
+  console.log(`${eventType}: ${filename}`)
+})
+```
+
+The promise-based `fs/promises` API is just a wrapper around the same libuv calls with callback-to-promise conversion.
+
+## DNS Resolution
+
+DNS is another operation that hits the thread pool. Unlike HTTP (which uses non-blocking sockets), DNS resolution via `dns.lookup()` calls `getaddrinfo()` — a blocking C function.
+
+```js
+const dns = require('dns')
+
+// This uses the thread pool (calls getaddrinfo under the hood)
+dns.lookup('example.com', (err, address, family) => {
+  console.log(address) // '93.184.216.34'
+})
+
+// This uses libuv's own non-blocking DNS resolver (c-ares)
+dns.resolve4('example.com', (err, addresses) => {
+  console.log(addresses) // ['93.184.216.34']
+})
+```
+
+Use `dns.resolve*()` instead of `dns.lookup()` when you need to avoid thread pool contention. The `resolve` family uses the c-ares library for async DNS, bypassing the thread pool entirely.
+
+## TCP and HTTP
+
+Network I/O is where libuv shines without the thread pool. It uses the OS's native non-blocking I/O mechanism — sockets are set to non-blocking mode, and `epoll`/`kqueue` notifies libuv when data is ready.
+
+```js
+const http = require('http')
+
+const server = http.createServer((req, res) => {
+  // This callback fires when the request headers arrive
+  // No thread is blocked waiting for it
+  res.writeHead(200, { 'Content-Type': 'text/plain' })
+  res.end('Hello from libuv\n')
+})
+
+server.listen(3000, () => {
+  console.log('Listening on :3000')
+})
+```
+
+Under the hood, `server.listen()` calls `uv_tcp_bind` + `uv_listen`. Each incoming connection creates a `uv_tcp_t` handle. The socket read/write is entirely event-driven with zero thread pool usage.
+
+```c
+// What libuv is doing behind the scenes
+uv_tcp_t server;
+uv_tcp_init(loop, &server);
+uv_tcp_bind(&server, (const struct sockaddr*)&addr, 0);
+uv_listen((uv_stream_t*)&server, 128, on_new_connection);
+```
+
+## Child Processes
+
+libuv can spawn child processes and communicate with them via pipes, which integrate into the event loop just like network sockets.
+
+```js
+const { exec, spawn } = require('child_process')
+
+// exec: simple one-shot commands, buffers output
+exec('git log --oneline -5', (error, stdout, stderr) => {
+  console.log(stdout)
+})
+
+// spawn: streaming, for long-running processes
+const child = spawn('find', ['/tmp', '-name', '*.log'])
+
+child.stdout.on('data', (data) => {
+  process.stdout.write(data)
+})
+
+child.stderr.on('data', (data) => {
+  process.stderr.write(data)
+})
+
+child.on('close', (code) => {
+  console.log(`Child exited with code ${code}`)
+})
+```
+
+`exec` uses the thread pool internally (it shells out to `/bin/sh`), while `spawn` creates a direct child process with piped stdio that integrates into the event loop without touching the thread pool.
+
+## Signals and Cross-Platform Abstraction
+
+libuv abstracts platform-specific APIs into a uniform interface. Signal handling is a good example:
+
+```js
+process.on('SIGINT', () => {
+  console.log('Graceful shutdown...')
+  server.close()
+  process.exit(0)
+})
+
+// On Linux:  libuv uses signalfd
+// On macOS: libuv uses kqueue EVFILT_SIGNAL
+// On Windows: simulated via console Ctrl events
+```
+
+## When libuv Is Not Enough
+
+libuv handles I/O-bound work beautifully, but CPU-bound work (image processing, data transformation, crypto) still blocks the single JavaScript thread. For that, you need actual parallelism:
+
+```js
+const { Worker, isMainThread, parentPort, workerData } = require('worker_threads')
+
+if (isMainThread) {
+  const worker = new Worker(__filename, {
+    workerData: { start: 1, end: 10_000_000 }
+  })
+  worker.on('message', (result) => console.log('Sum:', result))
+  worker.on('error', (err) => console.error(err))
+} else {
+  let sum = 0
+  for (let i = workerData.start; i <= workerData.end; i++) sum += i
+  parentPort.postMessage(sum)
+}
+```
+
+Worker threads have their own V8 isolate and event loop. They communicate via `MessagePort` — which, naturally, is backed by libuv.
+
+## Try It Yourself
+
+<LibuvDemo client:visible />

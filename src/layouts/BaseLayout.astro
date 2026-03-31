@@ -1,0 +1,84 @@
+---
+const { title = 'DotsDecoded', description = 'Deep dives into systems, tools, and the code that powers them.' } = Astro.props
+import '../styles/global.css'
+---
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content={description} />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <title>{title}</title>
+  <script is:inline>
+    const t = localStorage.getItem('theme')
+    if (t) document.documentElement.setAttribute('data-theme', t)
+    else if (window.matchMedia('(prefers-color-scheme: light)').matches)
+      document.documentElement.setAttribute('data-theme', 'light')
+
+    window.__toggleTheme = function() {
+      const c = document.documentElement.getAttribute('data-theme')
+      const n = c === 'light' ? 'dark' : 'light'
+      document.documentElement.setAttribute('data-theme', n)
+      localStorage.setItem('theme', n)
+    }
+  </script>
+  <script is:inline>
+    document.addEventListener('DOMContentLoaded', function() {
+      var nav = document.getElementById('toc-nav');
+      if (!nav) return;
+      var links = nav.querySelectorAll('.toc-link');
+      if (links.length === 0) return;
+      var ids = [];
+      links.forEach(function(l) {
+        var el = document.getElementById(l.dataset.target);
+        if (el) ids.push(el);
+      });
+      function onScroll() {
+        var active = links[0] ? links[0].dataset.target : '';
+        for (var i = 0; i < ids.length; i++) {
+          if (ids[i].getBoundingClientRect().top <= 32) active = links[i].dataset.target;
+        }
+        for (var i = 0; i < links.length; i++) {
+          if (links[i].dataset.target === active) links[i].classList.add('toc-active');
+          else links[i].classList.remove('toc-active');
+        }
+      }
+      window.addEventListener('scroll', onScroll, { passive: true });
+      onScroll();
+    });
+  </script>
+  <script is:inline>
+    document.addEventListener('DOMContentLoaded', function() {
+      document.querySelectorAll('.prose pre').forEach(function(pre) {
+        var btn = document.createElement('button');
+        btn.className = 'copy-btn';
+        btn.textContent = 'copy';
+        btn.addEventListener('click', function() {
+          var code = pre.querySelector('code');
+          if (!code) return;
+          navigator.clipboard.writeText(code.textContent).then(function() {
+            btn.textContent = 'copied';
+            setTimeout(function() { btn.textContent = 'copy'; }, 1500);
+          });
+        });
+        pre.appendChild(btn);
+      });
+    });
+  </script>
+  <script>
+    import Prism from 'prismjs'
+    import 'prismjs/components/prism-bash'
+    import 'prismjs/components/prism-c'
+    import 'prismjs/components/prism-cpp'
+    import 'prismjs/components/prism-json'
+    import 'prismjs/components/prism-typescript'
+    import 'prismjs/components/prism-python'
+    Prism.highlightAll()
+  </script>
+</head>
+<body>
+  <slot />
+</body>
+</html>
