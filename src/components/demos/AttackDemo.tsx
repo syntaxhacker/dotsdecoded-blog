@@ -1,5 +1,6 @@
 import { useState, useEffect, Fragment, useCallback } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -46,6 +47,7 @@ interface Particle {
 
 function DDoSTab() {
   const [attacking, setAttacking] = useState(false)
+  const [speed, setSpeed] = useState(1)
   const [traffic, setTraffic] = useState(0)
   const [overloaded, setOverloaded] = useState(false)
   const [particles, setParticles] = useState<Particle[]>([])
@@ -78,9 +80,9 @@ function DDoSTab() {
           y: p.y + p.vy,
         }))
       })
-    }, 200)
+    }, getStepDelay(200, speed))
     return () => clearInterval(id)
-  }, [attacking, overloaded])
+  }, [attacking, overloaded, speed])
 
   useEffect(() => {
     if (!attacking) {
@@ -92,14 +94,17 @@ function DDoSTab() {
 
   return (
     <Fragment>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <button onClick={() => setAttacking(a => !a)} style={{
-          background: attacking ? s.red : s.accent, border: 'none', borderRadius: 8,
-          padding: '10px 24px', color: '#fff', cursor: 'pointer', fontSize: 14,
-          fontWeight: 600, fontFamily: s.mono, transition: 'all 0.2s',
-        }}>
-          {attacking ? 'Stop' : 'Start Attack'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button onClick={() => setAttacking(a => !a)} style={{
+            background: attacking ? s.red : s.accent, border: 'none', borderRadius: 8,
+            padding: '10px 24px', color: '#fff', cursor: 'pointer', fontSize: 14,
+            fontWeight: 600, fontFamily: s.mono, transition: 'all 0.2s',
+          }}>
+            {attacking ? 'Stop' : 'Start Attack'}
+          </button>
+          <SpeedController speed={speed} onSpeedChange={setSpeed} />
+        </div>
         <div style={{ ...M, fontSize: 13, color: traffic > 100 ? s.red : s.yellow }}>
           Traffic: {traffic.toFixed(1)} Gbps
         </div>
@@ -140,12 +145,13 @@ function DDoSTab() {
 function SpoofingTab() {
   const [phase, setPhase] = useState(0)
   const [animating, setAnimating] = useState(false)
+  const [speed, setSpeed] = useState(1)
 
   useEffect(() => {
     if (!animating) return
-    const id = setInterval(() => setPhase(p => p + 1), 1000)
+    const id = setInterval(() => setPhase(p => p + 1), getStepDelay(1000, speed))
     return () => clearInterval(id)
-  }, [animating])
+  }, [animating, speed])
 
   useEffect(() => {
     if (phase > 2) setAnimating(false)
@@ -175,6 +181,7 @@ function SpoofingTab() {
         }}>
           Reset
         </button>
+        <SpeedController speed={speed} onSpeedChange={setSpeed} />
       </div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 16 }}>
         <div style={boxStyle(s.red, phase >= 1)}>
@@ -300,6 +307,7 @@ function MitMTab() {
 
 function PortScanTab() {
   const [scanning, setScanning] = useState(false)
+  const [speed, setSpeed] = useState(1)
   const [scanIdx, setScanIdx] = useState(-1)
   const [results, setResults] = useState<{ port: number; name: string; open: boolean }[]>([])
 
@@ -315,9 +323,9 @@ function PortScanTab() {
         setResults(r => [...r, PORTS[next]])
         return next
       })
-    }, 600)
+    }, getStepDelay(600, speed))
     return () => clearInterval(id)
-  }, [scanning])
+  }, [scanning, speed])
 
   const reset = () => { setScanning(false); setScanIdx(-1); setResults([]) }
 
@@ -337,6 +345,7 @@ function PortScanTab() {
         }}>
           Reset
         </button>
+        <SpeedController speed={speed} onSpeedChange={setSpeed} />
       </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 20, justifyContent: 'center' }}>
         {PORTS.map((p, i) => {

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -46,6 +47,7 @@ export default function ConcurrencyDemo() {
   const [locked, setLocked] = useState(false)
   const [running, setRunning] = useState(false)
   const [step, setStep] = useState(-1)
+  const [speed, setSpeed] = useState(1)
 
   const events = locked ? lockEvents : noLockEvents
   const totalSteps = events.length
@@ -65,20 +67,20 @@ export default function ConcurrencyDemo() {
   useEffect(() => {
     if (!running) return
     setStep(-1)
-    const timeout = setTimeout(() => setStep(0), 400)
+    const timeout = setTimeout(() => setStep(0), getStepDelay(400, speed))
     return () => clearTimeout(timeout)
-  }, [running, locked])
+  }, [running, locked, speed])
 
   useEffect(() => {
     if (step < 0 || !running) return
     if (step >= totalSteps - 1) {
-      const t = setTimeout(() => setRunning(false), 300)
+      const t = setTimeout(() => setRunning(false), getStepDelay(300, speed))
       return () => clearTimeout(t)
     }
-    const delay = bBlocked && step === 2 ? 1400 : 800
+    const delay = getStepDelay(bBlocked && step === 2 ? 1400 : 800, speed)
     const t = setTimeout(() => setStep((prev) => prev + 1), delay)
     return () => clearTimeout(t)
-  }, [step, running, totalSteps, bBlocked])
+  }, [step, running, totalSteps, bBlocked, speed])
 
   const reset = () => {
     setRunning(false)
@@ -267,6 +269,7 @@ export default function ConcurrencyDemo() {
           >
             Reset
           </button>
+          <SpeedController speed={speed} onSpeedChange={setSpeed} />
         </div>
 
         {step >= 0 && (

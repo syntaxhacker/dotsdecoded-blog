@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -71,6 +72,7 @@ export default function QueryLifecycleDemo() {
   const [running, setRunning] = useState(false)
   const [execLines, setExecLines] = useState<string[]>([])
   const [visibleRows, setVisibleRows] = useState<number>(0)
+  const [speed, setSpeed] = useState(1)
 
   useEffect(() => {
     if (activeStage !== 2) return
@@ -79,10 +81,10 @@ export default function QueryLifecycleDemo() {
     lines.forEach((line, i) => {
       timers.push(setTimeout(() => {
         setExecLines((prev) => [...prev, line])
-      }, 300 * (i + 1)))
+      }, getStepDelay(300 * (i + 1), speed)))
     })
     return () => timers.forEach(clearTimeout)
-  }, [activeStage])
+  }, [activeStage, speed])
 
   useEffect(() => {
     if (activeStage !== 3) return
@@ -90,10 +92,10 @@ export default function QueryLifecycleDemo() {
     sampleRows.forEach((_, i) => {
       timers.push(setTimeout(() => {
         setVisibleRows((v) => v + 1)
-      }, 250 * (i + 1)))
+      }, getStepDelay(250 * (i + 1), speed)))
     })
     return () => timers.forEach(clearTimeout)
-  }, [activeStage])
+  }, [activeStage, speed])
 
   const handleRun = () => {
     setRunning(true)
@@ -105,9 +107,9 @@ export default function QueryLifecycleDemo() {
       timers.push(setTimeout(() => {
         setActiveStage(i)
         if (i === stages.length - 1) {
-          setTimeout(() => setRunning(false), 1500)
+          setTimeout(() => setRunning(false), getStepDelay(1500, speed))
         }
-      }, 1200 * (i + 1)))
+      }, getStepDelay(1200 * (i + 1), speed)))
     })
   }
 
@@ -297,7 +299,7 @@ export default function QueryLifecycleDemo() {
           </div>
         )}
 
-        <div style={{ padding: '12px 20px 20px', display: 'flex', gap: 10, justifyContent: 'center' }}>
+        <div style={{ padding: '12px 20px 20px', display: 'flex', gap: 10, justifyContent: 'center', alignItems: 'center' }}>
           <button
             onClick={handleRun}
             disabled={running}
@@ -316,6 +318,7 @@ export default function QueryLifecycleDemo() {
           >
             Run Query
           </button>
+          <SpeedController speed={speed} onSpeedChange={setSpeed} />
           <button
             onClick={handleReset}
             style={{

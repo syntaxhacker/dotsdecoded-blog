@@ -155,6 +155,7 @@ const s = {
 - **Defensive array handling**: If a component receives an array prop that might contain undefined elements (e.g., from state updates), guard with `Array.isArray(lines) ? lines.filter(Boolean) : []`
 - **JSX text escaping**: Curly braces inside JSX text content must be escaped: `{'{...}'}` not `{...}` (the latter is interpreted as a JSX expression)
 - **Object keys**: Never use duplicate keys in style objects — esbuild will error on `Duplicate key "fontSize"`
+- **SVG overflow**: Never use `overflow: 'visible'` on SVG elements. Root nodes render at y=0, causing content to bleed above the viewBox. Always add padding to the viewBox (e.g., `viewBox={-40 -30 ${w + 80} ${h + 40}}`) and ensure the outer container has `overflow: 'hidden'`
 
 ## Creating a New Blog Post (Sub-Agent Guide)
 

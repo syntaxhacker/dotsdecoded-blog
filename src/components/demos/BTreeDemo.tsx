@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -192,6 +193,7 @@ export default function BTreeDemo() {
   const [foundResult, setFoundResult] = useState<'found' | 'notfound' | null>(null)
   const [splitFlash, setSplitFlash] = useState(false)
   const [lastSearchReads, setLastSearchReads] = useState(0)
+  const [speed, setSpeed] = useState(1)
 
   const handleInsert = useCallback(() => {
     const val = parseInt(input)
@@ -238,7 +240,7 @@ export default function BTreeDemo() {
           const newCount = countKeys(newTree)
           if (newCount > existingKeysRef.current) {
             setSplitFlash(true)
-            setTimeout(() => setSplitFlash(false), 600)
+            setTimeout(() => setSplitFlash(false), getStepDelay(600, speed))
           }
           setTree(newTree)
         }
@@ -254,9 +256,9 @@ export default function BTreeDemo() {
 
     const timer = setTimeout(() => {
       setAnimStep(prev => prev + 1)
-    }, 700)
+    }, getStepDelay(700, speed))
     return () => clearTimeout(timer)
-  }, [animStep, animPath, mode, input, tree])
+  }, [animStep, animPath, mode, input, tree, speed])
 
   const existingKeysRef = { current: countKeys(tree) }
 
@@ -293,7 +295,7 @@ export default function BTreeDemo() {
 
   return (
     <DemoBoundary name="B-Tree Index">
-      <div style={{ maxWidth: 820, margin: '0 auto', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
+      <div style={{ maxWidth: 820, margin: '0 auto', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", overflow: 'hidden' }}>
         <div style={{ background: s.bg2, borderRadius: 10, border: `1px solid ${s.border}`, overflow: 'hidden' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: `1px solid ${s.border}`, flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', background: s.bg, borderRadius: 6, border: `1px solid ${s.border}` }}>
@@ -394,6 +396,7 @@ export default function BTreeDemo() {
               >
                 Reset
               </button>
+              <SpeedController speed={speed} onSpeedChange={setSpeed} />
             </div>
           </div>
 
@@ -411,7 +414,7 @@ export default function BTreeDemo() {
           )}
 
           <div style={{ padding: '20px 16px', background: splitFlash ? 'rgba(224,176,64,0.06)' : 'transparent', transition: 'background 0.3s' }}>
-            <svg width="100%" viewBox={`0 0 ${svgWidth} ${svgHeight}`} style={{ display: 'block', overflow: 'visible' }}>
+            <svg width="100%" viewBox={`${-40} ${-30} ${svgWidth + 80} ${svgHeight + 40}`} style={{ display: 'block' }}>
               <defs>
                 <filter id="glow">
                   <feGaussianBlur stdDeviation="3" result="blur" />

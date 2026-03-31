@@ -1,5 +1,6 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -36,20 +37,26 @@ const dnsSteps = [
 
 export default function DnsResolutionDemo() {
   const [dnsStep, setDnsStep] = useState(-1)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [speed, setSpeed] = useState(1)
+  const [running, setRunning] = useState(false)
+  const stepRef = useRef(-1)
+
+  useEffect(() => {
+    if (!running) return
+    const id = setInterval(() => {
+      stepRef.current++
+      setDnsStep(stepRef.current)
+      if (stepRef.current >= dnsSteps.length - 1) {
+        setRunning(false)
+      }
+    }, getStepDelay(1200, speed))
+    return () => clearInterval(id)
+  }, [running, speed])
 
   const startAutoplay = () => {
-    if (intervalRef.current) clearInterval(intervalRef.current)
+    stepRef.current = -1
     setDnsStep(-1)
-    let step = -1
-    intervalRef.current = setInterval(() => {
-      step++
-      setDnsStep(step)
-      if (step >= dnsSteps.length - 1 && intervalRef.current) {
-        clearInterval(intervalRef.current)
-        intervalRef.current = null
-      }
-    }, 1200)
+    setRunning(true)
   }
 
   return (
@@ -73,15 +80,16 @@ export default function DnsResolutionDemo() {
           </button>
           <button
             onClick={startAutoplay}
-            disabled={dnsStep >= 0}
+            disabled={running}
             style={{
               background: 'transparent', border: `1px solid ${s.border}`,
-              borderRadius: 8, padding: '8px 16px', color: dnsStep >= 0 ? s.text3 : s.text2,
-              cursor: dnsStep >= 0 ? 'not-allowed' : 'pointer', fontSize: 13, transition: 'all 0.2s',
+              borderRadius: 8, padding: '8px 16px', color: running ? s.text3 : s.text2,
+              cursor: running ? 'not-allowed' : 'pointer', fontSize: 13, transition: 'all 0.2s',
             }}
           >
             Auto-play
           </button>
+          <SpeedController speed={speed} onSpeedChange={setSpeed} />
           {dnsStep >= 0 && (
             <span style={{ ...M, fontSize: 12, color: s.text3 }}>Step {Math.min(dnsStep + 1, dnsSteps.length)} / {dnsSteps.length}</span>
           )}

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -70,6 +71,7 @@ export default function WalDemo() {
   const [shaking, setShaking] = useState(false)
   const [flashRed, setFlashRed] = useState(false)
   const [scanning, setScanning] = useState(false)
+  const [speed, setSpeed] = useState(1)
   const abortRef = useRef(false)
   const timersRef = useRef<number[]>([])
   const rejectRef = useRef<(() => void) | null>(null)
@@ -88,7 +90,7 @@ export default function WalDemo() {
     const t = window.setTimeout(() => {
       rejectRef.current = null
       resolve()
-    }, ms)
+    }, getStepDelay(ms, speed))
     timersRef.current.push(t)
   })
 
@@ -326,7 +328,7 @@ export default function WalDemo() {
           }} />
         )}
 
-        <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
           <button onClick={runNormal} disabled={running} style={{
             padding: '8px 18px', background: running ? s.bg3 : s.accent, color: s.text,
             border: 'none', borderRadius: 6, cursor: running ? 'not-allowed' : 'pointer',
@@ -341,6 +343,7 @@ export default function WalDemo() {
           }}>
             Simulate Crash
           </button>
+          <SpeedController speed={speed} onSpeedChange={setSpeed} />
           <button onClick={reset} style={{
             padding: '8px 18px', background: s.bg3, color: s.text2,
             border: `1px solid ${s.border}`, borderRadius: 6, cursor: 'pointer', fontSize: 14,

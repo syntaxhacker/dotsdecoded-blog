@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -35,6 +36,8 @@ export default function FileVsDatabaseDemo() {
   const [dbStep, setDbStep] = useState(-1)
   const scanRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const dbRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const [speed, setSpeed] = useState(1)
+  const scanStateRef = useRef({ cur: 0, vi: 0 })
 
   const foundAt = Math.floor(count * 0.6)
 
@@ -47,10 +50,10 @@ export default function FileVsDatabaseDemo() {
 
   useEffect(() => {
     if (phase === 'searching' && found && dbStep >= 2) {
-      const t = setTimeout(() => setPhase('complete'), 500)
+      const t = setTimeout(() => setPhase('complete'), getStepDelay(500, speed))
       return () => clearTimeout(t)
     }
-  }, [phase, found, dbStep])
+  }, [phase, found, dbStep, speed])
 
   const doSearch = useCallback(() => {
     if (phase !== 'idle') return
@@ -59,40 +62,11 @@ export default function FileVsDatabaseDemo() {
     setHlRow(-1)
     setFound(false)
     setDbStep(-1)
-    if (scanRef.current) clearInterval(scanRef.current)
-    dbRef.current.forEach(clearTimeout)
-    dbRef.current = []
-
-    const dur = Math.min(6000, Math.max(1500, 1500 + Math.log10(Math.max(10, count / 100)) * 1500))
-    const tick = 25
-    const totalTicks = Math.ceil(dur / tick)
-    const inc = Math.max(1, Math.ceil(count / totalTicks))
-    let cur = 0
-    let vi = 0
-
-    scanRef.current = setInterval(() => {
-      cur += inc
-      vi = (vi + 1) % 8
-      if (cur >= foundAt) {
-        setScanned(foundAt)
-        setHlRow(TARGET)
-        setFound(true)
-        if (scanRef.current) { clearInterval(scanRef.current); scanRef.current = null }
-        return
-      }
-      setScanned(cur)
-      setHlRow(vi)
-    }, tick)
-
-    dbRef.current = [
-      setTimeout(() => setDbStep(0), 200),
-      setTimeout(() => setDbStep(1), 700),
-      setTimeout(() => setDbStep(2), 1200),
-    ]
-  }, [phase, count, foundAt])
+    scanStateRef.current = { cur: 0, vi: 0 }
+  }, [phase])
 
   const doReset = () => {
-    if (scanRef.current) clearInterval(scanRef.current)
+    if (scanRef.current) { clearInterval(scanRef.current); scanRef.current = null }
     dbRef.current.forEach(clearTimeout)
     dbRef.current = []
     setPhase('idle')
@@ -101,6 +75,49 @@ export default function FileVsDatabaseDemo() {
     setFound(false)
     setDbStep(-1)
   }
+
+  useEffect(() => {
+    if (phase !== 'searching' || found) {
+      if (scanRef.current) { clearInterval(scanRef.current); scanRef.current = null }
+      return
+    }
+    if (scanRef.current) clearInterval(scanRef.current)
+    const dur = Math.min(6000, Math.max(1500, 1500 + Math.log10(Math.max(10, count / 100)) * 1500))
+    const tick = getStepDelay(25, speed)
+    const totalTicks = Math.ceil(dur / tick)
+    const inc = Math.max(1, Math.ceil(count / totalTicks))
+    scanRef.current = setInterval(() => {
+      const st = scanStateRef.current
+      st.cur += inc
+      st.vi = (st.vi + 1) % 8
+      if (st.cur >= foundAt) {
+        setScanned(foundAt)
+        setHlRow(TARGET)
+        setFound(true)
+        if (scanRef.current) { clearInterval(scanRef.current); scanRef.current = null }
+        return
+      }
+      setScanned(st.cur)
+      setHlRow(st.vi)
+    }, tick)
+    return () => {
+      if (scanRef.current) { clearInterval(scanRef.current); scanRef.current = null }
+    }
+  }, [phase, speed, found, count, foundAt])
+
+  useEffect(() => {
+    if (phase !== 'searching') return
+    dbRef.current.forEach(clearTimeout)
+    dbRef.current = [
+      setTimeout(() => setDbStep(0), getStepDelay(200, speed)),
+      setTimeout(() => setDbStep(1), getStepDelay(700, speed)),
+      setTimeout(() => setDbStep(2), getStepDelay(1200, speed)),
+    ]
+    return () => {
+      dbRef.current.forEach(clearTimeout)
+      dbRef.current = []
+    }
+  }, [phase, speed])
 
   const fileMs = count * 0.01
   const fileLabel = fileMs >= 1000 ? `${(fileMs / 1000).toFixed(1)} s` : `${fileMs.toFixed(1)} ms`
@@ -164,6 +181,7 @@ export default function FileVsDatabaseDemo() {
               }}>
               {phase === 'idle' ? 'Search' : phase === 'searching' ? 'Searching...' : 'Reset'}
             </button>
+            <SpeedController speed={speed} onSpeedChange={setSpeed} />
           </div>
         </div>
 

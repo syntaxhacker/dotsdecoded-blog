@@ -1,5 +1,6 @@
 import { useState, useEffect, Fragment } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -32,6 +33,7 @@ const netNodes = [
 
 export default function NatSimulationDemo() {
   const [sending, setSending] = useState(false)
+  const [speed, setSpeed] = useState(1)
   const [packetStep, setPacketStep] = useState(0)
 
   useEffect(() => {
@@ -39,9 +41,9 @@ export default function NatSimulationDemo() {
     setPacketStep(1)
     const t = setInterval(() => {
       setPacketStep(p => { if (p >= 4) { clearInterval(t); setSending(false); return 4 } return p + 1 })
-    }, 900)
+    }, getStepDelay(900, speed))
     return () => clearInterval(t)
-  }, [sending])
+  }, [sending, speed])
 
   return (
     <DemoBoundary name="NAT Simulation">
@@ -52,7 +54,7 @@ export default function NatSimulationDemo() {
           When your device sends data to the internet, it passes through your router which performs NAT,
           replacing your private IP with a public one so the response can find its way back.
         </p>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
           <button onClick={() => { if (sending) return; setPacketStep(0); setSending(true) }} disabled={sending} style={{
             background: sending ? s.border2 : s.accent, border: 'none', borderRadius: 8,
             padding: '8px 20px', color: sending ? s.text3 : '#fff', cursor: sending ? 'not-allowed' : 'pointer',
@@ -60,6 +62,7 @@ export default function NatSimulationDemo() {
           }}>
             {sending ? 'Transmitting...' : packetStep === 4 ? 'Send Again' : 'Send Packet'}
           </button>
+          <SpeedController speed={speed} onSpeedChange={setSpeed} />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 0 }}>
           {netNodes.map((node, i) => (
