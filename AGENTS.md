@@ -30,7 +30,7 @@ src/
     BlogPostLayout.astro     # TOC sidebar + content area
   components/demos/
     index.ts                 # Barrel export for all demo components
-    *.tsx                    # Interactive demo components
+    *.tsx                    # Small, focused interactive demo components
   pages/
     index.astro              # Home: blog list + search
     blog/[...slug].astro     # Dynamic blog post page
@@ -48,7 +48,7 @@ Frontmatter fields:
 - `date` (coerced to Date, required)
 - `tags` (string array, default [])
 - `draft` (boolean, default false) — draft posts are excluded from build
-- `demo` (string, optional) — name of the demo component class
+- `image` (string, optional) — path to custom OG image in `public/`, defaults to `/og-default.svg`
 
 ## Blog Post Rules
 
@@ -57,9 +57,56 @@ Frontmatter fields:
 3. Use `##` (h2) and `###` (h3) headings for TOC — h1 is the page title
 4. Code blocks use standard markdown fenced blocks with language tags (`js`, `bash`, `c`, `python`, `json`, `typescript`, `cpp`)
 5. Prism auto-highlights all `<code>` blocks. Supported languages are imported in BaseLayout.astro — add new ones there if needed
-6. If the post has a demo, import it at the top of the MDX and render with `<DemoName client:visible />` in a `## Try It Yourself` section at the bottom
-7. Inline code uses single backticks. Code blocks use triple backticks with language tag
-8. Keep paragraphs concise. Technical depth over verbosity
+6. Inline code uses single backticks. Code blocks use triple backticks with language tag
+7. Keep paragraphs concise. Technical depth over verbosity
+8. Assume zero knowledge — explain concepts with analogies before diving into technical details
+9. Each major section should have an interactive demo placed inline immediately after the relevant heading
+
+## Demo Architecture
+
+Each blog post uses **multiple small, focused demo components** placed inline throughout the post — one per concept or section. This is NOT a single monolithic demo at the bottom.
+
+### Why Small Inline Demos
+
+- Each demo lives right next to the text it illustrates — the reader learns and immediately interacts
+- Small components are easier to create, review, and debug
+- Sub-agents can work on individual demos in parallel without conflicts
+- Each demo is self-contained — no shared state or cross-demo dependencies
+
+### Inline Demo Placement
+
+Import all demos at the top of the MDX file and place them with `client:visible` right after the relevant heading:
+
+```mdx
+import IpOctetsDemo from '../../components/demos/IpOctetsDemo'
+import CidrSubnetDemo from '../../components/demos/CidrSubnetDemo'
+
+## IPv4 Structure
+
+Explanation text here...
+
+<IpOctetsDemo client:visible />
+
+## Subnetting
+
+More explanation...
+
+<CidrSubnetDemo client:visible />
+```
+
+### Naming Convention
+
+Format: `TopicActionDemo.tsx` where Topic matches the blog post subject and Action describes what the demo does.
+
+Examples:
+- `IpOctetsDemo.tsx` — click octets to see binary
+- `CidrSubnetDemo.tsx` — drag slider to explore subnets
+- `DnsResolutionDemo.tsx` — step through DNS lookup
+- `NatSimulationDemo.tsx` — watch packet travel through NAT
+- `PortExplorerDemo.tsx` — explore ports per connection type
+- `JourneyDemo.tsx` — animate the full request journey
+- `AttackDemo.tsx` — interact with different attack types
+- `TraceDemo.tsx` — trace an IP through the evidence chain
 
 ## Demo Component Rules
 
@@ -67,7 +114,8 @@ Frontmatter fields:
 2. Must be a default export React component
 3. Must be exported from `src/components/demos/index.ts` barrel file
 4. Self-contained — all styles are inline (no CSS modules, no Tailwind classes)
-5. Use the shared theme object `s` at the top of the file for consistent colors:
+5. Each demo has its own copy of the shared theme object `s` and any utility functions it needs (no shared imports between demos)
+6. Use the shared theme object `s` at the top of the file for consistent colors:
 
 ```ts
 const s = {
@@ -89,14 +137,45 @@ const s = {
 }
 ```
 
-6. Only import from `react` — no external libraries
-7. Max width container: `maxWidth: 600` on root div
-8. Font family on root: `fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"`
-9. Use `s.mono` for any monospace text
-10. Interactive elements should have clear visual feedback (hover states, active states, transitions)
-11. Include an educational explanation section at the bottom of the demo if the interaction needs context
-12. No comments in code
-13. Rendered in MDX with `<DemoName client:visible />`
+7. Only import from `react` — no external libraries
+8. Max width container: `maxWidth: 820` on root div
+9. Font family on root: `fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"`
+10. Use `s.mono` for any monospace text
+11. Interactive elements should have clear visual feedback (hover states, active states, transitions)
+12. Use `useState` for UI state, `useEffect` for animations
+13. No comments in code
+14. No emoji in UI text
+15. Rendered in MDX with `<DemoName client:visible />`
+
+## Creating a New Blog Post (Sub-Agent Guide)
+
+When asked to create a new blog post, follow this workflow:
+
+### Step 1: Plan the post structure
+
+1. Choose a topic and outline 8-15 sections (h2 and h3 headings)
+2. Identify which sections would benefit from interactive demos (typically 6-10 per post)
+3. List the demo names and what each should do
+
+### Step 2: Write the blog post MDX
+
+1. Create `src/content/blog/topic-slug.mdx` with proper frontmatter
+2. Import all demo components at the top
+3. Write each section with explanation first, then place the demo inline after it
+4. Use analogies and real-world examples before technical details
+5. Include code blocks with proper language tags for Prism highlighting
+
+### Step 3: Create demo components
+
+1. Create each demo as a separate file in `src/components/demos/`
+2. Each demo is fully self-contained with its own `s` object and utilities
+3. Keep each demo focused on ONE concept — if it does too much, split it
+4. Add to barrel file `src/components/demos/index.ts`
+
+### Step 4: Verify
+
+1. Run `bun run build` to check for errors
+2. Do NOT run dev commands
 
 ## Astro v6 Gotchas
 
@@ -107,16 +186,35 @@ const s = {
 - Non-inline `<script>` tags get hoisted/bundled by Astro (run after DOM ready — fine for Prism)
 - `is:inline` scripts in `<head>` survive Cloudflare adapter. Scripts in `<body>` of layouts get stripped
 
-## Cloudflare Adapter
+## Deployment
 
-Currently disabled (crashes on Node v24 due to miniflare EPIPE). Config uses `output: 'static'`.
-To re-enable for deployment, switch to `adapter: cloudflare()` from `@astrojs/cloudflare`.
+- **Platform**: Cloudflare Pages (dashboard Git integration)
+- **Output**: Static (`output: 'static'` in astro.config.mjs)
+- **Build command**: `bun run build` (runs `astro build && bun x pagefind --site dist`)
+- **Build output directory**: `dist` (set in Cloudflare dashboard)
+- **Node version**: 22 (set via `NODE_VERSION` env var in dashboard)
+- **No GitHub Actions** — deployment is handled entirely by the dashboard Git integration on push to `main`
+- The Cloudflare adapter is NOT used — it crashes on Node v22+ due to miniflare EPIPE
 
 ## Adding a New Prism Language
 
 1. Install if needed (most are bundled with prismjs)
 2. Add `import 'prismjs/components/prism-LANG'` in BaseLayout.astro's Prism `<script>` block
 3. Use the language tag in fenced code blocks: ````LANG`
+
+## Open Graph Meta Tags
+
+Every page automatically gets OG and Twitter Card meta tags via `BaseLayout.astro`:
+
+- `og:title`, `og:description`, `og:type`, `og:url`, `og:image`, `og:site_name`, `og:locale`
+- `twitter:card` (summary_large_image), `twitter:title`, `twitter:description`, `twitter:image`
+- `<link rel="canonical">` for SEO
+
+Blog posts additionally get `article:published_time` and `article:tag` meta tags.
+
+The `site` URL is configured in `astro.config.mjs` (currently `https://dotsdecoded-blog.pages.dev`).
+
+Default OG image is `public/og-default.svg`. Posts can override with a custom image via the `image` frontmatter field.
 
 ## Copy Button
 
@@ -136,4 +234,4 @@ Defined in `src/styles/global.css` under `:root` and `[data-theme="light"]`:
 
 - `lil-gui` in devDependencies (no longer used)
 - `.home-right` CSS rules in global.css (home is single-column now)
-- `@astrojs/cloudflare` in dependencies (disabled but still installed)
+- `@astrojs/cloudflare` in dependencies (adapter removed, static output used instead)

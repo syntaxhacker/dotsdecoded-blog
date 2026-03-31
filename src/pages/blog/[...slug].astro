@@ -24,6 +24,6 @@ while ((m = re.exec(body)) !== null) {
 }
 ---
 
-<BlogPostLayout title={post.data.title} date={post.data.date} tags={post.data.tags} description={post.data.description} headings={headings}>
+<BlogPostLayout title={post.data.title} date={post.data.date} tags={post.data.tags} description={post.data.description} headings={headings} image={post.data.image}>
   <Content />
 </BlogPostLayout>
