@@ -1005,7 +1005,7 @@ function Section({ number, title, children }: { number: number; title: string; c
 export default function SshKeysDemo() {
   return (
     <div style={{
-      maxWidth: 720,
+      maxWidth: 820,
       margin: '0 auto',
       fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       color: s.text,

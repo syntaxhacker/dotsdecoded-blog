@@ -3,10 +3,19 @@ title: "IP Addresses Explained: From Octets to Subnets"
 description: "Every device on the internet has an IP address, but what do those numbers actually mean? Learn about IPv4, IPv6, subnetting, CIDR, DNS, NAT, ports, and packets — with interactive demos."
 date: 2026-03-30
 tags: ["networking", "tcp/ip", "fundamentals"]
-demo: "IpAddressDemo"
 ---
 
-import IpAddressDemo from '../../components/demos/IpAddressDemo'
+import IpOctetsDemo from '../../components/demos/IpOctetsDemo'
+import IpV4V6Demo from '../../components/demos/IpV4V6Demo'
+import CidrSubnetDemo from '../../components/demos/CidrSubnetDemo'
+import PublicPrivateIpDemo from '../../components/demos/PublicPrivateIpDemo'
+import PortExplorerDemo from '../../components/demos/PortExplorerDemo'
+import PacketStructureDemo from '../../components/demos/PacketStructureDemo'
+import DnsResolutionDemo from '../../components/demos/DnsResolutionDemo'
+import NatSimulationDemo from '../../components/demos/NatSimulationDemo'
+import JourneyDemo from '../../components/demos/JourneyDemo'
+import AttackDemo from '../../components/demos/AttackDemo'
+import TraceDemo from '../../components/demos/TraceDemo'
 
 ## What Is an IP Address?
 
@@ -62,6 +71,8 @@ When a router receives a packet, it extracts the destination IP and compares it 
 
 Understanding binary is the key to understanding everything else: subnetting, CIDR, and how routers make decisions.
 
+<IpOctetsDemo client:visible />
+
 ## IPv6: The 128-Bit Future
 
 IPv6 expands the address space to 128 bits, providing 2^128 possible addresses. How big is that?
@@ -99,6 +110,8 @@ Most of the internet still runs dual-stack (both IPv4 and IPv6 simultaneously). 
 - The cost of upgrading infrastructure across the entire internet is enormous
 
 The transition has been happening for over 25 years and is still not complete. In many regions, IPv6 adoption is above 50%, but traffic volume varies.
+
+<IpV4V6Demo client:visible />
 
 ## Subnetting: Dividing the Network
 
@@ -141,6 +154,8 @@ The ones are the network bits, the zeros are the host bits. A simple bitwise AND
 
 Your home router almost certainly hands out addresses in the `192.168.1.0/24` range, giving you 254 usable host addresses. Why 254 and not 256? Because `.0` is reserved as the **network identifier** and `.255` is the **broadcast address** (used to send a message to every device on the subnet simultaneously).
 
+<CidrSubnetDemo client:visible />
+
 ## Public vs Private Addresses
 
 Not every device needs a globally routable address. If every phone, laptop, and smart fridge needed a unique public IP, IPv4 would have run out decades sooner.
@@ -169,6 +184,8 @@ Not all addresses are used to identify devices. Some have special meanings:
 
 The loopback address `127.0.0.1` (often just called "localhost") is special — traffic sent to it never leaves your machine. It is used for development, testing, and services that only need to communicate locally.
 
+<PublicPrivateIpDemo client:visible />
+
 ## Ports: The Apartment Numbers
 
 An IP address gets data to the right **device**, but a device runs many applications simultaneously. Your browser, your email client, your music app — they all need network access at the same time. How does the OS know which application should receive an incoming packet?
@@ -192,6 +209,8 @@ When your browser connects to `93.184.216.34:443`, it is connecting to a specifi
 
 When you make an outbound connection, your OS assigns a random **ephemeral port** (typically in the range 32768-65535) as the source port, so the response knows where to come back to.
 
+<PortExplorerDemo client:visible />
+
 ## Packets: How Data Actually Travels
 
 Data does not travel across the internet as a continuous stream. It is broken into small chunks called **packets**, each wrapped in headers that contain the source IP, destination IP, source port, destination port, and other metadata.
@@ -206,6 +225,8 @@ On the internet:
 4. Each router along the way reads the destination IP and forwards the packet closer to the destination
 5. The receiving server reassembles the packets in order using the sequence numbers
 6. The server sends a response, and the whole process happens in reverse
+
+<PacketStructureDemo client:visible />
 
 ## DNS: The Internet Phonebook
 
@@ -233,6 +254,8 @@ The result is cached at each layer, so most queries never travel the full chain.
 | NS    | Authoritative nameserver                   | `dotsdecoded.com → ns1.cloudflare.com` |
 | TXT  | Arbitrary text (SPF, DKIM, verification)  | `v=spf1 include:_spf.google.com ~all` |
 
+<DnsResolutionDemo client:visible />
+
 ## NAT: Making Private Addresses Work
 
 NAT (Network Address Translation) is how your home router connects all your private devices to the internet using a single public IP. It is the single most important reason IPv4 has survived this long.
@@ -256,8 +279,229 @@ This works well for outbound connections. Inbound connections (someone on the in
 - **Dynamic NAT (PAT / SNAT)** — Many private IPs share one public IP, distinguished by port numbers. This is what home routers use.
 - **Carrier-Grade NAT (CGNAT)** — Your ISP itself runs NAT, sharing public IPs among thousands of customers. This is increasingly common and breaks things like peer-to-peer connections.
 
-## Interactive Demos
+<NatSimulationDemo client:visible />
 
-The demos below let you explore these concepts hands-on. Click octets to see binary, drag the CIDR slider to explore subnetting, trace a DNS lookup step by step, and watch a packet travel through NAT.
+## The Journey: From Your Device to the Internet
 
-<IpAddressDemo client:visible />
+What actually happens when you type `https://dotsdecoded.com` into your browser and press Enter? Here is the complete journey, step by step, from your device to a server potentially on the other side of the planet.
+
+### Step 1: DNS Resolution (milliseconds)
+
+Before your browser can connect to anything, it needs to know the IP address of `dotsdecoded.com`. Your OS checks its local cache first. If it is a miss, the request goes to your configured DNS resolver (usually your router, then your ISP's resolver, then a public resolver like `1.1.1.1` or `8.8.8.8`). The recursive resolver walks the chain: root → `.com` TLD → authoritative nameserver → returns the A record (`104.21.76.8`). This typically takes 20-100ms on a warm cache, or up to 500ms on a cold lookup.
+
+### Step 2: TCP Handshake (1-3 round trips)
+
+Now your browser knows the server's IP. It needs to establish a reliable connection. TCP (Transmission Control Protocol) does this with a three-way handshake:
+
+```
+You  →  SYN      →  Server    "I want to talk to you"
+You  ←  SYN+ACK  ←  Server    "OK, I acknowledge, let's talk"
+You  →  ACK      →  Server    "Great, here comes the data"
+```
+
+Each arrow is a packet traveling across the internet. On a local connection, this takes 1-2ms. If the server is in another continent, it can take 100-300ms per round trip.
+
+### Step 3: TLS Handshake (2 round trips)
+
+Since the URL starts with `https://`, the browser must establish an encrypted connection before sending any data. TLS (Transport Layer Security) negotiates encryption:
+
+```
+You  →  ClientHello        →  Server   "Here are the cipher suites I support"
+You  ←  ServerHello        ←  Server   "I picked this cipher, here's my certificate"
+You  ←  Certificate        ←  Server   "This proves I am really dotsdecoded.com"
+You  →  Key Exchange       →  Server   "Here's my pre-master secret (encrypted)"
+You  ←  Finished           ←  Server   "Encryption is ready, start sending data"
+```
+
+The server presents an X.509 certificate signed by a Certificate Authority (like Let's Encrypt, DigiCert, or GlobalSign). Your browser verifies the certificate chain: it checks that the CA is trusted, the certificate has not expired, and the domain name matches. If any check fails, you see the "Your connection is not private" warning.
+
+### Step 4: The HTTP Request
+
+Encryption is established. Your browser sends the actual request:
+
+```
+GET / HTTP/1.1
+Host: dotsdecoded.com
+User-Agent: Mozilla/5.0 ...
+Accept: text/html
+Accept-Encoding: gzip, br
+Connection: keep-alive
+```
+
+This packet travels through your Wi-Fi to your router, through your ISP's network, across internet backbone cables (often undersea fiber), through multiple routers (typically 10-20 hops), until it reaches the server.
+
+### Step 5: Routing Through the Internet
+
+At each hop, a router makes a forwarding decision:
+
+1. Read the destination IP from the packet header
+2. Look up the destination in its routing table
+3. Forward the packet to the next hop (another router or the final destination)
+
+Routers do not look at ports, payload, or application data — they only care about the destination IP. This is why the internet scales: routers are simple forwarding engines.
+
+Your packet might pass through equipment like this:
+
+```
+Your Wi-Fi router
+  → ISP aggregation point
+    → ISP core router
+      → Internet exchange point (IXP)
+        → Transit provider's backbone
+          → Data center edge router
+            → Server load balancer
+              → Application server (104.21.76.8)
+```
+
+Each hop adds roughly 1-5ms of latency. A typical cross-country path has 12-18 hops.
+
+### Step 6: Server Response
+
+The server processes the request, generates the HTML, and sends it back. Large responses are split across many TCP segments. The TCP protocol guarantees reliable, ordered delivery — if a packet is lost, the receiver requests a retransmission. This all happens transparently; your browser just sees a continuous stream of data.
+
+### Step 7: Rendering
+
+Your browser receives the HTML, parses it, discovers CSS and JavaScript files, makes additional requests for those assets (each following the same process), and renders the page. From your perspective, this all happens in under a second.
+
+<JourneyDemo client:visible />
+
+## How Attackers Use IP Addresses
+
+IP addresses are public information. Anyone can see them, and attackers use this to their advantage. Understanding how attacks work is the first step to defending against them.
+
+### IP Address Reconnaissance
+
+An attacker targeting a specific organization typically starts by discovering its IP addresses. Common techniques:
+
+- **DNS enumeration** — Using `dig`, `nslookup`, or tools like `subfinder` to find all DNS records for a domain. This reveals IP addresses of web servers, mail servers, DNS servers, and more.
+- **Reverse DNS** — Given an IP address, looking up the associated domain name. Many servers host multiple domains on the same IP.
+- **WHOIS lookup** — Querying the regional internet registry (ARIN, RIPE, APNIC, etc.) to find out who owns an IP address block. This reveals the organization name, contact info, and the range of addresses they control.
+- **BGP data** — Looking at Border Gateway Protocol routing tables to see which networks an organization advertises. Services like Hurricane Electric's BGP Toolkit make this publicly accessible.
+- **Scanning** — Using tools like `nmap` to probe IP ranges for open ports and running services. A full internet scan takes only minutes with modern tools.
+
+```bash
+# Example: basic reconnaissance
+dig dotsdecoded.com ANY          # DNS records
+whois 104.21.76.8              # Who owns this IP?
+nslookup -type=MX gmail.com     # Find mail servers
+nmap -sS -p 1-1000 104.21.76.8 # Scan top 1000 ports
+```
+
+### Common Attack Vectors
+
+**DDoS (Distributed Denial of Service)**
+
+The most common IP-based attack. An attacker floods a target IP with more traffic than it can handle, making the service unavailable to legitimate users. This is "distributed" because it comes from thousands or millions of compromised devices (a botnet), making it nearly impossible to block by filtering a single source IP.
+
+```
+Attacker
+  → Botnet (100,000 compromised IoT devices)
+    → Target server at 104.21.76.8
+       (overwhelmed: 100 Gbps of garbage traffic)
+```
+
+Major DDoS attacks have exceeded 1 Tbps (terabit per second). Cloudflare, AWS Shield, and Google Cloud Armor provide DDoS mitigation by absorbing traffic at the network edge before it reaches the target.
+
+**IP Spoofing**
+
+An attacker can forge the source IP address in a packet header. The destination server sees a fake source IP and sends its response to an innocent third party. This is used in:
+
+- **Reflection attacks** — sending a request to a third-party server with the victim's IP as the source. The server's response (which is much larger than the request) floods the victim.
+- **Amplification attacks** — using services like DNS or NTP that return large responses to small requests. A 60-byte DNS query can trigger a 4,000-byte response — a 66x amplification factor.
+
+```
+Attacker (spoofed source: victim's IP)
+  → DNS resolver: "give me EVERYTHING for isc.org"
+  → Victim receives massive DNS response (amplified traffic)
+```
+
+IP spoofing only works with connectionless protocols (UDP). TCP requires the three-way handshake, so spoofing a TCP source is ineffective — the SYN-ACK goes to the spoofed address, not the attacker.
+
+**Man-in-the-Middle (MitM)**
+
+If an attacker can position themselves between you and the server (on the same Wi-Fi network, or by compromising a router), they can intercept and modify traffic. They can see every IP address, port, and packet you send. This is why HTTPS is critical — even if traffic is intercepted, TLS encryption prevents the attacker from reading the payload.
+
+On public Wi-Fi, this is a real risk. An attacker runs a fake access point with the same name as the legitimate one (an "evil twin"), and your phone connects to it automatically. Everything you send passes through their machine.
+
+**Port Scanning and Exploitation**
+
+Once an attacker knows your IP and open ports, they probe for vulnerable services:
+
+- Open port 22 (SSH) → try brute-force passwords or known exploits
+- Open port 3306 (MySQL) → try default credentials or SQL injection
+- Open port 80/443 → look for web application vulnerabilities
+- Open port 445 (SMB) → try EternalBlue (the WannaCry exploit)
+
+This is why firewalls exist — they block all ports except the ones you explicitly allow.
+
+### What Attackers Cannot Do With Just an IP Address
+
+There is a lot of fear-mongering about IP addresses, but there are strict limits:
+
+- **They cannot get your physical address** — your IP gives your approximate city-level location (from WHOIS/geolocation databases), not your house. Your ISP knows the mapping, but they do not share it.
+- **They cannot hack you just from your IP** — an IP address alone is not enough to compromise a device. They still need a vulnerability in a running service.
+- **They cannot steal your data** — HTTPS encrypts everything in transit. Even if they see the packets, they cannot read them.
+- **They cannot access your webcam, microphone, or files** — not from an IP address alone.
+
+<AttackDemo client:visible />
+
+## How Authorities Trace Illegal Activity
+
+Every packet on the internet carries a source IP address. This is fundamental to how the protocol works — without it, responses could not be routed back. This same property that makes the internet function also makes it possible to trace illegal activity.
+
+### The Chain of Evidence
+
+When a cybercrime is committed, investigators work backwards from the victim to the perpetrator:
+
+```
+Victim's server logs
+  → Attacker's public IP (from HTTP/DNS/SSH logs)
+    → ISP that owns that IP (from WHOIS/RIR databases)
+      → ISP's internal logs (which customer had that IP at that time?)
+        → Customer's physical address (from account records)
+          → Law enforcement subpoena/warrant
+```
+
+**Server logs** record the source IP of every connection. If someone attacks a website, the web server logs contain the attacker's IP. If someone sends a threatening email, the mail server logs contain the connecting IP.
+
+**ISP logs** are the critical link. ISPs maintain records of which customer was assigned which IP address at any given time. For residential connections with dynamic IPs, this changes frequently (sometimes every few hours). ISPs are legally required to retain these logs for a period that varies by jurisdiction (6 months to 2 years in most countries).
+
+### Legal Framework
+
+Tracing an IP address to a person requires legal process:
+
+1. **Log preservation request** — Law enforcement asks the ISP to preserve logs for a specific IP before they are overwritten. This can be done quickly, often within hours.
+2. **Subpoena or court order** — Compels the ISP to reveal the customer information associated with an IP address at a specific date and time. This requires judicial approval.
+3. **Search warrant** — If there is probable cause, a judge can authorize a search of the suspect's devices.
+
+This process exists in every country, though the specifics vary:
+
+| Jurisdiction | Data Retention | Legal Process |
+|-------------|---------------|---------------|
+| United States | 6-18 months | Subpoena (27 USC 2703) |
+| European Union | 6-12 months (varies) | National court order |
+| United Kingdom | 12 months | RIPA/SIPA court order |
+| Australia | 2 years | Telecommunications Act warrant |
+
+### VPNs and Anonymization
+
+VPNs (Virtual Private Networks) add a layer of indirection: your traffic goes to the VPN server first, then the VPN forwards it to the destination. The target server sees the VPN's IP, not yours. But this is not a magic shield:
+
+- **VPN providers keep logs** — Most commercial VPNs log connection timestamps, bandwidth usage, and sometimes the source IP. If law enforcement requests this data, the VPN provider must comply (in their jurisdiction).
+- **No-log VPNs are harder to trace** — Providers like Mullvad and ProtonVPN claim to keep no logs. Without logs, there is nothing to hand over. But traffic analysis (timing, volume, destination patterns) can sometimes still correlate activity.
+- **Tor adds more layers** — The Tor network routes traffic through three encrypted relays. The exit node's IP is what the target sees. But exit nodes can be monitored, and traffic analysis attacks can de-anonymize users over time.
+- **Operationals security matters more than the tool** — Using a VPN does not help if you log into a personal account, use your real name, or make a mistake in operational security.
+
+### Real-World Examples
+
+**LulzSec (2011)** — The hacker group LulzSec breached several organizations. They were caught because one member, Hector Monsegur ("Sabu"), used his real IP address when connecting to an IRC chat server without Tor. FBI agents correlated the IP with his Comcast account, identified his address, and turned him into an informant.
+
+**Silk Road (2013)** — Ross Ulbricht operated the darknet marketplace Silk Road. Despite using Tor, he made operational security mistakes: he used his real name in early forum posts, logged into Gmail from a VPN that leaked his real IP, and posted on Stack Overflow from an IP linked to his home. The FBI traced him through a combination of these slip-ups.
+
+**AlphaBay (2017)** — The largest darknet marketplace was taken down when law enforcement identified the server's real IP address. The site had a misconfigured CAPTCHA that made a direct request to a server without going through Tor, leaking the IP.
+
+The pattern is consistent: **anonymity is broken by mistakes, not by breaking encryption**. The technical tools (Tor, VPNs, encryption) are strong. Human error is the weak link.
+
+<TraceDemo client:visible />
+
+
