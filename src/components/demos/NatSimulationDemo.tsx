@@ -1,11 +1,21 @@
 import { useState, useEffect, Fragment } from 'react'
+import DemoBoundary from './DemoBoundary'
 
 const s = {
-  bg: '#12121a', bg2: '#1a1a25', bg3: '#22222e',
-  text: '#e4e4e7', text2: '#a1a1aa', text3: '#71717a',
-  border: '#27272a', border2: '#3f3f46',
-  accent: '#3b82f6', green: '#22c55e', red: '#ef4444',
-  yellow: '#eab308', purple: '#a78bfa', orange: '#fb923c',
+  bg: '#0a0c0f',
+  bg2: '#15191e',
+  bg3: '#29313d',
+  text: '#f1f2f3',
+  text2: '#acb0b9',
+  text3: '#747c8b',
+  border: '#3e4a5b',
+  border2: '#536279',
+  accent: '#3c6bc3',
+  green: '#5a9e8e',
+  red: '#c46060',
+  yellow: '#bfa03a',
+  purple: '#4a6eb5',
+  orange: '#c48a4a',
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 
@@ -34,6 +44,7 @@ export default function NatSimulationDemo() {
   }, [sending])
 
   return (
+    <DemoBoundary name="NAT Simulation">
     <div style={{ background: s.bg, padding: '32px 24px', borderRadius: 16, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", maxWidth: 820, margin: '0 auto' }}>
       <div style={SEC}>
         <div style={H}>Your Network (Simulated)</div>
@@ -124,5 +135,6 @@ export default function NatSimulationDemo() {
         )}
       </div>
     </div>
+    </DemoBoundary>
   )
 }
