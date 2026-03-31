@@ -1,0 +1,103 @@
+---
+title: "IP Addresses Explained: From Octets to Subnets"
+description: "Every device on the internet has an IP address, but what do those numbers actually mean? Learn about IPv4, IPv6, subnetting, CIDR, DNS, and NAT — with interactive demos."
+date: 2026-03-30
+tags: ["networking", "tcp/ip", "fundamentals"]
+demo: "IpAddressDemo"
+---
+
+import IpAddressDemo from '../../components/demos/IpAddressDemo'
+
+## What Is an IP Address?
+
+Every device connected to a network needs a unique identifier so that data can be routed to the correct destination. An IP address is that identifier. Think of it as a postal address for the internet: without one, packets have nowhere to go. The IP (Internet Protocol) defines both the addressing scheme and the rules for how packets traverse networks.
+
+There are two versions in active use today: IPv4, which has been around since 1983, and IPv6, designed to solve the exhaustion problem that IPv4 eventually ran into.
+
+## IPv4 Structure
+
+An IPv4 address is a 32-bit number, typically written as four decimal octets separated by dots:
+
+```
+192.168.1.42
+```
+
+Each octet represents 8 bits, so each value ranges from 0 to 255. In binary, that same address looks like this:
+
+```
+11000000.10101000.00000001.00101010
+```
+
+The 32-bit address space yields 2^32, or roughly 4.3 billion unique addresses. That seemed infinite in the early 1980s, but with billions of phones, computers, IoT devices, and servers now online, the pool ran dry. IPv4 addresses were formally exhausted by the major regional registries between 2011 and 2019.
+
+## IPv6: The 128-Bit Future
+
+IPv6 expands the address space to 128 bits, providing 2^128 possible addresses — approximately 340 undecillion. That is enough for every atom on Earth's surface to have its own address several times over.
+
+An IPv6 address uses hexadecimal groups separated by colons:
+
+```
+2001:0db8:85a3:0000:0000:8a2e:0370:7334
+```
+
+Leading zeros within each group can be omitted, and a single run of consecutive all-zero groups can be replaced with `::`, shortening the address considerably:
+
+```
+2001:db8:85a3::8a2e:370:7334
+```
+
+The transition from IPv4 to IPv6 is slow. Most of the internet still runs dual-stack (both protocols simultaneously), and many networks rely on translation mechanisms to bridge the gap.
+
+## Subnetting and CIDR
+
+A subnet is a logically visible subdivision of an IP network. Networks are split for performance (smaller broadcast domains), security (isolation between segments), and organizational clarity.
+
+CIDR (Classless Inter-Domain Routing) notation expresses the boundary between the network portion and the host portion of an address using a slash followed by a number. For example, `192.168.1.0/24` means the first 24 bits identify the network and the remaining 8 bits identify hosts within it. The subnet mask for a `/24` is `255.255.255.0`.
+
+Some common CIDR blocks:
+
+| CIDR  | Subnet Mask     | Addresses | Typical Use            |
+|-------|-----------------|-----------|------------------------|
+| /8    | 255.0.0.0       | 16,777,216| Very large networks    |
+| /16   | 255.255.0.0     | 65,536    | Mid-size organizations |
+| /24   | 255.255.255.0   | 256       | Home networks, LANs    |
+| /32   | 255.255.255.255 | 1         | Single host            |
+
+Your home router almost certainly hands out addresses in the `192.168.1.0/24` range, giving you 254 usable host addresses (`.0` is the network identifier, `.255` is the broadcast address).
+
+## Public vs Private Addresses
+
+Not every device needs a globally routable address. RFC 1918 defines three private address ranges that are not routed on the public internet:
+
+- **10.0.0.0/8** — 10.0.0.0 through 10.255.255.255 (16.7 million addresses)
+- **172.16.0.0/12** — 172.16.0.0 through 172.31.255.255 (1 million addresses)
+- **192.168.0.0/16** — 192.168.0.0 through 192.168.255.255 (65,536 addresses)
+
+Your laptop, phone, and smart TV all get private addresses from your router. The router itself holds a single public address on its upstream interface. This conservation strategy is what kept IPv4 alive long after exhaustion.
+
+## DNS: The Internet Phonebook
+
+Humans remember names like `example.com`. Computers need numbers like `93.184.216.34`. DNS (Domain Name System) bridges that gap.
+
+When you type a URL into your browser, the resolution process follows a chain:
+
+1. **Browser cache** — Check if the domain was resolved recently.
+2. **OS resolver** — The operating system has its own cache.
+3. **Recursive resolver** — Usually run by your ISP or a provider like Cloudflare (1.1.1.1) or Google (8.8.8.8).
+4. **Root nameserver** — Returns the address of the TLD (top-level domain) server.
+5. **TLD nameserver** — For `.com`, this server knows where `example.com` is authoritative.
+6. **Authoritative nameserver** — Returns the final A record with the IP address.
+
+The result is cached at each layer, so most queries never travel the full chain.
+
+## NAT: Making Private Addresses Work
+
+NAT (Network Address Translation) is how your home router connects all your private devices to the internet using a single public IP. When your laptop at `192.168.1.42` sends a request to a server, the router rewrites the source address to its own public IP and tracks the mapping in a translation table. When the response comes back, the router reverses the translation and forwards the packet to your laptop.
+
+This works well for outbound connections initiated from inside the network. Inbound connections require port forwarding or more sophisticated mechanisms like UPnP or reverse proxies.
+
+NAT is the main reason IPv4 has survived this long. It is also one of the biggest obstacles to end-to-end connectivity and a reason IPv6 adoption matters.
+
+## Interactive Demos
+
+<IpAddressDemo client:visible />

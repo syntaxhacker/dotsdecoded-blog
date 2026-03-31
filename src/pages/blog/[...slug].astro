@@ -1,0 +1,29 @@
+---
+import { getCollection, render } from 'astro:content'
+import BlogPostLayout from '../../layouts/BlogPostLayout.astro'
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog', ({ data }) => !data.draft)
+  return posts.map(post => ({
+    params: { slug: post.id },
+    props: { post },
+  }))
+}
+
+const { post } = Astro.props
+const { Content } = await render(post)
+
+const body = post.body || ''
+const headings: Array<{ id: string; text: string; level: number }> = []
+const re = /^(#{2,3})\s+(.+)$/gm
+let m: RegExpExecArray | null
+while ((m = re.exec(body)) !== null) {
+  const text = m[2].trim()
+  const slug = text.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-')
+  headings.push({ id: slug, text, level: m[1].length })
+}
+---
+
+<BlogPostLayout title={post.data.title} date={post.data.date} tags={post.data.tags} description={post.data.description} headings={headings}>
+  <Content />
+</BlogPostLayout>

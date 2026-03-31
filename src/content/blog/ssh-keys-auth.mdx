@@ -1,0 +1,34 @@
+---
+title: "SSH Key Authentication: How Passwordless Login Actually Works"
+description: "Stop typing your password every time you SSH. Learn how asymmetric cryptography enables secure, passwordless authentication — with interactive demos."
+date: 2026-03-30
+tags: ["ssh", "security", "devops"]
+demo: "SshKeysDemo"
+---
+
+import SshKeysDemo from '../../components/demos/SshKeysDemo'
+
+SSH is something most developers use daily, but few understand how it actually works under the hood. You type `ssh user@server`, enter your password, and get a shell. It works, but it has real problems that compound fast as you manage more servers and more automation.
+
+Passwords are the weakest link in any SSH workflow. Every login is an opportunity for a keylogger, a shoulder surfer, or a brute-force bot to compromise your credentials. They are slow -- you cannot pipe a password into an SSH session without resorting to brittle hacks like `sshpass` or `expect`. They do not compose -- CI/CD pipelines, cron jobs, and orchestration tools all need non-interactive access, and stuffing passwords into environment variables or config files is a security incident waiting to happen. The industry-standard answer to all of these problems is SSH key authentication.
+
+SSH key authentication relies on asymmetric cryptography, also called public-key cryptography. When you run `ssh-keygen`, you generate two mathematically linked keys: a **private key** and a **public key**. The private key never leaves your machine. The public key gets placed on any server you want to access. The mathematical relationship between them is one-way: anyone can encrypt data with your public key, but only your private key can decrypt it. This is the foundation that makes passwordless login both possible and secure.
+
+Here is what actually happens during an SSH handshake when you have keys configured:
+
+1. Your client contacts the server and announces which public key it wants to use.
+2. The server checks its `~/.ssh/authorized_keys` file for a match. If the key is not there, the handshake fails immediately -- no password prompt, no second chance.
+3. The server generates a random challenge string and encrypts it with your public key.
+4. The server sends this encrypted challenge to your client.
+5. Your client decrypts it with your private key and sends the result back.
+6. The server verifies the response matches the original challenge. If it does, you are in.
+
+At no point does your private key leave your machine. The server never learns it, and nothing traverses the network that could be used to derive it.
+
+Setting this up takes about two minutes. Generate a key pair with `ssh-keygen -t ed25519 -C "your-email@example.com"`. Ed25519 is the modern default -- faster, more secure, and shorter keys than RSA. Copy the public key to your server with `ssh-copy-id user@server`. That single command appends your public key to the server's `authorized_keys` file and sets the correct permissions. The next time you SSH in, you will not be asked for a password.
+
+A few practices that separate good setups from negligent ones. Always use a passphrase on your private key. Without one, anyone who gets a copy of your key file has full access to every server it unlocks. Use `ssh-agent` so you only type the passphrase once per session. Use different keys for different contexts -- a personal key for your servers, a separate key for work, another for CI/CD. Rotate keys that you no longer need and audit `authorized_keys` files on servers you manage. Finally, consider using `~/.ssh/config` to map hostnames, usernames, and key files so you can type `ssh prod` instead of `ssh -i ~/.ssh/work-key deploy@10.0.1.42`.
+
+## Try It Yourself
+
+<SshKeysDemo client:visible />

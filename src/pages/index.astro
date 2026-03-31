@@ -1,0 +1,96 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro'
+import { getCollection } from 'astro:content'
+const posts = (await getCollection('blog', ({ data }) => !data.draft))
+  .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf())
+---
+
+<BaseLayout title="DotsDecoded" description="Deep dives into systems, tools, and the code that powers them.">
+  <div class="home">
+    <div class="home-left">
+      <div class="home-header">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <h1>Dots_Decoded</h1>
+          <button class="theme-toggle" onclick="window.__toggleTheme()">theme</button>
+        </div>
+        <p class="subtitle">deep dives into systems, tools & code</p>
+      </div>
+      <div class="search-wrapper">
+        <input
+          type="text"
+          class="search-input"
+          id="search-input"
+          placeholder="search posts..."
+          autocomplete="off"
+        />
+      </div>
+      <div class="blog-list" id="blog-list">
+        {posts.map((post) => (
+          <a href={`/blog/${post.id}`} class="blog-card" data-title={post.data.title.toLowerCase()} data-desc={post.data.description.toLowerCase()} data-tags={post.data.tags.join(' ').toLowerCase()} data-href={`/blog/${post.id}`}>
+            <div class="blog-card-title">{post.data.title}</div>
+            <div class="blog-card-meta">
+              <time datetime={post.data.date.toISOString()}>
+                {post.data.date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              </time>
+            </div>
+            <div class="blog-card-desc">{post.data.description}</div>
+            <div class="blog-card-tags">
+              {post.data.tags.map((tag) => (
+                <span class="tag">{tag}</span>
+              ))}
+            </div>
+          </a>
+        ))}
+      </div>
+    </div>
+  </div>
+
+  <script is:inline>
+    document.addEventListener('astro:page-load', async () => {
+      const input = document.getElementById('search-input')
+      const list = document.getElementById('blog-list')
+      if (!input || !list) return
+
+      const cards = Array.from(list.querySelectorAll('.blog-card'))
+      let pagefind = null
+      let debounce = null
+
+      try {
+        if (window.pagefind) {
+          pagefind = window.pagefind
+        } else {
+          pagefind = await import('/pagefind/pagefind.js')
+          await pagefind.init()
+        }
+      } catch (e) {}
+
+      input.addEventListener('input', (e) => {
+        const q = e.target.value.trim()
+
+        const ql = q.toLowerCase()
+        cards.forEach((card) => {
+          const title = card.getAttribute('data-title') || ''
+          const tags = card.getAttribute('data-tags') || ''
+          const match = !ql || title.includes(ql) || tags.includes(ql)
+          card.style.display = match ? '' : 'none'
+        })
+
+        clearTimeout(debounce)
+        if (!q || !pagefind) return
+
+        debounce = setTimeout(async () => {
+          try {
+            const results = await pagefind.search(q)
+            const urls = new Set(results.results.map(r => r.url))
+
+            cards.forEach((card) => {
+              const href = card.getAttribute('href') || ''
+              const match = urls.has(href) || !q
+              card.style.display = match ? '' : 'none'
+            })
+          } catch (e) {}
+        }, 300)
+      })
+    })
+  </script>
+</BaseLayout>
