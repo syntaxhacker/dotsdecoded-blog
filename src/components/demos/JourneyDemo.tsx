@@ -1,11 +1,21 @@
 import { useState, useEffect, Fragment } from 'react'
+import DemoBoundary from './DemoBoundary'
 
 const s = {
-  bg: '#12121a', bg2: '#1a1a25', bg3: '#1e1e2a',
-  text: '#e4e4e7', text2: '#a1a1aa', text3: '#71717a',
-  border: '#27272a', border2: '#3f3f46',
-  accent: '#3b82f6', green: '#22c55e', red: '#ef4444',
-  yellow: '#eab308', purple: '#a78bfa', orange: '#fb923c',
+  bg: '#0a0c0f',
+  bg2: '#15191e',
+  bg3: '#29313d',
+  text: '#f1f2f3',
+  text2: '#acb0b9',
+  text3: '#747c8b',
+  border: '#3e4a5b',
+  border2: '#536279',
+  accent: '#3c6bc3',
+  green: '#5a9e8e',
+  red: '#c46060',
+  yellow: '#bfa03a',
+  purple: '#4a6eb5',
+  orange: '#c48a4a',
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 
@@ -54,6 +64,7 @@ export default function JourneyDemo() {
   const activeNodeIndex = step === 0 ? 0 : step === 1 ? 1 : step === 2 ? 2 : step === 3 ? 3 : step === 4 ? 5 : step === 5 ? 6 : 6
 
   return (
+    <DemoBoundary name="Request Journey">
     <div style={{ background: s.bg, padding: '32px 24px', borderRadius: 16, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", maxWidth: 820, margin: '0 auto' }}>
       <div style={SEC}>
         <div style={H}>Web Request Journey</div>
@@ -116,53 +127,7 @@ export default function JourneyDemo() {
           </div>
         )}
       </div>
-
-      <div style={SEC}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: s.text2, marginBottom: 16, textTransform: 'uppercase', letterSpacing: 1, ...M }}>
-          Routing Path
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 0, overflowX: 'auto', paddingBottom: 4 }}>
-          {NODES.map((node, i) => {
-            const nodeStep = i <= 2 ? i + 1 : i === 3 ? 3 : i === 4 ? 4 : i === 5 ? 5 : 6
-            const isLit = step > 0 && i <= activeNodeIndex
-            const isActive = step > 0 && i === activeNodeIndex
-            return (
-              <Fragment key={node}>
-                <div style={{
-                  flex: '0 0 auto', padding: '10px 12px', borderRadius: 8,
-                  background: isActive ? s.accent + '22' : isLit ? s.green + '15' : s.bg3,
-                  border: `1px solid ${isActive ? s.accent : isLit ? s.green : s.border}`,
-                  ...M, fontSize: 10, color: isActive ? s.accent : isLit ? s.green : s.text3,
-                  transition: 'all 0.3s', textAlign: 'center', minWidth: 70,
-                  boxShadow: isActive ? `0 0 12px ${s.accent}33` : 'none',
-                }}>
-                  {node}
-                </div>
-                {i < NODES.length - 1 && (
-                  <div style={{ width: 16, height: 1, background: isLit ? s.green : s.border, flexShrink: 0, transition: 'background 0.3s' }} />
-                )}
-              </Fragment>
-            )
-          })}
-        </div>
-      </div>
-
-      {step >= 7 && (
-        <div style={{
-          background: s.green + '11', border: `1px solid ${s.green}44`, borderRadius: 12,
-          padding: '20px 24px', textAlign: 'center',
-        }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: s.green, marginBottom: 6 }}>
-            Request Complete
-          </div>
-          <div style={{ ...M, fontSize: 14, color: s.text }}>
-            Total time: ~330ms
-          </div>
-          <div style={{ ...M, fontSize: 11, color: s.text3, marginTop: 8 }}>
-            DNS: 23ms | TCP: 84ms | TLS: 67ms | HTTP: 156ms
-          </div>
-        </div>
-      )}
     </div>
+    </DemoBoundary>
   )
 }
