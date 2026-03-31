@@ -66,6 +66,8 @@ export default function IpAddressDemo() {
   const [dnsStep, setDnsStep] = useState(-1)
   const [sending, setSending] = useState(false)
   const [packetStep, setPacketStep] = useState(0)
+  const [selectedConnection, setSelectedConnection] = useState(0)
+  const [selectedPacketLayer, setSelectedPacketLayer] = useState(-1)
 
   useEffect(() => {
     if (selectedOctet === null) { setVisibleBits(0); return }
@@ -116,6 +118,57 @@ export default function IpAddressDemo() {
     { label: 'Router', sub: '192.168.1.1', icon: 'R' },
     { label: 'ISP', sub: '203.0.113.1', icon: 'I' },
     { label: 'Internet', sub: '', icon: '*' },
+  ]
+
+  const connections = [
+    { name: 'Web Browsing', srcPort: '52341', dstPort: '443', protocol: 'TCP', srcDesc: 'Ephemeral (random)', dstDesc: 'HTTPS server' },
+    { name: 'Secure Shell', srcPort: '53892', dstPort: '22', protocol: 'TCP', srcDesc: 'Ephemeral (random)', dstDesc: 'SSH server' },
+    { name: 'Sending Email', srcPort: '50123', dstPort: '587', protocol: 'TCP', srcDesc: 'Ephemeral (random)', dstDesc: 'SMTP submission' },
+    { name: 'DNS Lookup', srcPort: '54102', dstPort: '53', protocol: 'UDP', srcDesc: 'Ephemeral (random)', dstDesc: 'DNS resolver' },
+    { name: 'Database', srcPort: '55100', dstPort: '5432', protocol: 'TCP', srcDesc: 'Ephemeral (random)', dstDesc: 'PostgreSQL server' },
+  ]
+
+  const packetLayers = [
+    {
+      name: 'Ethernet Frame', size: '14 bytes', protocol: 'Layer 2', color: s.orange,
+      fields: [
+        { key: 'Destination MAC', value: 'aa:bb:cc:dd:ee:01', highlight: undefined },
+        { key: 'Source MAC', value: 'f0:de:f1:23:45:67', highlight: undefined },
+        { key: 'EtherType', value: '0x0800 (IPv4)', highlight: s.orange },
+      ],
+    },
+    {
+      name: 'IPv4 Header', size: '20 bytes', protocol: 'Layer 3', color: s.accent,
+      fields: [
+        { key: 'Version', value: '4', highlight: undefined },
+        { key: 'IHL', value: '5 (20 bytes)', highlight: undefined },
+        { key: 'Total Length', value: '1,460 bytes', highlight: undefined },
+        { key: 'Time To Live', value: '64', highlight: s.yellow },
+        { key: 'Protocol', value: '6 (TCP)', highlight: s.green },
+        { key: 'Source IP', value: '192.168.1.42', highlight: s.accent },
+        { key: 'Destination IP', value: '93.184.216.34', highlight: s.green },
+      ],
+    },
+    {
+      name: 'TCP Header', size: '20 bytes', protocol: 'Layer 4', color: s.green,
+      fields: [
+        { key: 'Source Port', value: '52341', highlight: s.accent },
+        { key: 'Destination Port', value: '443 (HTTPS)', highlight: s.green },
+        { key: 'Sequence Number', value: '1,234,567', highlight: undefined },
+        { key: 'Acknowledgment', value: '5,678,901', highlight: undefined },
+        { key: 'Flags', value: 'ACK, PSH', highlight: s.yellow },
+        { key: 'Window Size', value: '65,535', highlight: undefined },
+      ],
+    },
+    {
+      name: 'HTTP Payload', size: '~1,420 bytes', protocol: 'Layer 7', color: s.purple,
+      fields: [
+        { key: 'Method', value: 'GET / HTTP/1.1', highlight: s.purple },
+        { key: 'Host', value: 'dotsdecoded.com', highlight: undefined },
+        { key: 'User-Agent', value: 'Mozilla/5.0 ...', highlight: undefined },
+        { key: 'Accept', value: 'text/html, */*', highlight: undefined },
+      ],
+    },
   ]
 
   return (
@@ -568,6 +621,133 @@ export default function IpAddressDemo() {
             <div style={{ fontSize: 12, color: s.text3, marginTop: 2 }}>{'Response routes back: Internet → ISP → Router (NAT reverse) → Your Device'}</div>
           </div>
         )}
+      </div>
+
+      <div style={SEC}>
+        <div style={H}>Port Explorer</div>
+        <p style={{ color: s.text2, fontSize: 14, margin: '0 0 16px 0', lineHeight: 1.6 }}>
+          Ports identify which application should receive data on a device. An IP address is the building,
+          a port is the apartment number. Select a connection type below to see which ports are used.
+        </p>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+          {['Web Browsing', 'Secure Shell', 'Sending Email', 'DNS Lookup', 'Database'].map((name, idx) => (
+            <button key={name} onClick={() => setSelectedConnection(idx)} style={{
+              background: selectedConnection === idx ? s.accent : s.bg3,
+              border: `1px solid ${selectedConnection === idx ? s.accent : s.border}`,
+              borderRadius: 8, padding: '8px 16px', color: selectedConnection === idx ? '#fff' : s.text2,
+              cursor: 'pointer', fontSize: 13, transition: 'all 0.2s',
+            }}>
+              {name}
+            </button>
+          ))}
+        </div>
+        <div style={{ background: s.bg3, borderRadius: 10, padding: 20, marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <div style={{ textAlign: 'center', flex: 1 }}>
+              <div style={{ fontSize: 11, color: s.text3, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>Your Device</div>
+              <div style={{ background: s.bg2, border: `1px solid ${s.border2}`, borderRadius: 8, padding: '12px 16px' }}>
+                <div style={{ ...M, fontSize: 12, color: s.text3, marginBottom: 4 }}>IP: 192.168.1.42</div>
+                <div style={{ ...M, fontSize: 14, fontWeight: 600, color: s.accent }}>Port: {connections[selectedConnection].srcPort}</div>
+                <div style={{ fontSize: 11, color: s.text3, marginTop: 4 }}>{connections[selectedConnection].srcDesc}</div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '0 16px' }}>
+              <div style={{ ...M, fontSize: 18, color: s.green, marginBottom: 4 }}>&#8594;</div>
+              <div style={{ fontSize: 10, color: s.text3 }}>{connections[selectedConnection].protocol}</div>
+            </div>
+            <div style={{ textAlign: 'center', flex: 1 }}>
+              <div style={{ fontSize: 11, color: s.text3, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>Remote Server</div>
+              <div style={{ background: s.bg2, border: `1px solid ${s.border2}`, borderRadius: 8, padding: '12px 16px' }}>
+                <div style={{ ...M, fontSize: 12, color: s.text3, marginBottom: 4 }}>IP: 93.184.216.34</div>
+                <div style={{ ...M, fontSize: 14, fontWeight: 600, color: s.green }}>Port: {connections[selectedConnection].dstPort}</div>
+                <div style={{ fontSize: 11, color: s.text3, marginTop: 4 }}>{connections[selectedConnection].dstDesc}</div>
+              </div>
+            </div>
+          </div>
+          <div style={{ background: s.bg, borderRadius: 8, padding: '12px 16px', border: `1px solid ${s.border}` }}>
+            <div style={{ fontSize: 11, color: s.text3, marginBottom: 6 }}>Connection Summary</div>
+            <div style={{ ...M, fontSize: 13, color: s.text2, lineHeight: 1.6 }}>
+              <span style={{ color: s.accent }}>192.168.1.42:{connections[selectedConnection].srcPort}</span>
+              <span style={{ color: s.text3, margin: '0 6px' }}>{'->'}</span>
+              <span style={{ color: s.green }}>93.184.216.34:{connections[selectedConnection].dstPort}</span>
+              <span style={{ color: s.text3, margin: '0 8px' }}>via</span>
+              <span style={{ color: s.yellow }}>{connections[selectedConnection].protocol}</span>
+            </div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          {[
+            { label: 'Well-known', range: '0-1023', desc: 'System services (HTTP, SSH, DNS)' },
+            { label: 'Registered', range: '1024-49151', desc: 'Application services (MySQL, Redis)' },
+            { label: 'Ephemeral', range: '49152-65535', desc: 'Temporary client ports' },
+          ].map(item => (
+            <div key={item.label} style={{ background: s.bg3, borderRadius: 8, padding: '10px 14px', flex: 1, minWidth: 140 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: s.text, marginBottom: 2 }}>{item.label}</div>
+              <div style={{ ...M, fontSize: 12, color: s.accent }}>{item.range}</div>
+              <div style={{ fontSize: 10, color: s.text3, marginTop: 2 }}>{item.desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={SEC}>
+        <div style={H}>Packet Structure</div>
+        <p style={{ color: s.text2, fontSize: 14, margin: '0 0 16px 0', lineHeight: 1.6 }}>
+          Every packet that crosses the internet carries headers that tell routers and servers where it came from,
+          where it is going, and how to reassemble it. Click each layer to see what is inside.
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {packetLayers.map((layer, i) => (
+            <div key={i}>
+              <div
+                onClick={() => setSelectedPacketLayer(selectedPacketLayer === i ? -1 : i)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 12,
+                  background: selectedPacketLayer === i ? `${layer.color}15` : s.bg3,
+                  border: `1px solid ${selectedPacketLayer === i ? layer.color : s.border}`,
+                  borderRadius: 8, padding: '12px 16px', cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+              >
+                <div style={{
+                  width: 8, height: 36, borderRadius: 4,
+                  background: layer.color, flexShrink: 0,
+                }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: selectedPacketLayer === i ? layer.color : s.text, transition: 'color 0.2s' }}>
+                    {layer.name}
+                  </div>
+                  <div style={{ fontSize: 11, color: s.text3 }}>{layer.size}</div>
+                </div>
+                <span style={{ fontSize: 12, color: s.text3, ...M }}>{layer.protocol}</span>
+                <span style={{ color: selectedPacketLayer === i ? layer.color : s.text3, transition: 'color 0.2s' }}>
+                  {selectedPacketLayer === i ? String.fromCharCode(9660) : String.fromCharCode(9654)}
+                </span>
+              </div>
+              {selectedPacketLayer === i && (
+                <div style={{
+                  background: s.bg, border: `1px solid ${s.border}`,
+                  borderRadius: '0 0 8px 8px', padding: '14px 16px',
+                  marginTop: -2, borderTop: 'none',
+                }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '6px 12px' }}>
+                    {layer.fields.map((field, j) => (
+                      <Fragment key={j}>
+                        <div style={{ ...M, fontSize: 12, color: s.text3 }}>{field.key}</div>
+                        <div style={{ ...M, fontSize: 12, color: field.highlight ? field.highlight : s.text }}>{field.value}</div>
+                      </Fragment>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 16, background: s.bg3, borderRadius: 8, padding: '12px 16px' }}>
+          <div style={{ fontSize: 12, color: s.text2, lineHeight: 1.7 }}>
+            When you visit a website, your browser sends hundreds of these packets. The TCP header ensures reliable delivery (lost packets are retransmitted). The IP header ensures routing. The Ethernet frame handles the last hop on your local network. Each layer wraps the next — this is called <strong style={{ color: s.accent }}>encapsulation</strong>.
+          </div>
+        </div>
       </div>
     </div>
   )
