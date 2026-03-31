@@ -68,7 +68,8 @@ const ogImage = new URL(image, siteUrl).href
           else links[i].classList.remove('toc-active');
         }
       }
-      window.addEventListener('scroll', onScroll, { passive: true });
+      var scrollEl = document.querySelector('.page-inner') || window;
+      scrollEl.addEventListener('scroll', onScroll, { passive: true });
       onScroll();
     });
   </script>
