@@ -222,7 +222,9 @@ xR9n+PT2L7vF5zKq8WmF2R3hT5vN7cXpLqYr4sT8
 hK9mF2V3ZpQr8Xk7nL5vF2C3H8sT5mKq9LpXr4Y2N
 Z3RkLmRlY29kZWQuY29tAAAAFG1hc0Bkb3RzZGVj
 b2RlZC5jb20=
------END OPENSSH PRIVATE KEY-----`
+-----END OPENSSH PRIVATE KEY-----
+# THIS IS A DUMMY KEY FOR DEMO PURPOSES ONLY
+# Not a real private key. Never use in production.`
 
   const pubKey = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIODwrtXeYXrH0lifYulBHiJORX43sWpJdpVtFmQzcdw user@dotsdecoded.com`
 
@@ -1005,7 +1007,7 @@ function Section({ number, title, children }: { number: number; title: string; c
 export default function SshKeysDemo() {
   return (
     <div style={{
-      maxWidth: 720,
+      maxWidth: 820,
       margin: '0 auto',
       fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       color: s.text,
