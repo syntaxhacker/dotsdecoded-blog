@@ -9,9 +9,9 @@ const s = {
   text3: '#747c8b',
   border: '#3e4a5b',
   border2: '#536279',
-  accent: '#3c6bc3',
-  green: '#5a9e8e',
-  red: '#c46060',
+  accent: '#5b8def',
+  green: '#3dd68c',
+  red: '#e85d5d',
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 

@@ -10,12 +10,12 @@ const s = {
   text3: '#747c8b',
   border: '#3e4a5b',
   border2: '#536279',
-  accent: '#3c6bc3',
-  green: '#5a9e8e',
-  red: '#c46060',
-  yellow: '#bfa03a',
-  purple: '#4a6eb5',
-  orange: '#c48a4a',
+  accent: '#5b8def',
+  green: '#3dd68c',
+  red: '#e85d5d',
+  yellow: '#e0b040',
+  purple: '#9b7bea',
+  orange: '#e8945a',
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 
@@ -55,7 +55,7 @@ const typeDescriptions: Record<OpType, string> = {
 }
 
 const phaseNames = ['timers', 'pending callbacks', 'poll', 'check', 'close']
-const phaseColors = [s.accent, s.purple, s.green, '#5a7eaa', s.red]
+const phaseColors = [s.accent, s.purple, s.green, s.yellow, s.red]
 
 const sampleTasks: Array<{ label: string; type: OpType; duration: number }> = [
   { label: 'fs.readFile()', type: 'pool', duration: 2500 },
@@ -131,7 +131,7 @@ function ThreadPool({ activeSlots, total }: { activeSlots: number; total: number
             height: 24,
             borderRadius: 4,
             background: i < activeSlots
-              ? `linear-gradient(135deg, ${s.orange}, ${s.orange})`
+              ? `linear-gradient(135deg, ${s.orange}, #b06830)`
               : s.bg2,
             border: `1px solid ${i < activeSlots ? s.orange : s.border}`,
             transition: 'all 0.3s',
@@ -450,7 +450,7 @@ export default function LibuvDemo() {
               border: 'none',
               background: running
                 ? s.text3
-                : `linear-gradient(135deg, ${s.accent}, ${s.accent})`,
+                : `linear-gradient(135deg, ${s.accent}, #3a6ab5)`,
               color: '#fff',
               fontSize: 12,
               fontWeight: 600,
