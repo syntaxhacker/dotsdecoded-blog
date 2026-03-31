@@ -46,7 +46,7 @@ const posts = (await getCollection('blog', ({ data }) => !data.draft))
   </div>
 
   <script is:inline>
-    document.addEventListener('astro:page-load', async () => {
+    document.addEventListener('DOMContentLoaded', async () => {
       const input = document.getElementById('search-input')
       const list = document.getElementById('blog-list')
       if (!input || !list) return
