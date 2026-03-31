@@ -1,8 +1,17 @@
 ---
-const { title = 'DotsDecoded', description = 'Deep dives into systems, tools, and the code that powers them.' } = Astro.props
+const {
+  title = 'DotsDecoded',
+  description = 'Deep dives into systems, tools, and the code that powers them.',
+  image = '/og-default.svg',
+  type = 'website',
+  canonicalURL,
+} = Astro.props
 import '../styles/global.css'
----
 
+const siteUrl = Astro.site ? new URL(Astro.site).origin : 'https://dotsdecoded-blog.pages.dev'
+const url = canonicalURL ? new URL(canonicalURL, siteUrl).href : Astro.url.href
+const ogImage = new URL(image, siteUrl).href
+---
 <!doctype html>
 <html lang="en">
 <head>
@@ -10,7 +19,21 @@ import '../styles/global.css'
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content={description} />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="canonical" href={url} />
   <title>{title}</title>
+
+  <meta property="og:title" content={title} />
+  <meta property="og:description" content={description} />
+  <meta property="og:type" content={type} />
+  <meta property="og:url" content={url} />
+  <meta property="og:image" content={ogImage} />
+  <meta property="og:site_name" content="DotsDecoded" />
+  <meta property="og:locale" content="en_US" />
+
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={title} />
+  <meta name="twitter:description" content={description} />
+  <meta name="twitter:image" content={ogImage} />
   <script is:inline>
     const t = localStorage.getItem('theme')
     if (t) document.documentElement.setAttribute('data-theme', t)
