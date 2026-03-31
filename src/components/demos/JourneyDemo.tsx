@@ -10,12 +10,12 @@ const s = {
   text3: '#747c8b',
   border: '#3e4a5b',
   border2: '#536279',
-  accent: '#3c6bc3',
-  green: '#5a9e8e',
-  red: '#c46060',
-  yellow: '#bfa03a',
-  purple: '#4a6eb5',
-  orange: '#c48a4a',
+  accent: '#5b8def',
+  green: '#3dd68c',
+  red: '#e85d5d',
+  yellow: '#e0b040',
+  purple: '#9b7bea',
+  orange: '#e8945a',
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 
@@ -127,6 +127,53 @@ export default function JourneyDemo() {
           </div>
         )}
       </div>
+
+      <div style={SEC}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: s.text2, marginBottom: 16, textTransform: 'uppercase', letterSpacing: 1, ...M }}>
+          Routing Path
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 0, overflowX: 'auto', paddingBottom: 4 }}>
+          {NODES.map((node, i) => {
+            const nodeStep = i <= 2 ? i + 1 : i === 3 ? 3 : i === 4 ? 4 : i === 5 ? 5 : 6
+            const isLit = step > 0 && i <= activeNodeIndex
+            const isActive = step > 0 && i === activeNodeIndex
+            return (
+              <Fragment key={node}>
+                <div style={{
+                  flex: '0 0 auto', padding: '10px 12px', borderRadius: 8,
+                  background: isActive ? s.accent + '22' : isLit ? s.green + '15' : s.bg3,
+                  border: `1px solid ${isActive ? s.accent : isLit ? s.green : s.border}`,
+                  ...M, fontSize: 10, color: isActive ? s.accent : isLit ? s.green : s.text3,
+                  transition: 'all 0.3s', textAlign: 'center', minWidth: 70,
+                  boxShadow: isActive ? `0 0 12px ${s.accent}33` : 'none',
+                }}>
+                  {node}
+                </div>
+                {i < NODES.length - 1 && (
+                  <div style={{ width: 16, height: 1, background: isLit ? s.green : s.border, flexShrink: 0, transition: 'background 0.3s' }} />
+                )}
+              </Fragment>
+            )
+          })}
+        </div>
+      </div>
+
+      {step >= 7 && (
+        <div style={{
+          background: s.green + '11', border: `1px solid ${s.green}44`, borderRadius: 12,
+          padding: '20px 24px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: s.green, marginBottom: 6 }}>
+            Request Complete
+          </div>
+          <div style={{ ...M, fontSize: 14, color: s.text }}>
+            Total time: ~330ms
+          </div>
+          <div style={{ ...M, fontSize: 11, color: s.text3, marginTop: 8 }}>
+            DNS: 23ms | TCP: 84ms | TLS: 67ms | HTTP: 156ms
+          </div>
+        </div>
+      )}
     </div>
     </DemoBoundary>
   )

@@ -10,12 +10,12 @@ const s = {
   text3: '#747c8b',
   border: '#3e4a5b',
   border2: '#536279',
-  accent: '#3c6bc3',
-  green: '#5a9e8e',
-  red: '#c46060',
-  yellow: '#bfa03a',
-  purple: '#4a6eb5',
-  orange: '#c48a4a',
+  accent: '#5b8def',
+  green: '#3dd68c',
+  red: '#e85d5d',
+  yellow: '#e0b040',
+  purple: '#9b7bea',
+  orange: '#e8945a',
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 

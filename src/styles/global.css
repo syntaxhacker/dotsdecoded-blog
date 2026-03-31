@@ -250,18 +250,18 @@ pre code {
 }
 
 .page {
-  min-height: 100vh;
+  min-height: auto;
   background: var(--bg);
   color: var(--text);
   padding: 0;
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: minmax(180px, 220px) 1fr;
 }
 
 .toc {
   position: sticky;
   top: 0;
-  height: 100vh;
+  height: auto;
   overflow-y: auto;
   padding: 32px 16px;
   border-right: 1px solid var(--border);
@@ -548,6 +548,7 @@ pre code {
 @media (max-width: 768px) {
   .home {
     grid-template-columns: 1fr;
+    height: auto;
   }
 
   .home-right {
@@ -556,15 +557,23 @@ pre code {
 
   .home-left {
     width: 100%;
+    height: auto;
+  }
+
+  .blog-list {
+    flex: none;
+    overflow-y: visible;
   }
 
   .page {
     grid-template-columns: 1fr;
+    min-height: auto;
   }
 
   .toc {
     position: static;
     width: 100%;
+    height: auto;
     padding: 16px 24px 0;
     background: none;
     border-right: none;
@@ -582,5 +591,15 @@ pre code {
 
   .page-inner {
     padding: 0 24px 80px;
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+  .page {
+    grid-template-columns: minmax(140px, 180px) 1fr;
+  }
+
+  .toc {
+    padding: 24px 12px;
   }
 }

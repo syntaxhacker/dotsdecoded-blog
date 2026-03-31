@@ -1,0 +1,274 @@
+---
+title: "How Databases Actually Work: From Files to Indexes to Transactions"
+description: "Why we need databases instead of files, how data gets stored on disk, what B-tree indexes really look like, and how transactions prevent your data from falling apart."
+date: 2026-03-31
+tags: ["databases", "internals", "performance", "backend"]
+---
+
+import FileVsDatabaseDemo from '../../components/demos/FileVsDatabaseDemo'
+import QueryLifecycleDemo from '../../components/demos/QueryLifecycleDemo'
+import PageStorageDemo from '../../components/demos/PageStorageDemo'
+import BTreeDemo from '../../components/demos/BTreeDemo'
+import IndexTypeDemo from '../../components/demos/IndexTypeDemo'
+import QueryPlannerDemo from '../../components/demos/QueryPlannerDemo'
+import ConcurrencyDemo from '../../components/demos/ConcurrencyDemo'
+import IsolationDemo from '../../components/demos/IsolationDemo'
+import WalDemo from '../../components/demos/WalDemo'
+import IndexAdvisorDemo from '../../components/demos/IndexAdvisorDemo'
+
+Your application has users. Users create data. That data needs to survive restarts, survive crashes, and be findable in milliseconds. You could write it to a file. People did that for decades. But files break down fast when you need to search, update, or share data across multiple users at the same time. That is why databases exist. They are not magic — they are carefully engineered systems built on a handful of core ideas. By the end of this, you will understand every single one.
+
+## Why Not Just Use Files?
+
+Imagine a library with a million books, all stacked in one long line. No organization, no labels, no system. You need to find every book by "Stephen King." How do you do it? You walk past every single book, one by one, checking the author. If each check takes one second, you just spent 11.5 days standing in front of a bookshelf.
+
+That is what reading a file line-by-line feels like to a computer. A CSV file with a million rows is perfectly fine for reading the whole thing top-to-bottom. But the moment you need "all users who signed up last week" or "the order with ID 42", a file becomes that unorganized library. You are scanning every line.
+
+A database is the library with a card catalog, organized shelves, and a librarian who knows exactly where everything is. It does extra work when you put books on the shelf (writing is slightly slower) so that finding any book takes fractions of a second instead of days.
+
+<FileVsDatabaseDemo client:visible />
+
+### What a Database Gives You That Files Do Not
+
+- **Fast lookups by any field** — not just sequential scanning
+- **Concurrent access** — two programs reading and writing at the same time without corrupting data
+- **Crash recovery** — if the power goes out mid-write, you do not end up with half-written garbage
+- **Atomic updates** — updating a user's email and address either both succeed or neither does
+- **Querying** — ask questions like "top 10 users by order count" without writing custom code
+- **Consistency** — rules that prevent invalid data (like an order with a negative amount)
+
+You now understand why databases exist: files are fine for simple storage, but break down the moment you need to search, share, or survive failures. Let us look at what happens when you send a query to a database.
+
+## The Query Lifecycle
+
+When you write `SELECT * FROM users WHERE email = 'alice@example.com'`, a surprising amount of work happens before any data is actually read. The database does not just start scanning. It plans first.
+
+Think of it like asking a taxi driver to take you across town. The driver does not just start driving in a random direction. They think about the route: Should I take the highway or side streets? Is there traffic right now? Is there construction on Fifth Avenue? That planning step — figuring out the fastest route — is exactly what a database query optimizer does.
+
+<QueryLifecycleDemo client:visible />
+
+### The Four Stages
+
+1. **Parsing** — The database reads your SQL text and builds a syntax tree. It checks for typos, missing keywords, and invalid syntax. If you write `SELEC * FORM users`, this is where it catches the error.
+
+2. **Planning** — The optimizer looks at your query and decides HOW to execute it. Should it use an index? Should it scan the whole table? Should it sort the results in memory or use a temporary file on disk? It considers statistics about your data (how many rows, how selective each column is) and picks the plan it thinks will be fastest.
+
+3. **Executing** — The storage engine actually reads data from disk (or from memory if it is cached). It follows the plan: read this index, fetch those pages, filter these rows, sort those results.
+
+4. **Returning** — The final result set is sent back to your application. If you asked for 10 rows with `LIMIT 10`, the database stops as soon as it finds 10 matching rows.
+
+The planning stage is the most interesting part. A good optimizer can make a query 1000x faster just by choosing a different execution strategy. A bad optimizer — or no index — means every query is a full table scan.
+
+You now understand the query lifecycle. Let us look at how data is actually stored on disk, because understanding storage is the key to understanding everything else.
+
+## Storage: Pages on Disk
+
+Databases do not store data one row at a time. They store data in **pages** — fixed-size blocks, typically 4KB or 8KB each. Think of each page as a page in a binder. Each page holds multiple rows. When the database needs to read data, it reads entire pages from disk into memory, not individual rows.
+
+Why pages? Because disk I/O is expensive. Reading one byte from disk takes roughly the same time as reading 8KB. The disk head has to move to the right position, wait for the platter to spin, and then read. Whether you read 1 byte or 8000 bytes, the positioning and latency cost is the same. So databases pack as many rows as they can into each page to amortize that cost.
+
+<PageStorageDemo client:visible />
+
+### What Happens When Pages Fill Up
+
+When a page is full and you need to insert a new row, the database performs a **page split**: it creates a new page and moves roughly half the rows to the new page. This keeps pages reasonably full and maintains the insertion order. Page splits are expensive — they involve disk writes and can cause fragmentation — which is why databases also do periodic compaction.
+
+### Why This Matters
+
+Understanding pages explains almost everything about database performance:
+
+- **Why indexes work** — they organize pages so you only need to read a few instead of all of them
+- **Why sequential reads are fast** — reading pages that are next to each other on disk is much faster than jumping around
+- **Why large rows are slower** — fewer rows per page means more pages to read
+- **Why `SELECT *` is wasteful** — you might only need one column but you are loading entire pages worth of data
+
+You now understand how data is stored on disk. Next, let us look at the single most important performance feature in any database: indexes.
+
+## B-Tree Indexes
+
+A B-tree is the data structure that makes databases fast. It is the card catalog of our library. Without it, every query scans every page. With it, the database jumps directly to the right page, like a librarian walking straight to the right shelf.
+
+A B-tree (specifically a B+ tree in most databases) is a balanced tree where every internal node contains keys that divide the key space, and every leaf node contains the actual data pointers (or the data itself). "Balanced" means every path from root to leaf has the same length — no branch is deeper than another. This guarantees that every lookup takes the same number of steps, regardless of which key you are looking for.
+
+<BTreeDemo client:visible />
+
+### How a B-Tree Lookup Works
+
+To find the key `42` in a B-tree:
+
+1. Start at the root. The root says "keys less than 50 go left, keys 50 or more go right." So we go left.
+2. At the next level, it says "keys less than 30 go left, 30-50 go right." So we go right.
+3. We reach a leaf node. It contains the keys 35, 42, 47. We find 42. Done.
+
+The number of steps is the height of the tree. For a table with a million rows and a B-tree of height 3, you only need 3 page reads to find any row. Without an index, you might need to read thousands of pages. That is the difference between 1 millisecond and 1 second.
+
+### Why B-Trees and Not Binary Search Trees
+
+A binary search tree (BST) has at most 2 children per node. A B-tree can have hundreds. This matters because each node corresponds to one disk page read. A BST with a million nodes has a height of about 20 — that is 20 disk reads. A B-tree with a million keys and 100 keys per node has a height of about 4 — that is 4 disk reads. The B-tree is 5x faster because it is wider, not because it is fundamentally different.
+
+### The Cost of Indexes
+
+Indexes are not free. Every index is a separate B-tree that must be updated whenever you INSERT, UPDATE, or DELETE rows. If you have 5 indexes on a table, every INSERT must update 5 B-trees. That is why adding indexes speeds up reads but slows down writes. The art of database performance is adding the right indexes — enough to make reads fast, not so many that writes become unbearable.
+
+You now understand B-tree indexes. Let us look at the other types of indexes databases offer.
+
+## Index Types
+
+B-trees are the workhorse, but they are not the only kind of index. Different query patterns need different index structures.
+
+<IndexTypeDemo client:visible />
+
+### When to Use Each Type
+
+- **B-tree**: The default choice. Good for equality (`=`), range (`>`, `<`, `BETWEEN`), and sorting (`ORDER BY`). Works on any data type. Use this unless you have a specific reason not to.
+- **Hash**: Only for exact equality (`=`). Cannot do range queries or sorting. But O(1) lookup — faster than B-tree for point lookups. Used by PostgreSQL's `CREATE INDEX ... USING HASH`.
+- **Full-text**: For searching text content. Understands language (stemming, stop words) and supports relevance ranking. PostgreSQL has `tsvector`, MySQL has `FULLTEXT`.
+- **Bitmap**: Specialized for read-heavy analytical queries with low cardinality columns (like `gender` or `status`). Postgres uses these internally when multiple conditions are combined.
+
+You now understand the different index types. Let us see how the database decides which index to use.
+
+## Query Planning: The Optimizer
+
+The query optimizer is the brain of the database. Given a query, it considers multiple possible execution plans and picks the one it estimates will be fastest. The key question it asks for every condition in your WHERE clause is: "Is it cheaper to use the index, or just scan the whole table?"
+
+<QueryPlannerDemo client:visible />
+
+### Selectivity: The Key Concept
+
+Selectivity is the fraction of rows that match a condition. A condition that matches 1% of rows is highly selective. A condition that matches 90% of rows is not selective at all.
+
+- **High selectivity (< 5% match)**: Index is faster. The database reads a few index pages, fetches a few data pages. Much less I/O than scanning the whole table.
+- **Low selectivity (> 30% match)**: Full table scan is faster. Reading the index AND then reading the data pages is more work than just reading all data pages once.
+- **Middle ground (5-30%)**: The optimizer uses statistics (number of rows, distinct values, distribution histograms) to estimate the cost of each approach and picks the cheaper one.
+
+This is why adding an index on a `gender` column with only two values (M/F) usually does not help. The selectivity is 50% — the database is going to read half the table anyway, and it is cheaper to just scan it all at once than to read the index first.
+
+### What the Optimizer Cannot Know
+
+The optimizer uses statistics, not perfect knowledge. If your statistics are outdated (run `ANALYZE` in PostgreSQL), the optimizer might pick a terrible plan. This is why query performance can suddenly degrade after a bulk data load — the statistics no longer reflect reality.
+
+You now understand query planning. Let us look at what happens when multiple people use the database at the same time.
+
+## Concurrency: Multiple Users, One Database
+
+In the real world, hundreds or thousands of users read and write to the same database simultaneously. Without coordination, chaos ensues. Two users update the same bank balance at the same time. One overwrites the other's change. The final balance is wrong. This is the classic **lost update** problem.
+
+Databases solve this with **locks** and **isolation levels**. A lock prevents other transactions from accessing data that is being modified. Isolation levels define how aggressively the database applies these locks.
+
+<ConcurrencyDemo client:visible />
+
+### Types of Locks
+
+- **Shared lock (S-lock)**: Multiple transactions can hold a shared lock on the same data simultaneously. Used for reading. "I am reading this, others can read too, but nobody can write."
+- **Exclusive lock (X-lock)**: Only one transaction can hold an exclusive lock. Used for writing. "I am modifying this, nobody else can read or write until I am done."
+
+The simplest approach is to lock everything exclusively. But that makes the database effectively single-user — terrible for performance. Real databases use sophisticated locking strategies that balance correctness with concurrency.
+
+You now understand concurrency and locks. Let us look at isolation levels, which control how much one transaction can see of another's uncommitted changes.
+
+## Isolation Levels
+
+Isolation levels define the rules for what one transaction can see when other transactions are running concurrently. The SQL standard defines four levels, from weakest to strongest. Each level prevents a specific class of anomaly.
+
+<IsolationDemo client:visible />
+
+### The Four Levels
+
+1. **Read Uncommitted**: A transaction can read data that another transaction has written but not yet committed. This is dangerous — you might read data that gets rolled back, making your results based on phantom data. Called a **dirty read**.
+
+2. **Read Committed**: A transaction can only read committed data. Dirty reads are prevented. But if you read the same row twice during your transaction, another transaction might have changed it in between. Called a **non-repeatable read**.
+
+3. **Repeatable Read**: If you read a row, you will always see the same value within that transaction, even if another transaction modifies it. But if another transaction inserts NEW rows that match your query, you might see them on a second read. Called a **phantom read**.
+
+4. **Serializable**: The strongest level. Guarantees that concurrent transactions produce the same results as if they had been run one after another, in some order. No dirty reads, no non-repeatable reads, no phantom reads. But also the slowest — it effectively serializes access.
+
+### What Most Applications Use
+
+Most applications use **Read Committed** (PostgreSQL's default) or **Repeatable Read** (MySQL InnoDB's default). Serializable is rarely needed and comes with a significant performance cost. Read Uncommitted is almost never used — the risk of dirty reads is not worth any performance gain.
+
+You now understand isolation levels. Let us look at how databases survive crashes.
+
+## Write-Ahead Logging (WAL)
+
+What happens if the power goes out while the database is writing data to disk? Half of a row might be written, half might not. The page on disk is now corrupt. This is called a **torn write** and it is one of the hardest problems in database engineering.
+
+The solution is Write-Ahead Logging (WAL, pronounced "wall"). Before modifying any data page on disk, the database first writes a description of the change to a log file. The log entry says "transaction 42 changed row 5 in page 100: old value was 'Alice', new value is 'Bob'." This log entry is written sequentially (fast) and flushed to disk before the data page is modified.
+
+<WalDemo client:visible />
+
+### How WAL Enables Crash Recovery
+
+After a crash, the database recovers in two phases:
+
+1. **Redo**: Scan the WAL forward from the last checkpoint. Re-apply any logged changes that might not have made it to the data pages. If the log says "change Alice to Bob" but the data page still says "Alice," apply the change.
+
+2. **Undo**: Scan the WAL backward. For any transaction that was logged but never committed (because the crash happened mid-transaction), undo those changes. If the log says "transaction 43 changed Alice to Bob" but there is no COMMIT for transaction 43, change "Bob" back to "Alice."
+
+The result: after recovery, every committed transaction's changes are on disk, and every uncommitted transaction's changes are rolled back. The database is in a consistent state.
+
+### Why WAL Is Fast
+
+Writing to the WAL is sequential — the disk head stays in one place and just appends. Sequential writes are 10-100x faster than random writes (which require the disk head to seek to different positions). By writing to the WAL first and writing to data pages lazily (in the background), the database can acknowledge a COMMIT quickly without waiting for the slow random write to the data page.
+
+You now understand WAL and crash recovery. Let us bring it all together with practical guidance on indexes.
+
+## Index Advisor: When to Add an Index
+
+Indexes are the most powerful performance tool in a database, but they come with a cost. Every index slows down writes and uses disk space and memory. The art is adding the right indexes for your actual query patterns and removing the ones that do not help.
+
+<IndexAdvisorDemo client:visible />
+
+### Rules of Thumb
+
+1. **Index columns that appear in WHERE clauses** — This is the most impactful type of index. If you frequently query `WHERE email = ?`, index the `email` column.
+
+2. **Index columns used in JOINs** — Foreign key columns should almost always be indexed. If you JOIN `orders` to `users` on `user_id`, index `orders.user_id`.
+
+3. **Index columns used in ORDER BY** — If you frequently sort by `created_at DESC`, an index on that column lets the database return results in order without a separate sort step.
+
+4. **Do not over-index** — Every index slows down INSERT, UPDATE, and DELETE. A table with 10 indexes is 10x slower to write to than a table with no indexes (roughly).
+
+5. **Use composite indexes wisely** — An index on `(user_id, created_at)` can serve queries that filter by `user_id` alone, or by both `user_id` and `created_at`. But it cannot serve a query that filters by `created_at` alone (the column order matters).
+
+6. **Drop unused indexes** — Use `pg_stat_user_indexes` in PostgreSQL to find indexes that are never scanned. They are wasting write performance and disk space for no benefit.
+
+### The Query-Index Matrix
+
+| Query Pattern | Recommended Index | Why |
+|---|---|---|
+| `WHERE id = ?` | Primary key (automatic) | Unique lookup, one page read |
+| `WHERE email = ?` | `CREATE INDEX idx_email ON users(email)` | Point lookup, B-tree |
+| `WHERE status = ?` (2 values) | Skip index | Low selectivity, full scan faster |
+| `WHERE user_id = ? ORDER BY created_at DESC` | `CREATE INDEX idx_user_date ON orders(user_id, created_at DESC)` | Composite, covers filter + sort |
+| `WHERE name LIKE '%john%'` | Full-text index or `pg_trgm` | Leading wildcard prevents B-tree usage |
+| `WHERE created_at > ? AND created_at < ?` | `CREATE INDEX idx_created ON orders(created_at)` | Range query, B-tree handles it |
+
+## What You Learned
+
+You started with the question "why not just use files?" and now you understand the full machinery inside a database:
+
+- **Why databases exist**: fast lookups, concurrent access, crash recovery, consistency guarantees
+- **The query lifecycle**: parsing, planning, execution, and return — the optimizer is the brain
+- **Storage pages**: data is stored in fixed-size blocks, disk I/O is the bottleneck
+- **B-tree indexes**: balanced trees that turn O(n) scans into O(log n) lookups
+- **Index types**: B-tree, hash, full-text, and bitmap — each for different query patterns
+- **Query planning**: selectivity determines whether an index or full scan is faster
+- **Concurrency**: locks (shared and exclusive) coordinate simultaneous access
+- **Isolation levels**: read uncommitted through serializable, each preventing different anomalies
+- **Write-ahead logging**: sequential log writes enable crash recovery and fast commits
+- **Index strategy**: add indexes for WHERE/JOIN/ORDER BY columns, remove unused ones
+
+### Self-Check
+
+Before moving on, make sure you can answer these:
+
+- [ ] Why is reading from disk the bottleneck, and how do pages help?
+- [ ] What makes a B-tree better than a binary search tree for databases?
+- [ ] What is selectivity, and why does it determine whether an index is used?
+- [ ] What is the difference between a shared lock and an exclusive lock?
+- [ ] What anomaly does each isolation level prevent?
+- [ ] How does WAL enable crash recovery after a power failure?
+- [ ] Why should you not index a column with only 2 distinct values?
+- [ ] What is a composite index, and why does column order matter?
+
+If you can answer all eight, you understand database internals at a level that most developers never reach. This knowledge will help you write faster queries, design better schemas, and debug mysterious performance problems.
