@@ -1,5 +1,6 @@
 import { useState, useEffect, Fragment } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -46,15 +47,16 @@ function cumulativeTime(step: number): number {
 export default function JourneyDemo() {
   const [step, setStep] = useState(0)
   const [running, setRunning] = useState(false)
+  const [speed, setSpeed] = useState(1)
 
   useEffect(() => {
     if (!running || step >= 7) {
       if (step >= 7) setRunning(false)
       return
     }
-    const timer = setInterval(() => setStep(prev => prev + 1), 600)
+    const timer = setInterval(() => setStep(prev => prev + 1), getStepDelay(600, speed))
     return () => clearInterval(timer)
-  }, [running, step])
+  }, [running, step, speed])
 
   const handleGo = () => {
     if (step >= 7) setStep(0)
@@ -77,6 +79,7 @@ export default function JourneyDemo() {
           }}>
             {running ? 'Running...' : step >= 7 ? 'Replay' : 'Go'}
           </button>
+          <SpeedController speed={speed} onSpeedChange={setSpeed} />
           {step > 0 && (
             <div style={{ ...M, fontSize: 14, color: s.text2 }}>
               Time: <span style={{ color: s.yellow }}>{cumulativeTime(step)}ms</span>

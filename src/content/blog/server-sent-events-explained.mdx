@@ -1,0 +1,391 @@
+---
+title: "Server-Sent Events: The One-Way Street Your App Already Uses"
+description: "A deep dive into the SSE protocol — how it works, when to use it vs WebSocket, the wire format, auto-reconnection, and real-world patterns like AI streaming responses."
+date: 2026-04-01
+tags: ["sse", "http", "real-time", "streaming", "protocol"]
+---
+
+import SseRequestResponseDemo from '../../components/demos/SseRequestResponseDemo'
+import SseStreamDemo from '../../components/demos/SseStreamDemo'
+import SseWireFormatDemo from '../../components/demos/SseWireFormatDemo'
+import SseEventTypesDemo from '../../components/demos/SseEventTypesDemo'
+import SseConnectionDemo from '../../components/demos/SseConnectionDemo'
+import SseHttpDemo from '../../components/demos/SseHttpDemo'
+import SseReconnectDemo from '../../components/demos/SseReconnectDemo'
+import SseVsWebSocketDemo from '../../components/demos/SseVsWebSocketDemo'
+import SseServerDemo from '../../components/demos/SseServerDemo'
+import SseClientDemo from '../../components/demos/SseClientDemo'
+import SseErrorDemo from '../../components/demos/SseErrorDemo'
+import SseAdvancedDemo from '../../components/demos/SseAdvancedDemo'
+import SseRealWorldDemo from '../../components/demos/SseRealWorldDemo'
+
+Imagine you are sitting at a restaurant. In the traditional HTTP model, you walk up to the counter, place your order, wait three minutes while they cook, and then they hand you your food. You eat it. If you want more food, you have to go back to the counter and order again. Every single time.
+
+Now imagine a different restaurant. You sit down, place your order once, and the waiter starts bringing you courses as they are ready. Soup arrives first. Then bread. Then the main course, one piece at a time. You can eat as each course arrives. You never have to re-order. The waiter keeps topping up your water glass automatically. When the kitchen is done, the waiter lets you know and closes out the table.
+
+The second restaurant is Server-Sent Events.
+
+## What Problem Does SSE Solve?
+
+The web was built on a request/response model. A client (your browser) sends a request, the server sends one response, and the connection closes. For loading web pages, this works fine. HTML comes back, the browser renders it, done.
+
+But what about things that update over time? Stock prices. Chat messages. Live sports scores. AI assistant responses that stream token by token. You could keep polling — sending a new request every second to ask "any new data?" — but that is like calling your friend every 30 seconds to ask "are you there yet?" It works, but it is exhausting and slow.
+
+The web needed a way for servers to push data to browsers without the browser having to ask.
+
+<SseRequestResponseDemo client:visible />
+
+The left side shows what regular HTTP looks like: you wait, then everything arrives at once. The right side shows SSE: data starts arriving immediately and keeps flowing. No re-ordering needed.
+
+## The HTTP Connection That Never Closes
+
+SSE is deceptively simple because it is built on top of HTTP — the same protocol your browser already uses for everything. The server just agrees to keep the HTTP connection open and send data through it in a special format.
+
+When a browser connects to an SSE endpoint, it sends a regular HTTP request with an `Accept` header saying it wants `text/event-stream`:
+
+```
+GET /events HTTP/1.1
+Host: api.example.com
+Accept: text/event-stream
+```
+
+The server responds with a special status and headers:
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Transfer-Encoding: chunked
+Cache-Control: no-cache
+Connection: keep-alive
+```
+
+Notice `Content-Type: text/event-stream`. This tells the browser "this is not regular data — it is an event stream". The `Transfer-Encoding: chunked` means the response body is sent in chunks, not all at once. And `Cache-Control: no-cache` ensures proxies and browsers do not buffer or cache this response.
+
+<SseHttpDemo client:visible />
+
+Compare that to a regular JSON response. A regular response has a `Content-Length` header — the server must know exactly how many bytes it is sending before it sends anything. SSE uses `Transfer-Encoding: chunked` instead, which means the server can send data as it generates it, byte by byte or chunk by chunk, without knowing the total size upfront.
+
+## The SSE Wire Format
+
+SSE defines a remarkably simple text format for encoding events. Each event is a set of field-value lines, followed by a blank line:
+
+```
+data: Hello, world!
+
+event: notification
+data: You have a new message
+id: msg-42
+
+: this is a comment
+retry: 5000
+data: Multi-line
+data: message
+data: here
+
+```
+
+<SseWireFormatDemo client:visible />
+
+The parsing rules are straightforward:
+
+- Each line has the format `field: value` (the colon and space are required)
+- `data:` is the event payload. If a single event has multiple `data:` lines, they are joined with newlines between them
+- A blank line (just `\n\n` or `\r\n\r\n`) signals the end of an event
+- Lines starting with `:` are comments and are ignored entirely
+- `event:` sets the event type name (defaults to `message`)
+- `id:` sets the event's unique ID (more on this later)
+- `retry:` tells the client how many milliseconds to wait before reconnecting if the connection drops (defaults to 3000)
+
+That is the entire protocol. No binary encoding, no JSON structure required, no WebSocket handshake. Just plain text over HTTP.
+
+## Event Types: Default vs Named
+
+Every SSE event has a type. If you do not specify one, it defaults to `message`. If you do specify one, you give it any name you want.
+
+<SseEventTypesDemo client:visible />
+
+The browser handles these differently. Default events fire the `onmessage` handler:
+
+```javascript
+source.onmessage = (event) => {
+  console.log('Default event:', event.data)
+}
+```
+
+Named events require you to register a specific listener:
+
+```javascript
+source.addEventListener('notification', (event) => {
+  console.log('Notification:', event.data)
+})
+
+source.addEventListener('alert', (event) => {
+  console.log('Alert:', event.data)
+})
+```
+
+This separation is useful. You might have one part of your code that handles notifications, another part that handles alerts, and another that handles the default "something happened" events. Each listener is independent.
+
+## Building an SSE Connection: The EventSource API
+
+Browsers have built-in support for SSE through the `EventSource` API. It is refreshingly simple:
+
+<SseConnectionDemo client:visible />
+
+```javascript
+const source = new EventSource('/events')
+
+source.onopen = () => {
+  console.log('Connection opened')
+}
+
+source.onmessage = (event) => {
+  console.log('Received:', event.data)
+}
+
+source.addEventListener('notification', (event) => {
+  console.log('Notification:', event.data)
+})
+
+source.onerror = (error) => {
+  console.error('SSE error:', error)
+}
+
+// When done
+source.close()
+```
+
+<SseClientDemo client:visible />
+
+The connection URL must be on the same origin, or the server must send proper CORS headers (`Access-Control-Allow-Origin`). There is no way around this — SSE is bound by the same-origin policy just like regular fetch.
+
+`EventSource` has three ready states: `CONNECTING` (0), `OPEN` (1), and `CLOSED` (2). You can check `source.readyState` at any time.
+
+One gotcha: unlike `fetch`, `EventSource` cannot send custom headers. If you need to send an authentication token, you have to either include it in the URL (with all the security implications that entails) or use a cookie-based session instead.
+
+## Reconnection and Last-Event-ID
+
+One of SSE's killer features is automatic reconnection. If the network drops, the browser automatically tries to reconnect. But it needs to know where to resume — otherwise it might get duplicate events or miss events entirely.
+
+<SseReconnectDemo client:visible />
+
+This is what the `id:` field is for. When the server sends an event with an ID, the browser remembers that ID. When it reconnects, it sends the header `Last-Event-ID: <id>` to tell the server "I last received event number X, start from there".
+
+```
+id: msg-42
+data: This is message 42
+```
+
+```
+Last-Event-ID: msg-42
+```
+
+The server can use this ID to resume the stream from where it left off, skipping events the client already received and sending only new ones. The server does not have to implement this — if it ignores `Last-Event-ID`, it just sends everything again and the client deals with duplicates.
+
+The retry interval is also configurable. The server can send:
+
+```
+retry: 10000
+```
+
+This tells the client to wait 10 seconds before reconnecting after a disconnect, instead of the default 3 seconds.
+
+## SSE vs WebSocket: When to Use Which
+
+This is the question everyone asks. The answer is not "WebSocket is better" or "SSE is better" — it depends entirely on your use case.
+
+<SseVsWebSocketDemo client:visible />
+
+| Feature | SSE | WebSocket |
+|---------|-----|-----------|
+| Direction | Server to client only | Bidirectional |
+| Protocol | HTTP/1.1 | `ws://` or `wss://` (custom) |
+| Auto-reconnect | Built-in | Manual implementation |
+| Browser support | Modern browsers | Universal |
+| Proxy compatibility | Works through proxies | May be blocked |
+| Firewall traversal | HTTP-based, usually fine | May be blocked |
+| Complexity | Very simple | More complex |
+| Binary data | Base64 encoding needed | Native binary support |
+| Overhead per message | Low (text only) | Very low (minimal framing) |
+
+**Use SSE when:**
+- You only need server-to-client communication
+- You want simplicity and automatic reconnection
+- You are already running on HTTP and do not want to set up a WebSocket server
+- You need compatibility with HTTP/2 multiplexing
+- You want text-based debugging — you can literally read SSE streams in `curl`
+
+**Use WebSocket when:**
+- You need bidirectional communication
+- You need to send data from client to server frequently
+- You need binary data transfer (images, files, sensor data)
+- You need the lowest possible latency and overhead
+- You are building something like a chat app, multiplayer game, or collaborative editor
+
+A common pattern is to use both: SSE for server-initiated updates (notifications, live data feeds) and WebSocket for client-initiated requests and high-frequency bidirectional communication.
+
+## Building a Real SSE Server
+
+Let us look at what a real SSE server looks like. We will use Node.js and Express, but the concepts apply to any language or framework.
+
+<SseServerDemo client:visible />
+
+```javascript
+const express = require('express')
+const app = express()
+
+app.get('/events', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  })
+
+  res.flushHeaders()
+
+  const interval = setInterval(() => {
+    const message = `data: ${new Date().toISOString()}\n\n`
+    res.write(message)
+  }, 1000)
+
+  req.on('close', () => {
+    clearInterval(interval)
+  })
+})
+
+app.listen(3000)
+```
+
+A few things to notice:
+
+- `X-Accel-Buffering: no` — this is an Nginx-specific header. Without it, Nginx buffers the response and defeats the whole purpose of streaming. If you are running behind Nginx, you need this.
+- `res.flushHeaders()` — forces the headers to be sent immediately. Without this, Node.js might wait until the first `res.write()` before flushing headers.
+- The `close` event handler — when the client disconnects, you must clean up the interval. Otherwise you have a memory leak.
+- Each message is `data: <content>\n\n` — two newlines at the end, because that is how the browser knows the event is complete.
+
+For a more complete server that supports `Last-Event-ID` for reconnection:
+
+```javascript
+app.get('/events', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  })
+
+  res.flushHeaders()
+
+  const lastId = req.headers['last-event-id']
+  let counter = lastId ? parseInt(lastId) + 1 : 0
+
+  const interval = setInterval(() => {
+    res.write(`id: ${counter}\n`)
+    res.write(`data: Event ${counter}\n\n`)
+    counter++
+  }, 1000)
+
+  req.on('close', () => {
+    clearInterval(interval)
+  })
+})
+```
+
+## Error Handling
+
+SSE error handling requires attention. The browser will automatically try to reconnect on most errors, but you need to know what is happening.
+
+<SseErrorDemo client:visible />
+
+```javascript
+source.onerror = (error) => {
+  console.error('Error occurred:', error)
+  if (source.readyState === EventSource.CLOSED) {
+    console.log('Connection was closed permanently')
+  }
+}
+```
+
+Common error scenarios:
+
+- **Server returns non-200 status** — `onerror` fires, browser does not reconnect automatically
+- **Network disconnection** — `onerror` fires, browser reconnects with `Last-Event-ID`
+- **Server never sends data** — the connection hangs forever. You need a heartbeat/timeout mechanism
+- **CORS violation** — `onerror` fires, no reconnect. You need proper `Access-Control-Allow-Origin` headers
+- **Browser tab backgrounded** — some browsers throttle connections. Consider using visibility API to pause/resume
+
+## Advanced Patterns
+
+<SseAdvancedDemo client:visible />
+
+### Heartbeat / Keepalive
+
+If a server sends nothing for a while, proxies and load balancers may think the connection is dead and close it. To prevent this, servers send periodic comment lines (which the browser ignores):
+
+```
+: heartbeat\n\n
+```
+
+These comments keep the connection alive without triggering any event handlers.
+
+### Multiplexing
+
+A single SSE connection can carry multiple types of events using the `event:` field. This is called multiplexing — one stream, multiple channels:
+
+```
+event: temperature
+data: 72.5
+
+event: humidity
+data: 45%
+
+event: pressure
+data: 1013.25
+```
+
+Your client code registers listeners for each event type and processes them independently. This is more efficient than opening multiple SSE connections, because HTTP/2 can multiplex multiple streams over a single connection.
+
+### Custom Retry Intervals
+
+The server can change the retry interval dynamically:
+
+```
+retry: 10000
+```
+
+Send this at any time to change how long the client waits before reconnecting. Useful if your server is overloaded and wants to throttle reconnection attempts.
+
+## SSE in the Real World
+
+<SseRealWorldDemo client:visible />
+
+SSE is everywhere once you know what to look for:
+
+- **AI Assistants** — ChatGPT, Claude, and similar tools use SSE to stream tokens as they generate them. Each token arrives as a `data:` event. The stream ends when the model is done.
+- **GitHub Copilot** — Streams code completions as you type.
+- **Google Docs** — Real-time collaboration updates (though Google uses a more complex system).
+- **Live Dashboards** — Stock trading platforms, analytics dashboards, server monitoring.
+- **Social Media** — Twitter/X used SSE for live updates (before moving to WebSocket).
+- **CDN Status Pages** — Cloudflare and others use SSE for real-time status updates.
+
+You might be using SSE right now without realizing it. Open your browser's network tab, filter for `text/event-stream`, and watch.
+
+## The Self-Check
+
+Before you close this page, make sure you can answer these questions:
+
+- [ ] Can you explain why SSE works through most proxies but WebSocket sometimes does not?
+- [ ] Can you draw the SSE wire format for an event with type `update` and data `{ "status": "ready" }`?
+- [ ] Why does SSE use `Transfer-Encoding: chunked` instead of `Content-Length`?
+- [ ] What happens to an SSE connection when the server crashes? What does the client do?
+- [ ] Can you name two use cases where WebSocket is clearly better than SSE, and two where SSE is clearly better than WebSocket?
+- [ ] What is the purpose of the `Last-Event-ID` header and when is it sent?
+
+If you got them all, you understand SSE. If not, go play with the demos above.
+
+## Further Reading
+
+The [MDN documentation on SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events) is excellent and includes browser compatibility notes. The [HTML Living Standard](https://html.spec.whatwg.org/multipage/server-sent-events.html) defines the protocol formally. For a server implementation guide, see the [Express SSE example](https://expressjs.com/en/guide/writing-middleware.html) and remember the `X-Accel-Buffering` header if you use Nginx.
+
+SSE is not flashy. It does not have a cool logo or a hype cycle. It is just HTTP with a text format and a promise not to close the connection. But for server-to-client streaming, it is often the right tool — simple, reliable, and built on infrastructure you already have running.
