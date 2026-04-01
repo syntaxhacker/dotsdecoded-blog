@@ -8,19 +8,19 @@ const { title, date, tags = [], description = '', headings = [], image } = Astro
   {tags.map(tag => <meta property="article:tag" content={tag} />)}
   <meta property="article:published_time" content={date.toISOString()} />
   <div class="page">
-    <aside class="toc" id="toc">
-      <a href="/" class="toc-back">&larr; back</a>
-      <nav class="toc-nav" id="toc-nav">
+    <aside class="toc" id="toc" data-testid="toc-aside">
+      <a href="/" class="toc-back" data-testid="back-link">&larr; back</a>
+      <nav class="toc-nav" id="toc-nav" data-testid="toc-nav">
         {headings.map((h: { id: string; text: string; level: number }) => (
-          <a href={`#${h.id}`} class={`toc-link ${h.level === 3 ? 'toc-h3' : 'toc-h2'}`} data-target={h.id}>
+          <a href={`#${h.id}`} class={`toc-link ${h.level === 3 ? 'toc-h3' : 'toc-h2'}`} data-target={h.id} data-testid="toc-link">
             {h.text}
           </a>
         ))}
       </nav>
     </aside>
     <div class="page-inner">
-      <h1 class="page-title">{title}</h1>
-      <div class="page-meta">
+      <h1 class="page-title" data-testid="post-title">{title}</h1>
+      <div class="page-meta" data-testid="post-meta">
         <time datetime={date.toISOString()}>
           {date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
         </time>
@@ -28,13 +28,13 @@ const { title, date, tags = [], description = '', headings = [], image } = Astro
           <>
             <span style="color: var(--text3)">&middot;</span>
             {tags.map((tag) => (
-              <span class="tag">{tag}</span>
+              <span class="tag" data-testid="post-tag">{tag}</span>
             ))}
           </>
         )}
       </div>
       <hr class="page-divider" />
-      <div class="prose">
+      <div class="prose" data-testid="post-content">
         <slot />
       </div>
       <hr class="page-divider" />

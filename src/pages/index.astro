@@ -31,26 +31,27 @@ const edges = Array.from(edgeMap.entries()).map(([key, weight]) => {
 
 <BaseLayout title="DotsDecoded" description="Deep dives into systems, tools, and the code that powers them.">
   <div class="home">
-    <div class="home-left">
+    <div class="home-left" data-testid="home-content">
       <div class="home-header">
         <div style="display:flex; justify-content:space-between; align-items:center;">
-          <h1>Dots_Decoded</h1>
-          <button class="theme-toggle" onclick="window.__toggleTheme()">theme</button>
+          <h1 data-testid="site-title">Dots_Decoded</h1>
+          <button class="theme-toggle" data-testid="theme-toggle" onclick="window.__toggleTheme()">theme</button>
         </div>
-        <p class="subtitle">deep dives into systems, tools & code</p>
+        <p class="subtitle" data-testid="subtitle">deep dives into systems, tools & code</p>
       </div>
       <div class="search-wrapper">
         <input
           type="text"
           class="search-input"
           id="search-input"
+          data-testid="search-input"
           placeholder="search posts..."
           autocomplete="off"
         />
       </div>
-      <div class="blog-list" id="blog-list">
+      <div class="blog-list" id="blog-list" data-testid="blog-list">
         {posts.map((post) => (
-          <a href={`/blog/${post.id}`} class="blog-card" data-title={post.data.title.toLowerCase()} data-desc={post.data.description.toLowerCase()} data-tags={post.data.tags.join(' ').toLowerCase()} data-href={`/blog/${post.id}`}>
+          <a href={`/blog/${post.id}`} class="blog-card" data-testid="blog-card" data-post-slug={post.id} data-title={post.data.title.toLowerCase()} data-desc={post.data.description.toLowerCase()} data-tags={post.data.tags.join(' ').toLowerCase()} data-href={`/blog/${post.id}`}>
             <div class="blog-card-title">{post.data.title}</div>
             <div class="blog-card-meta">
               <time datetime={post.data.date.toISOString()}>
@@ -60,14 +61,14 @@ const edges = Array.from(edgeMap.entries()).map(([key, weight]) => {
             <div class="blog-card-desc">{post.data.description}</div>
             <div class="blog-card-tags">
               {post.data.tags.map((tag) => (
-                <span class="tag">{tag}</span>
+                <span class="tag" data-testid="tag">{tag}</span>
               ))}
             </div>
           </a>
         ))}
       </div>
     </div>
-    <div class="home-right">
+    <div class="home-right" data-testid="tag-graph-wrapper">
       <TagGraphDemo client:visible tags={tags} edges={edges} />
     </div>
   </div>
