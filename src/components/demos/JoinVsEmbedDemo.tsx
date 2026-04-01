@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -32,6 +33,7 @@ const joinResult = [
 ]
 
 export default function JoinVsEmbedDemo() {
+  const [speed, setSpeed] = useState(1)
   const [joinPhase, setJoinPhase] = useState(0)
   const [expandedDoc, setExpandedDoc] = useState<number | null>(null)
   const [svgLines, setSvgLines] = useState<{ x1: number; y1: number; x2: number; y2: number; color: string; len: number }[]>([])
@@ -64,10 +66,10 @@ export default function JoinVsEmbedDemo() {
       }
       setSvgLines(lines)
       requestAnimationFrame(() => setLinesVisible(true))
-      setTimeout(() => setJoinPhase(2), 2500)
-    }, 150)
+      setTimeout(() => setJoinPhase(2), getStepDelay(2500, speed))
+    }, getStepDelay(150, speed))
     return () => clearTimeout(timer)
-  }, [joinPhase])
+  }, [joinPhase, speed])
 
   const runJoin = () => {
     setJoinPhase(0)
@@ -210,6 +212,7 @@ export default function JoinVsEmbedDemo() {
                   Reset
                 </button>
               )}
+              <SpeedController speed={speed} onSpeedChange={setSpeed} />
             </div>
 
             {joinPhase === 2 && (

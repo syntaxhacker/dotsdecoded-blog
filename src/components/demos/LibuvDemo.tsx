@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -267,6 +268,7 @@ export default function LibuvDemo() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [poolSize] = useState(4)
   const [running, setRunning] = useState(false)
+  const [speed, setSpeed] = useState(1)
   const [currentPhase, setCurrentPhase] = useState(-1)
   const [logs, setLogs] = useState<string[]>([])
   const [tick, setTick] = useState(0)
@@ -329,7 +331,7 @@ export default function LibuvDemo() {
     const otherTasks = runnable.filter(t => t.type !== 'pool')
 
     function frame() {
-      const elapsed = performance.now() - startTime
+      const elapsed = (performance.now() - startTime) / speed
 
       let activePool = 0
       let allDone = true
@@ -394,7 +396,7 @@ export default function LibuvDemo() {
     }
 
     animRef.current = requestAnimationFrame(frame)
-  }, [tasks, running, poolSize, log])
+  }, [tasks, running, poolSize, log, speed])
 
   useEffect(() => {
     return () => {
@@ -460,6 +462,7 @@ export default function LibuvDemo() {
           >
             {running ? 'running...' : 'run'}
           </button>
+          <SpeedController speed={speed} onSpeedChange={setSpeed} />
         </div>
       </div>
 

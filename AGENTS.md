@@ -107,6 +107,13 @@ Examples:
 - `JourneyDemo.tsx` — animate the full request journey
 - `AttackDemo.tsx` — interact with different attack types
 - `TraceDemo.tsx` — trace an IP through the evidence chain
+- `StreamingDemo.tsx` — simulate SSE event stream with content block accumulation
+- `McpDemo.tsx` — explore MCP server connections and tool discovery
+- `MemoryDemo.tsx` — toggle CLAUDE.md files, manage auto-memory, use scratchpad
+- `HooksDemo.tsx` — watch lifecycle hooks fire during a simulated session
+- `SpeculationDemo.tsx` — see copy-on-write overlay filesystem in predictive execution
+- `LspDiagnosticDemo.tsx` — watch LSP detect errors and feed them back to Claude
+- `AgentSdkDemo.tsx` — run an SDK session with permission decisions and event log
 
 ## Demo Component Rules
 
@@ -137,7 +144,7 @@ const s = {
 }
 ```
 
-7. Only import from `react` — no external libraries
+7. Only import from `react` — no external libraries. Exception: `prismjs` for code syntax highlighting inside demos (see Prism in Demos section)
 8. Max width container: `maxWidth: 820` on root div
 9. Font family on root: `fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"`
 10. Use `s.mono` for any monospace text
@@ -155,6 +162,10 @@ const s = {
 - **Defensive array handling**: If a component receives an array prop that might contain undefined elements (e.g., from state updates), guard with `Array.isArray(lines) ? lines.filter(Boolean) : []`
 - **JSX text escaping**: Curly braces inside JSX text content must be escaped: `{'{...}'}` not `{...}` (the latter is interpreted as a JSX expression)
 - **Object keys**: Never use duplicate keys in style objects — esbuild will error on `Duplicate key "fontSize"`
+- **SVG overflow**: Never use `overflow: 'visible'` on SVG elements. Root nodes render at y=0, causing content to bleed above the viewBox. Always add padding to the viewBox (e.g., `viewBox={-40 -30 ${w + 80} ${h + 40}}`) and ensure the outer container has `overflow: 'hidden'`
+- **No scrollIntoView**: Never use `element.scrollIntoView()` in demos — it scrolls the entire page (`.page-inner`), not just the demo container. Instead, use `container.scrollTop = container.scrollHeight` on the demo's own scrollable container (the parent div with `overflowY: 'auto'`)
+- **SpeedController**: For demos with timed animations (setInterval/setTimeout step sequences), import and add `<SpeedController speed={speed} onSpeedChange={setSpeed} />` next to the action button. Replace hardcoded delays with `getStepDelay(baseDelay, speed)` from `./SpeedController`. For setInterval, recreate the interval via `useEffect` when `speed` changes
+- **No demo count cap**: There is no maximum number of demos per blog post. Use as many as needed to cover each concept (comprehensive posts may have 15-17+)
 
 ## Creating a New Blog Post (Sub-Agent Guide)
 
@@ -162,8 +173,8 @@ When asked to create a new blog post, follow this workflow:
 
 ### Step 1: Plan the post structure
 
-1. Choose a topic and outline 8-15 sections (h2 and h3 headings)
-2. Identify which sections would benefit from interactive demos (typically 6-10 per post)
+1. Choose a topic and outline 8-25 sections (h2 and h3 headings)
+2. Identify which sections would benefit from interactive demos (no cap — use as many as needed)
 3. List the demo names and what each should do
 
 ### Step 2: Write the blog post MDX
@@ -221,6 +232,44 @@ Each post should follow a layered progression from zero knowledge to mastery:
 1. Install if needed (most are bundled with prismjs)
 2. Add `import 'prismjs/components/prism-LANG'` in BaseLayout.astro's Prism `<script>` block
 3. Use the language tag in fenced code blocks: ````LANG`
+
+## Prism in Demos
+
+Demos can use `Prism.highlight()` to syntax-highlight code panels. The Prism token CSS is scoped under `.prose pre` in global.css, which does NOT apply inside demo components. Instead, scope token colors with a `<style>` tag on the demo's root element:
+
+```tsx
+import Prism from 'prismjs'
+import 'prismjs/components/prism-typescript'
+
+const highlightedHtml = Prism.highlight(code, Prism.languages.typescript, 'typescript')
+
+// In JSX, use dangerouslySetInnerHTML scoped with a style tag:
+<style>{`
+  code .token.keyword { color: #f92672; }
+  code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+  code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+  code .token.selector, code .token.attr-name { color: #f92672; }
+  code .token.attr-value, code .token.atrule { color: #e6db74; }
+  code .token.function, code .token.class-name { color: #a6e22e; }
+  code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+  code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+  code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
+`}</style>
+
+<code dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+```
+
+Use `useMemo` to compute `highlightedHtml` once. Add `import 'prismjs/components/prism-LANG'` for additional languages. The style tag must be scoped to `code` selectors to avoid affecting other demos.
+
+### Prism Rules
+
+1. Any demo that displays code (JavaScript, TypeScript, etc.) MUST use `Prism.highlight()` — never render code as plain monospace text
+2. Always use `<div style={{ whiteSpace: 'pre' }}>` instead of `<pre>` for code containers inside demos. The BaseLayout copy-btn script targets `.prose pre` and will inject a `<button>` into demo `<pre>` elements, causing a React hydration mismatch
+3. Compute highlighted HTML with `useMemo` (or module-level if the code is a static constant)
+
+### Code Explorer Demos
+
+Demos that show code with clickable lines and explanations (like SseServerDemo, SseClientDemo) must highlight entire logical blocks, not individual lines. Group related lines into blocks (e.g. a function body, a config object, a cleanup handler) and highlight the full block when any line in it is clicked. Use a `lineToBlock` map, `blockRanges` array, and per-line border-radius (rounded top on first line, rounded bottom on last line, sharp corners on middle lines). Show a block label badge in the explanation panel alongside the per-line explanation.
 
 ## Open Graph Meta Tags
 

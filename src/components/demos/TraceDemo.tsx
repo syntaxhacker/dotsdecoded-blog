@@ -1,5 +1,6 @@
 import { useState, useEffect, Fragment } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -36,6 +37,7 @@ type VpnScenario = 'none' | 'commercial' | 'nolog'
 export default function TraceDemo() {
   const [traceStep, setTraceStep] = useState(0)
   const [running, setRunning] = useState(false)
+  const [speed, setSpeed] = useState(1)
   const [vpnScenario, setVpnScenario] = useState<VpnScenario>('none')
 
   useEffect(() => {
@@ -43,9 +45,9 @@ export default function TraceDemo() {
       if (traceStep >= 5) setRunning(false)
       return
     }
-    const timer = setInterval(() => setTraceStep(prev => prev + 1), 800)
+    const timer = setInterval(() => setTraceStep(prev => prev + 1), getStepDelay(800, speed))
     return () => clearInterval(timer)
-  }, [running, traceStep])
+  }, [running, traceStep, speed])
 
   const handleTrace = () => {
     if (traceStep >= 5) setTraceStep(0)
@@ -84,6 +86,7 @@ export default function TraceDemo() {
           }}>
             {running ? 'Tracing...' : traceStep >= 5 ? 'Replay' : 'Trace IP'}
           </button>
+          <SpeedController speed={speed} onSpeedChange={setSpeed} />
           {traceStep > 0 && traceStep < 5 && (
             <div style={{ ...M, fontSize: 12, color: s.accent }}>
               Step {traceStep}/5
