@@ -307,12 +307,12 @@ export default function LspDiagnosticDemo() {
             Diagnostic Pipeline
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'stretch', gap: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'stretch', gap: 0, flexWrap: 'wrap' }}>
             {pipelineStages.map((stage, idx) => {
               const isActive = activeStage === idx
               const isComplete = completedStages.has(stage.id)
               return (
-                <div key={stage.id} style={{ flex: 1, display: 'flex', alignItems: 'stretch' }}>
+                <div key={stage.id} style={{ flex: '1 1 140px', display: 'flex', alignItems: 'stretch' }}>
                   <div style={{
                     flex: 1,
                     background: isActive ? `${stage.color}10` : isComplete ? `${stage.color}06` : s.bg2,
