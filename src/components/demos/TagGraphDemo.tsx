@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import GUI from 'lil-gui'
 import DemoBoundary from './DemoBoundary'
 
 const s = {
@@ -190,7 +189,7 @@ export default function TagGraphDemo({ tags, edges }: Props) {
   const highlightedTagsRef = useRef<Set<string>>(new Set())
   const sizeRef = useRef({ w: 400, h: 400 })
   const drawRef = useRef<() => void>(() => {})
-  const guiRef = useRef<GUI | null>(null)
+  const guiRef = useRef<any>(null)
   const [theme, setTheme] = useState(isDarkTheme())
   const themeRef = useRef(theme)
 
@@ -235,9 +234,54 @@ export default function TagGraphDemo({ tags, edges }: Props) {
 
     const params = { ...defaults }
 
-    if (guiRef.current) guiRef.current.destroy()
-    const gui = new GUI({ title: 'Tag Graph' })
-    guiRef.current = gui
+    let gui: any = null
+    if (import.meta.env.DEV) {
+      if (guiRef.current) guiRef.current.destroy()
+      import('lil-gui').then((mod) => {
+        gui = new mod.default({ title: 'Tag Graph' })
+        guiRef.current = gui
+        const layoutFolder = gui.addFolder('Layout')
+        layoutFolder.add(params, 'verticalHeight', 0.1, 0.5, 0.01).name('Height').onChange(rebuild)
+        layoutFolder.add(params, 'horizontalWidth', 0.08, 0.4, 0.01).name('Width').onChange(rebuild)
+        layoutFolder.add(params, 'minRadius', 6, 30, 1).name('Min Radius').onChange(rebuild)
+        layoutFolder.add(params, 'maxRadius', 16, 60, 1).name('Max Radius').onChange(rebuild)
+        layoutFolder.add(params, 'linePadding', 0, 0.4, 0.01).name('Line Pad').onChange(rebuild)
+        layoutFolder.open()
+
+        const styleFolder = gui.addFolder('Style')
+        styleFolder.add(params, 'edgeOpacity', 0, 0.5, 0.01).name('Edge Alpha').onChange(render)
+        styleFolder.add(params, 'edgeHoverOpacity', 0.1, 1, 0.01).name('Hover Edge').onChange(render)
+        styleFolder.add(params, 'dimOpacity', 0, 0.2, 0.01).name('Dim Alpha').onChange(render)
+
+        gui.add(
+          {
+            reset() {
+              Object.assign(params, defaults)
+              gui.controllersRecursive().forEach((c: any) => c.updateDisplay())
+              rebuild()
+            },
+          },
+          'reset'
+        ).name('Reset')
+
+        gui.add(
+          {
+            copy() {
+              const json = JSON.stringify(params, null, 2)
+              navigator.clipboard.writeText(json).then(() => {
+                const title = gui.domElement.querySelector('.title')
+                if (title) {
+                  const orig = title.textContent
+                  title.textContent = 'Copied!'
+                  setTimeout(() => { title.textContent = orig }, 1200)
+                }
+              })
+            },
+          },
+          'copy'
+        ).name('Copy Config')
+      })
+    }
 
     function rebuild() {
       resize()
@@ -263,47 +307,6 @@ export default function TagGraphDemo({ tags, edges }: Props) {
       canvas.style.height = h + 'px'
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     }
-
-    const layoutFolder = gui.addFolder('Layout')
-    layoutFolder.add(params, 'verticalHeight', 0.1, 0.5, 0.01).name('Height').onChange(rebuild)
-    layoutFolder.add(params, 'horizontalWidth', 0.08, 0.4, 0.01).name('Width').onChange(rebuild)
-    layoutFolder.add(params, 'minRadius', 6, 30, 1).name('Min Radius').onChange(rebuild)
-    layoutFolder.add(params, 'maxRadius', 16, 60, 1).name('Max Radius').onChange(rebuild)
-    layoutFolder.add(params, 'linePadding', 0, 0.4, 0.01).name('Line Pad').onChange(rebuild)
-    layoutFolder.open()
-
-    const styleFolder = gui.addFolder('Style')
-    styleFolder.add(params, 'edgeOpacity', 0, 0.5, 0.01).name('Edge Alpha').onChange(render)
-    styleFolder.add(params, 'edgeHoverOpacity', 0.1, 1, 0.01).name('Hover Edge').onChange(render)
-    styleFolder.add(params, 'dimOpacity', 0, 0.2, 0.01).name('Dim Alpha').onChange(render)
-
-    gui.add(
-      {
-        reset() {
-          Object.assign(params, defaults)
-          gui.controllersRecursive().forEach((c) => c.updateDisplay())
-          rebuild()
-        },
-      },
-      'reset'
-    ).name('Reset')
-
-    gui.add(
-      {
-        copy() {
-          const json = JSON.stringify(params, null, 2)
-          navigator.clipboard.writeText(json).then(() => {
-            const title = gui.domElement.querySelector('.title')
-            if (title) {
-              const orig = title.textContent
-              title.textContent = 'Copied!'
-              setTimeout(() => { title.textContent = orig }, 1200)
-            }
-          })
-        },
-      },
-      'copy'
-    ).name('Copy Config')
 
     const edgeMap = new Map<string, number>()
     const adjacency = new Map<string, Set<string>>()
@@ -536,8 +539,10 @@ export default function TagGraphDemo({ tags, edges }: Props) {
 
     return () => {
       ro.disconnect()
-      gui.destroy()
-      guiRef.current = null
+      if (guiRef.current) {
+        guiRef.current.destroy()
+        guiRef.current = null
+      }
       canvas.removeEventListener('mousemove', onMouseMove)
       canvas.removeEventListener('mouseleave', onMouseLeave)
       canvas.removeEventListener('click', onClick)
