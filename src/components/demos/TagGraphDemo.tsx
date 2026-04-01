@@ -283,10 +283,19 @@ export default function TagGraphDemo({ tags, edges }: Props) {
       })
     }
 
+    const refSize = 800
+
     function rebuild() {
       resize()
       const { w, h } = sizeRef.current
-      const result = buildSimNodes(tags, w / 2, h / 2, w, h, params)
+      const scale = Math.min(w, h) / refSize
+      const clamped = Math.max(scale, 0.45)
+      const scaledParams = {
+        ...params,
+        minRadius: params.minRadius * clamped,
+        maxRadius: params.maxRadius * clamped,
+      }
+      const result = buildSimNodes(tags, w / 2, h / 2, w, h, scaledParams)
       nodesRef.current = result.nodes
       shapeEdgesRef.current = result.shapeEdges
       render()
