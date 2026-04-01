@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import DemoBoundary from './DemoBoundary'
 import SpeedController, { getStepDelay } from './SpeedController'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-typescript'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -39,6 +41,7 @@ function FileTree({
   labelColor,
   fadeOut,
   pulseFiles,
+  highlightedFiles,
 }: {
   title: string
   files: FileEntry[]
@@ -47,6 +50,7 @@ function FileTree({
   labelColor?: string
   fadeOut?: boolean
   pulseFiles?: string[]
+  highlightedFiles: Record<string, string>
 }) {
   return (
     <div style={{
@@ -142,14 +146,7 @@ function FileTree({
             border: `1px solid ${s.yellow}30`, lineHeight: 1.4,
           }}>
             <span style={{ color: s.text3 }}>{'// '}{f.name}{':\n'}</span>
-            {f.content.split('\n').map((ln, li) => (
-              <span key={li}>
-                {li > 0 && <br />}
-                {EDIT_MAP[f.name] && ln !== FILES.find((ff) => ff.name === f.name)?.content
-                  ? ln
-                  : ln}
-              </span>
-            ))}
+            <code dangerouslySetInnerHTML={{ __html: highlightedFiles[f.content] || f.content }} />
           </div>
         ))}
       </div>
@@ -183,6 +180,13 @@ function WorktreeDemo() {
   const [mainFiles, setMainFiles] = useState<FileEntry[]>(FILES.map((f) => ({ ...f })))
   const [wtFiles, setWtFiles] = useState<FileEntry[]>([])
   const [speed, setSpeed] = useState(1)
+
+  const highlightedFiles = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const f of FILES) map[f.content] = Prism.highlight(f.content, Prism.languages.typescript, 'typescript')
+    for (const [, content] of Object.entries(EDIT_MAP)) map[content] = Prism.highlight(content, Prism.languages.typescript, 'typescript')
+    return map
+  }, [])
 
   const reset = useCallback(() => {
     setPhase('idle')
@@ -258,6 +262,15 @@ function WorktreeDemo() {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.5; }
         }
+        code .token.keyword { color: #f92672; }
+        code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+        code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+        code .token.selector, code .token.attr-name { color: #f92672; }
+        code .token.attr-value, code .token.atrule { color: #e6db74; }
+        code .token.function, code .token.class-name { color: #a6e22e; }
+        code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+        code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+        code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
       `}</style>
 
       <div style={{
@@ -277,6 +290,7 @@ function WorktreeDemo() {
             : s.text3
           }
           pulseFiles={phase === 'merging' ? Object.keys(EDIT_MAP) : undefined}
+          highlightedFiles={highlightedFiles}
         />
 
         {wtVisible && (
@@ -293,6 +307,7 @@ function WorktreeDemo() {
               labelColor={s.accent}
               fadeOut={phase === 'removing'}
               pulseFiles={phase === 'editing' ? Object.keys(EDIT_MAP) : undefined}
+              highlightedFiles={highlightedFiles}
             />
           </>
         )}

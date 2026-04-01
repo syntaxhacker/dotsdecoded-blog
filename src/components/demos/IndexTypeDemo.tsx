@@ -1,5 +1,7 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import DemoBoundary from './DemoBoundary'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-sql'
 
 const s = {
   bg: '#0a0c0f',
@@ -383,6 +385,11 @@ export default function IndexTypeDemo() {
 
   const preset = presets.find((p) => p.key === activePreset)
 
+  const highlightedQuery = useMemo(() => {
+    if (!preset) return ''
+    return Prism.highlight(preset.query, Prism.languages.sql, 'sql')
+  }, [preset])
+
   const headerColors = [s.accent, s.purple, s.orange]
 
   return (
@@ -402,7 +409,20 @@ export default function IndexTypeDemo() {
             fontSize: 12,
             color: s.text3,
           }}>
-            {preset ? preset.query : '-- Select a query to compare index types --'}
+            {preset
+              ? <code dangerouslySetInnerHTML={{ __html: highlightedQuery }} />
+              : '-- Select a query to compare index types --'}
+            <style>{`
+              code .token.keyword { color: #f92672; }
+              code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+              code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+              code .token.selector, code .token.attr-name { color: #f92672; }
+              code .token.attr-value, code .token.atrule { color: #e6db74; }
+              code .token.function, code .token.class-name { color: #a6e22e; }
+              code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+              code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+              code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd9722; }
+            `}</style>
           </div>
 
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>

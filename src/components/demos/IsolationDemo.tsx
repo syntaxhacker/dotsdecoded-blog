@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import DemoBoundary from './DemoBoundary'
 import SpeedController, { getStepDelay } from './SpeedController'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-sql'
 
 const s = {
   bg: '#0a0c0f',
@@ -251,6 +253,17 @@ export default function IsolationDemo() {
   const [flash, setFlash] = useState(false)
   const [speed, setSpeed] = useState(1)
 
+  const highlightedSql = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const sc of scenarios) {
+      for (const step of sc.steps) {
+        if (step.a) map[step.a] = Prism.highlight(step.a, Prism.languages.sql, 'sql')
+        if (step.b) map[step.b] = Prism.highlight(step.b, Prism.languages.sql, 'sql')
+      }
+    }
+    return map
+  }, [])
+
   const sc = scenarios[si]
   const cur = sc.steps[step]
 
@@ -357,10 +370,21 @@ export default function IsolationDemo() {
           fontSize: 12,
           color: s.text2,
           marginBottom: view ? 12 : 0,
-          whiteSpace: 'pre-line',
+          whiteSpace: 'pre-wrap',
           lineHeight: 1.5,
         }}>
-          {sql}
+          <style>{`
+            code .token.keyword { color: #f92672; }
+            code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+            code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+            code .token.selector, code .token.attr-name { color: #f92672; }
+            code .token.attr-value, code .token.atrule { color: #e6db74; }
+            code .token.function, code .token.class-name { color: #a6e22e; }
+            code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+            code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+            code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
+          `}</style>
+          <code dangerouslySetInnerHTML={{ __html: highlightedSql[sql] || sql }} />
         </div>
       )}
       {view && (

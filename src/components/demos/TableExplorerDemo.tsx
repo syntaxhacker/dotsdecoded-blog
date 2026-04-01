@@ -1,4 +1,6 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-sql'
 import DemoBoundary from './DemoBoundary'
 
 const s = {
@@ -36,49 +38,18 @@ const rows: Record<ColKey, string>[] = [
   { id: '4', name: 'Dave Kim', email: 'dave@example.com', age: '31', created_at: '2025-04-05 16:22:00' },
 ]
 
-const sqlParts = [
-  { text: 'CREATE TABLE ', color: s.purple },
-  { text: 'users', color: s.yellow },
-  { text: ' (\n  ', color: s.text },
-  { text: 'id', color: s.green },
-  { text: '          ', color: s.text },
-  { text: 'INT', color: s.accent },
-  { text: '           ', color: s.text },
-  { text: 'PRIMARY KEY', color: s.orange },
-  { text: ' ', color: s.text },
-  { text: 'AUTO_INCREMENT', color: s.orange },
-  { text: ',\n  ', color: s.text },
-  { text: 'name', color: s.green },
-  { text: '        ', color: s.text },
-  { text: 'VARCHAR(255)', color: s.accent },
-  { text: '   ', color: s.text },
-  { text: 'NOT NULL', color: s.orange },
-  { text: ',\n  ', color: s.text },
-  { text: 'email', color: s.green },
-  { text: '       ', color: s.text },
-  { text: 'VARCHAR(255)', color: s.accent },
-  { text: '   ', color: s.text },
-  { text: 'NOT NULL', color: s.orange },
-  { text: ' ', color: s.text },
-  { text: 'UNIQUE', color: s.orange },
-  { text: ',\n  ', color: s.text },
-  { text: 'age', color: s.green },
-  { text: '         ', color: s.text },
-  { text: 'INT', color: s.accent },
-  { text: ',\n  ', color: s.text },
-  { text: 'created_at', color: s.green },
-  { text: '  ', color: s.text },
-  { text: 'TIMESTAMP', color: s.accent },
-  { text: '    ', color: s.text },
-  { text: 'DEFAULT', color: s.orange },
-  { text: ' ', color: s.text },
-  { text: 'CURRENT_TIMESTAMP', color: s.orange },
-  { text: '\n);', color: s.text },
-]
+const createTableSql = `CREATE TABLE users (
+  id          INT           PRIMARY KEY AUTO_INCREMENT,
+  name        VARCHAR(255)   NOT NULL,
+  email       VARCHAR(255)   NOT NULL UNIQUE,
+  age         INT,
+  created_at  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+);`
 
 export default function TableExplorerDemo() {
   const [activeCol, setActiveCol] = useState<ColKey | null>(null)
   const [selectedRow, setSelectedRow] = useState<number | null>(null)
+  const highlightedSql = useMemo(() => Prism.highlight(createTableSql, Prism.languages.sql, 'sql'), [])
 
   const colInfo = activeCol ? columns.find(c => c.key === activeCol) : null
 
@@ -177,11 +148,20 @@ export default function TableExplorerDemo() {
           background: s.bg2, borderRadius: 10, padding: '18px 20px',
           border: `1px solid ${s.border}`, overflowX: 'auto',
         }}>
-          <pre style={{ margin: 0, fontFamily: s.mono, fontSize: 13, lineHeight: 1.7, whiteSpace: 'pre' }}>
-            {sqlParts.map((part, i) => (
-              <span key={i} style={{ color: part.color }}>{part.text}</span>
-            ))}
-          </pre>
+          <div style={{ margin: 0, fontFamily: s.mono, fontSize: 13, lineHeight: 1.7, whiteSpace: 'pre' }}>
+            <style>{`
+              code .token.keyword { color: #f92672; }
+              code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+              code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+              code .token.selector, code .token.attr-name { color: #f92672; }
+              code .token.attr-value, code .token.atrule { color: #e6db74; }
+              code .token.function, code .token.class-name { color: #a6e22e; }
+              code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+              code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+              code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
+            `}</style>
+            <code dangerouslySetInnerHTML={{ __html: highlightedSql }} />
+          </div>
         </div>
       </div>
     </DemoBoundary>

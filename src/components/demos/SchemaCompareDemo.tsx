@@ -1,4 +1,7 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useMemo } from 'react'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-sql'
+import 'prismjs/components/prism-json'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -62,6 +65,11 @@ export default function SchemaCompareDemo() {
   const [sqlShake, setSqlShake] = useState(false)
   const [activePreset, setActivePreset] = useState<number | null>(null)
   const sqlRef = useRef<HTMLDivElement>(null)
+
+  const insertSql = 'INSERT INTO users VALUES (...)'
+  const highlightedInsertSql = useMemo(() => Prism.highlight(insertSql, Prism.languages.sql, 'sql'), [])
+  const insertNosql = 'db.users.insertOne({...})'
+  const highlightedInsertNosql = useMemo(() => Prism.highlight(insertNosql, Prism.languages.sql, 'sql'), [])
 
   const handleInsert = useCallback((idx: number) => {
     const preset = presets[idx]
@@ -133,6 +141,15 @@ export default function SchemaCompareDemo() {
           60% { transform: translateX(-4px); }
           80% { transform: translateX(4px); }
         }
+        code .token.keyword { color: #f92672; }
+        code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+        code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+        code .token.selector, code .token.attr-name { color: #f92672; }
+        code .token.attr-value, code .token.atrule { color: #e6db74; }
+        code .token.function, code .token.class-name { color: #a6e22e; }
+        code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+        code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+        code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
       `}</style>
 
       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
@@ -170,7 +187,7 @@ export default function SchemaCompareDemo() {
             ))}
           </div>
 
-          <div style={{ fontSize: 11, color: s.text3, marginBottom: 8, fontFamily: s.mono }}>INSERT INTO users VALUES (...)</div>
+          <div style={{ marginBottom: 8 }}><code dangerouslySetInnerHTML={{ __html: highlightedInsertSql }} /></div>
           <div style={{ background: s.bg, borderRadius: 6, padding: 10, fontFamily: s.mono, fontSize: 12, color: s.text2, minHeight: 56, marginBottom: 10 }}>
             {presetFields ? (
               <span>
@@ -232,7 +249,7 @@ export default function SchemaCompareDemo() {
             ))}
           </div>
 
-          <div style={{ fontSize: 11, color: s.text3, marginBottom: 8, fontFamily: s.mono }}>{'db.users.insertOne({...})'}</div>
+          <div style={{ marginBottom: 8 }}><code dangerouslySetInnerHTML={{ __html: highlightedInsertNosql }} /></div>
           <div style={{ background: s.bg, borderRadius: 6, padding: 10, fontFamily: s.mono, fontSize: 12, color: s.text2, minHeight: 56, marginBottom: 10 }}>
             {presetFields ? (
               <span>

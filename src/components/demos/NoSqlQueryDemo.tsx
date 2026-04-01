@@ -1,4 +1,6 @@
 import { useState, useMemo } from 'react'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-json'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -75,28 +77,8 @@ function buildQueryObject(filters: Filter[]): Record<string, unknown> {
   return query
 }
 
-function highlightQuery(query: Record<string, unknown>): string {
-  const parts: string[] = []
-  parts.push('{')
-  const entries = Object.entries(query)
-  entries.forEach(([key, val], i) => {
-    const comma = i < entries.length - 1 ? ',' : ''
-    if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
-      const inner = Object.entries(val as Record<string, unknown>)
-        .map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`)
-        .join(', ')
-      parts.push(`  ${key}: {`)
-      parts.push(`    ${inner}`)
-      parts.push(`  }${comma}`)
-    } else {
-      parts.push(`  ${key}: ${JSON.stringify(val)}${comma}`)
-    }
-  })
-  parts.push('}')
-  return parts.join('\n')
-}
-
 function QueryHighlight({ query }: { query: string }) {
+  const highlighted = useMemo(() => Prism.highlight(query, Prism.languages.json, 'json'), [query])
   return (
     <div style={{
       background: s.bg,
@@ -110,7 +92,7 @@ function QueryHighlight({ query }: { query: string }) {
       overflowX: 'auto',
     }}>
       <span style={{ color: s.text3 }}>db.products.find(</span>
-      <span style={{ color: s.accent }}>{highlightQuery(buildQueryObject(queryToFilters(JSON.parse(JSON.stringify(query)))))}</span>
+      <code dangerouslySetInnerHTML={{ __html: highlighted }} />
       <span style={{ color: s.text3 }}>)</span>
     </div>
   )
@@ -158,58 +140,35 @@ function DocumentCard({ doc, isExpanded, onToggle }: { doc: Record<string, unkno
         <span style={{ color: s.text3, fontSize: 11, marginLeft: 8 }}>{isExpanded ? '▾' : '▸'}</span>
       </button>
       {isExpanded && (
-        <pre style={{
+        <div style={{
           margin: 0, padding: '10px 14px', borderTop: `1px solid ${s.border}`,
           fontFamily: s.mono, fontSize: 12, lineHeight: 1.5,
-          color: s.text2, overflowX: 'auto', background: s.bg2,
+          color: s.text2, overflowX: 'auto', background: s.bg2, whiteSpace: 'pre',
         }}>
+          <style>{`
+            code .token.keyword { color: #f92672; }
+            code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+            code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+            code .token.selector, code .token.attr-name { color: #f92672; }
+            code .token.attr-value, code .token.atrule { color: #e6db74; }
+            code .token.function, code .token.class-name { color: #a6e22e; }
+            code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+            code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+            code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
+          `}</style>
           <SyntaxJson obj={doc} />
-        </pre>
+        </div>
       )}
     </div>
   )
 }
 
-function SyntaxJson({ obj, indent = 0 }: { obj: unknown; indent?: number }) {
-  const pad = '  '.repeat(indent)
-  if (obj === null) return <span style={{ color: s.red }}>null</span>
-  if (typeof obj === 'boolean') return <span style={{ color: s.orange }}>{String(obj)}</span>
-  if (typeof obj === 'number') return <span style={{ color: s.orange }}>{String(obj)}</span>
-  if (typeof obj === 'string') return <span style={{ color: s.yellow }}>"{obj}"</span>
-  if (Array.isArray(obj)) {
-    if (obj.length === 0) return <span>[]</span>
-    return (
-      <>
-        [<span>{'\n'}</span>
-        {obj.map((item, i) => (
-          <span key={i}>
-            {pad}  <SyntaxJson obj={item} indent={indent + 1} />
-            {i < obj.length - 1 ? ',' : ''}
-            {'\n'}
-          </span>
-        ))}
-        {pad}]
-      </>
-    )
-  }
-  if (typeof obj === 'object') {
-    const entries = Object.entries(obj as Record<string, unknown>)
-    if (entries.length === 0) return <span>{'{}'}</span>
-    return (
-      <>
-        {'{'}{'\n'}
-        {entries.map(([key, val], i) => (
-          <span key={key}>
-            {pad}  <span style={{ color: s.green }}>"{key}"</span>: <SyntaxJson obj={val} indent={indent + 1} />
-            {i < entries.length - 1 ? ',' : ''}
-            {'\n'}
-          </span>
-        ))}
-        {pad}{'}'}
-      </>
-    )
-  }
-  return <span>{String(obj)}</span>
+function SyntaxJson({ obj }: { obj: unknown }) {
+  const highlighted = useMemo(() => {
+    const json = JSON.stringify(obj, null, 2)
+    return Prism.highlight(json, Prism.languages.json, 'json')
+  }, [obj])
+  return <code dangerouslySetInnerHTML={{ __html: highlighted }} />
 }
 
 const presets = [
@@ -394,7 +353,7 @@ export default function NoSqlQueryDemo() {
           <>
             <div>
               <div style={{ color: s.text3, fontSize: 12, marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Generated Query</div>
-              <QueryHighlight query={buildQueryObject(filters)} />
+              <QueryHighlight query={JSON.stringify(buildQueryObject(filters), null, 2)} />
             </div>
 
             <div>

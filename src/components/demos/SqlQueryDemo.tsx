@@ -1,4 +1,6 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-sql'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -37,27 +39,6 @@ const employees: Employee[] = [
 
 const columns = ['id', 'name', 'department', 'salary', 'city', 'join_date']
 const operators = ['=', '!=', '>', '<', '>=', '<=', 'LIKE']
-
-function formatSql(sql: string): React.ReactNode[] {
-  const keywords = ['SELECT', 'FROM', 'WHERE', 'AND', 'ORDER BY', 'ASC', 'DESC', 'OR']
-  const parts = sql.split(/(\s+)/)
-  return parts.map((part, i) => {
-    const trimmed = part.trim()
-    if (keywords.includes(trimmed)) {
-      return <span key={i} style={{ color: s.purple, fontWeight: 700 }}>{part}</span>
-    }
-    if (trimmed === '*') {
-      return <span key={i} style={{ color: s.yellow }}>{part}</span>
-    }
-    if (/^['"]/.test(trimmed)) {
-      return <span key={i} style={{ color: s.green }}>{part}</span>
-    }
-    if (/^\d+$/.test(trimmed)) {
-      return <span key={i} style={{ color: s.orange }}>{part}</span>
-    }
-    return <span key={i}>{part}</span>
-  })
-}
 
 function matchesFilter(row: Employee, filter: Filter): boolean {
   const colVal = String(row[filter.column as keyof Employee]).toLowerCase()
@@ -258,6 +239,8 @@ export default function SqlQueryDemo() {
     width: 140,
   }
 
+  const highlightedSql = useMemo(() => Prism.highlight(sqlString, Prism.languages.sql, 'sql'), [sqlString])
+
   const displayRows = buildDisplayRows(selectedCols, results)
 
   return (
@@ -438,7 +421,18 @@ export default function SqlQueryDemo() {
           overflowX: 'auto',
           marginBottom: 16,
         }}>
-          {formatSql(sqlString)}
+          <style>{`
+            code .token.keyword { color: #f92672; }
+            code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+            code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+            code .token.selector, code .token.attr-name { color: #f92672; }
+            code .token.attr-value, code .token.atrule { color: #e6db74; }
+            code .token.function, code .token.class-name { color: #a6e22e; }
+            code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+            code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+            code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
+          `}</style>
+          <code dangerouslySetInnerHTML={{ __html: highlightedSql }} />
         </div>
 
         {hasRun && (
