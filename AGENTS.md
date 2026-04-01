@@ -261,6 +261,16 @@ const highlightedHtml = Prism.highlight(code, Prism.languages.typescript, 'types
 
 Use `useMemo` to compute `highlightedHtml` once. Add `import 'prismjs/components/prism-LANG'` for additional languages. The style tag must be scoped to `code` selectors to avoid affecting other demos.
 
+### Prism Rules
+
+1. Any demo that displays code (JavaScript, TypeScript, etc.) MUST use `Prism.highlight()` — never render code as plain monospace text
+2. Always use `<div style={{ whiteSpace: 'pre' }}>` instead of `<pre>` for code containers inside demos. The BaseLayout copy-btn script targets `.prose pre` and will inject a `<button>` into demo `<pre>` elements, causing a React hydration mismatch
+3. Compute highlighted HTML with `useMemo` (or module-level if the code is a static constant)
+
+### Code Explorer Demos
+
+Demos that show code with clickable lines and explanations (like SseServerDemo, SseClientDemo) must highlight entire logical blocks, not individual lines. Group related lines into blocks (e.g. a function body, a config object, a cleanup handler) and highlight the full block when any line in it is clicked. Use a `lineToBlock` map, `blockRanges` array, and per-line border-radius (rounded top on first line, rounded bottom on last line, sharp corners on middle lines). Show a block label badge in the explanation panel alongside the per-line explanation.
+
 ## Open Graph Meta Tags
 
 Every page automatically gets OG and Twitter Card meta tags via `BaseLayout.astro`:
