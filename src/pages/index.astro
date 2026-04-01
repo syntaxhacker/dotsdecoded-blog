@@ -1,8 +1,32 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro'
+import TagGraphDemo from '../components/demos/TagGraphDemo'
 import { getCollection } from 'astro:content'
 const posts = (await getCollection('blog', ({ data }) => !data.draft))
   .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf())
+
+const tagMap = new Map<string, number>()
+for (const post of posts) {
+  for (const tag of post.data.tags) {
+    tagMap.set(tag, (tagMap.get(tag) || 0) + 1)
+  }
+}
+const tags = Array.from(tagMap.entries()).map(([name, count]) => ({ name, count }))
+
+const edgeMap = new Map<string, number>()
+for (const post of posts) {
+  const pt = post.data.tags
+  for (let i = 0; i < pt.length; i++) {
+    for (let j = i + 1; j < pt.length; j++) {
+      const key = [pt[i], pt[j]].sort().join('::')
+      edgeMap.set(key, (edgeMap.get(key) || 0) + 1)
+    }
+  }
+}
+const edges = Array.from(edgeMap.entries()).map(([key, weight]) => {
+  const [source, target] = key.split('::')
+  return { source, target, weight }
+})
 ---
 
 <BaseLayout title="DotsDecoded" description="Deep dives into systems, tools, and the code that powers them.">
@@ -43,6 +67,9 @@ const posts = (await getCollection('blog', ({ data }) => !data.draft))
         ))}
       </div>
     </div>
+    <div class="home-right">
+      <TagGraphDemo client:visible tags={tags} edges={edges} />
+    </div>
   </div>
 
   <script is:inline>
@@ -52,6 +79,17 @@ const posts = (await getCollection('blog', ({ data }) => !data.draft))
       if (!input || !list) return
 
       const cards = Array.from(list.querySelectorAll('.blog-card'))
+
+      cards.forEach(card => {
+        card.addEventListener('mouseenter', () => {
+          const tags = (card.getAttribute('data-tags') || '').split(' ').filter(Boolean)
+          window.dispatchEvent(new CustomEvent('posthover', { detail: { tags } }))
+        })
+        card.addEventListener('mouseleave', () => {
+          window.dispatchEvent(new CustomEvent('posthover', { detail: { tags: null } }))
+        })
+      })
+
       let pagefind = null
       let debounce = null
 
@@ -81,15 +119,44 @@ const posts = (await getCollection('blog', ({ data }) => !data.draft))
         debounce = setTimeout(async () => {
           try {
             const results = await pagefind.search(q)
+            if (results.results.length === 0) return
             const urls = new Set(results.results.map(r => r.url))
 
             cards.forEach((card) => {
               const href = card.getAttribute('href') || ''
-              const match = urls.has(href) || !q
+              const match = urls.has(href)
               card.style.display = match ? '' : 'none'
             })
           } catch (e) {}
         }, 300)
+      })
+
+      window.addEventListener('taghover', (e) => {
+        const tag = e.detail?.tag
+        if (typeof tag === 'string') {
+          const tl = tag.toLowerCase()
+          cards.forEach((card) => {
+            const tags = card.getAttribute('data-tags') || ''
+            if (tags.includes(tl)) {
+              card.classList.remove('card-dim')
+            } else {
+              card.classList.add('card-dim')
+            }
+          })
+        } else {
+          cards.forEach((card) => card.classList.remove('card-dim'))
+        }
+      })
+
+      window.addEventListener('tagfilter', (e) => {
+        const tag = e.detail?.tag
+        if (!tag) return
+        input.value = tag
+        const tl = tag.toLowerCase()
+        cards.forEach((card) => {
+          const tags = card.getAttribute('data-tags') || ''
+          card.style.display = tags.includes(tl) ? '' : 'none'
+        })
       })
     })
   </script>
