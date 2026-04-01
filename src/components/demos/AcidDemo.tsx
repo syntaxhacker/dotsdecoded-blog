@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -27,6 +28,7 @@ export default function AcidDemo() {
   const [running, setRunning] = useState(false)
   const [activeStep, setActiveStep] = useState(-1)
   const [result, setResult] = useState<{ text: string; color: string } | null>(null)
+  const [speed, setSpeed] = useState(1)
 
   const timers = useRef<ReturnType<typeof setTimeout>[]>([])
   const aRef = useRef(1000)
@@ -67,7 +69,7 @@ export default function AcidDemo() {
   }, [alice, bob])
 
   const sched = (fn: () => void, ms: number) => {
-    timers.current.push(setTimeout(fn, ms))
+    timers.current.push(setTimeout(fn, getStepDelay(ms, speed)))
   }
 
   const reset = () => {
@@ -266,7 +268,7 @@ export default function AcidDemo() {
         </label>
       </div>
 
-      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
         <button
           type="button"
           onClick={doAcid}
@@ -297,6 +299,7 @@ export default function AcidDemo() {
         >
           Transfer (No ACID)
         </button>
+        <SpeedController speed={speed} onSpeedChange={setSpeed} />
         {logs.length > 0 && (
           <button
             type="button"

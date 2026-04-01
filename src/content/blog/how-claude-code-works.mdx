@@ -1,0 +1,833 @@
+---
+title: "How Claude Code Works Under the Hood"
+description: "A deep dive into the architecture of Claude Code — the agentic loop, tool system, permission model, context management, and orchestration that powers your AI coding assistant."
+date: 2026-04-01
+tags: ["ai", "claude-code", "architecture", "tools"]
+---
+
+import ArchitectureFlowDemo from '../../components/demos/ArchitectureFlowDemo'
+import AgenticLoopDemo from '../../components/demos/AgenticLoopDemo'
+import ToolRegistryDemo from '../../components/demos/ToolRegistryDemo'
+import PermissionFlowDemo from '../../components/demos/PermissionFlowDemo'
+import ContextWindowDemo from '../../components/demos/ContextWindowDemo'
+import SubAgentDemo from '../../components/demos/SubAgentDemo'
+import StreamingDemo from '../../components/demos/StreamingDemo'
+import McpDemo from '../../components/demos/McpDemo'
+import MemoryDemo from '../../components/demos/MemoryDemo'
+import HooksDemo from '../../components/demos/HooksDemo'
+import SpeculationDemo from '../../components/demos/SpeculationDemo'
+import InkRenderingDemo from '../../components/demos/InkRenderingDemo'
+import ForkedAgentDemo from '../../components/demos/ForkedAgentDemo'
+import PluginSkillDemo from '../../components/demos/PluginSkillDemo'
+import WorktreeDemo from '../../components/demos/WorktreeDemo'
+import LspDiagnosticDemo from '../../components/demos/LspDiagnosticDemo'
+import AgentSdkDemo from '../../components/demos/AgentSdkDemo'
+
+You type a question. Claude thinks. It reads your files. It edits your code. It runs your tests. It responds with the answer. But between your keystroke and the answer appearing on screen, a remarkable amount of machinery runs. Understanding that machinery is the difference between using Claude Code effectively and just hoping for the best.
+
+This is a technical deep dive into how Claude Code actually works — based on the open-source codebase. We will trace the path of a single message from your terminal through every layer of the system and back.
+
+## The Big Picture
+
+Claude Code is not a chatbot with a code editor bolted on. It is a **terminal-native agentic system** — a program that uses an LLM as its reasoning engine and tools as its actuators. Think of it as a robot that can read, write, and execute code, with an LLM as its brain.
+
+The architecture is surprisingly simple at the highest level:
+
+<ArchitectureFlowDemo client:visible />
+
+### The Key Components
+
+- **CLI Parser** (Commander.js + React/Ink): Parses your input, renders the terminal UI
+- **QueryEngine**: One instance per conversation. Manages session state, message history, and coordinates everything
+- **Agentic Loop**: An infinite `while(true)` that streams from the API, executes tools, and continues until Claude is done
+- **Tool System**: ~40 built-in tools (file read/write, bash, grep, web fetch) plus MCP tools from external servers
+- **Permission System**: Allow/deny/ask rules that gate every tool execution
+- **Context Manager**: Monitors token usage, compacts conversations when they get too long
+
+You now understand the high-level architecture. Let us look at the heart of it all.
+
+## The Agentic Loop: The Infinite While(True)
+
+The most important piece of code in Claude Code is the agentic loop. It is literally an infinite `while(true)` generator function in `src/query.ts`. Here is what each iteration does:
+
+<AgenticLoopDemo client:visible />
+
+### Why an Infinite Loop?
+
+The LLM does not plan everything upfront. It reasons step by step. It might read a file, realize it needs to check another file, run a test, see a failure, read the error message, and only then write the fix. Each of these steps is a separate API call, and each call might produce more tool requests.
+
+The loop handles this naturally:
+
+1. Send conversation to API
+2. API responds with text + tool calls
+3. Execute all tool calls
+4. Append tool results to conversation
+5. Go back to step 1
+
+The loop breaks only when the API responds with **no tool calls** — meaning Claude has decided it is done.
+
+### The State Between Iterations
+
+Each iteration carries a `State` object with the full message history, turn count, auto-compact tracking, and a `transition` field that records *why* the previous iteration continued (tool_use, tool_result, max_tokens, etc.). This metadata is critical for debugging and for the context management system to understand how the conversation is evolving.
+
+You now understand the agentic loop. Let us look at what tells Claude how to behave.
+
+## The System Prompt: Claude's Instructions
+
+Every API call includes a system prompt that tells Claude how to act. Claude Code's system prompt is built in two parts — **static** (cacheable, never changes) and **dynamic** (changes every call based on context).
+
+### The Static Prompt (Cached)
+
+The static portion is split at a boundary marker. Everything before it uses Anthropic's prompt caching with `scope: 'global'`, meaning it is cached once and reused across all conversations. This includes:
+
+- **Role definition**: "You are an interactive agent that helps users with software engineering tasks"
+- **Tool usage guidelines**: Prefer dedicated tools over Bash, make parallel tool calls when possible, reference files with `file_path:line_number`
+- **Coding philosophy**: No gold-plating, no premature abstractions, security-first, prefer editing existing files over creating new ones
+- **Tone**: Concise, no filler, no emoji, file references in parentheses
+- **Output efficiency**: Be brief, avoid preamble and postamble, let code speak for itself
+
+### The Dynamic Prompt (Session-Specific)
+
+After the boundary, the prompt includes session-specific information:
+
+- **Git context**: Current branch, status, recent commits, user name
+- **User context**: Contents of `CLAUDE.md` files (project-specific instructions found in the repo)
+- **Environment**: Current working directory, OS, shell type, available tools
+- **MCP server instructions**: Instructions from connected MCP servers
+- **Memory**: Persistent notes from previous conversations
+- **Scratchpad**: Temporary working notes from the current session
+
+### Why Two Parts?
+
+Caching the static portion saves tokens and latency on every call. The system prompt can be 5000+ tokens. By caching it, Claude Code only pays for those tokens once per conversation, not once per API call. The dynamic portion is small (typically 500-1500 tokens) and changes rarely.
+
+You now understand the system prompt. Let us look at how Claude interacts with the world.
+
+## Tools: Claude's Hands and Eyes
+
+Claude Code gives Claude ~40 built-in tools organized into categories. Each tool is a self-contained TypeScript module with a consistent interface.
+
+<ToolRegistryDemo client:visible />
+
+### The Tool Interface
+
+Every tool implements the same interface:
+
+- `name`: Unique identifier (e.g., `"Bash"`, `"FileReadTool"`)
+- `inputSchema`: Zod schema that validates tool inputs and generates the JSON Schema sent to the API
+- `call()`: The actual execution function — runs the tool and returns a result
+- `description()`: Human-readable description shown to Claude (this is what Claude uses to decide when to use the tool)
+- `isReadOnly()`: Returns true if the tool does not modify anything (e.g., FileRead vs FileWrite)
+- `isConcurrencySafe()`: Returns true if multiple instances can run in parallel (e.g., two FileRead calls)
+- `checkPermissions()`: Returns allow/deny/ask based on the user's permission rules
+
+### Tool Categories
+
+- **File I/O**: Read, Write, Edit, Glob, Grep — Claude's primary way to interact with your codebase
+- **Execution**: Bash, PowerShell — for running commands, tests, builds
+- **Web**: WebFetch, WebSearch — for looking up documentation and APIs
+- **Agent**: Agent, SendMessage — for spawning sub-agents and multi-agent coordination
+- **Utility**: AskUserQuestion, Config, TodoWrite — for interacting with the user
+
+### How Claude Decides Which Tool to Use
+
+Claude receives all tool schemas in the API request (unless deferred tool loading is enabled). The model autonomously decides which tools to call based on the tool descriptions and the conversation context. There is no hardcoded routing — the LLM itself acts as the dispatcher.
+
+For large numbers of MCP tools, **deferred tool loading** is used: tools are not included in the initial request. Instead, Claude can use `ToolSearchTool` to discover tools on demand. This prevents hitting tool schema limits.
+
+You now understand the tool system. Let us look at how tool calls are actually executed.
+
+## The Tool Use Protocol
+
+When Claude decides to use tools, it outputs `tool_use` content blocks in its response. Claude Code then executes these tools and feeds the results back.
+
+### Execution Order Matters
+
+Not all tools can run at the same time. Claude Code partitions tool calls into **batches**:
+
+1. **Consecutive read-only tools** are batched together and executed in parallel (up to 10 concurrent, configurable via `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`)
+2. **Write tools** each get their own batch and execute serially
+
+This means if Claude asks to read 5 files and edit 1 file, the 5 reads happen simultaneously, then the edit runs alone. This is the `toolOrchestration.ts` module's job.
+
+### The Execution Pipeline
+
+Each tool goes through `runToolUse()`:
+
+1. **Find the tool** by name in the registry
+2. **Validate input** against the tool's Zod schema
+3. **Check permissions** against the user's rules
+4. **Execute** the tool's `call()` function
+5. **Truncate results** if they exceed the per-message budget (large results are saved to disk with a preview)
+6. **Return** the result as a `tool_result` content block
+
+### Tool Results Feed Back Into the Loop
+
+Tool results are appended to the conversation as `user` messages with `tool_result` content blocks. The next API call includes the full conversation history, so Claude sees what every tool returned and decides what to do next.
+
+You now understand the tool use protocol. Let us look at how Claude Code keeps you safe.
+
+## The Permission System
+
+Every tool execution goes through the permission system. This is what prevents Claude from accidentally deleting your files, sending your data to the internet, or running destructive commands.
+
+<PermissionFlowDemo client:visible />
+
+### Permission Modes
+
+- **Default**: Prompts the user for potentially destructive operations (file writes, bash commands, web fetches)
+- **Plan mode**: Shows the full plan before executing, asks for confirmation once
+- **Auto-approve**: ML-based classifier decides whether to allow or ask
+- **Bypass**: Auto-approves everything (dangerous, but useful for CI/CD)
+
+### Permission Rules
+
+Users can define allow/deny/ask rules with wildcard patterns:
+
+- `Bash(git *)` — allow all git commands without asking
+- `FileEdit(/src/*)` — allow edits in the src/ directory
+- `mcp__server` — allow all tools from a specific MCP server
+
+The permission check runs in this order:
+1. Check deny rules — if matched, immediately reject
+2. Check allow rules — if matched, immediately approve
+3. Check ask rules — if matched, prompt the user
+4. Run pre-tool-use hooks
+5. If auto-mode, run the ML classifier
+6. If no rule matches, defer to the current permission mode
+
+### Why This Design?
+
+The permission system treats tool execution as **untrusted by default**. Even though Claude generated the tool call, the system does not assume the call is safe. This is a defense-in-depth approach: the LLM might hallucinate a destructive command, or a prompt injection in a file might trick Claude into running something malicious.
+
+You now understand the permission system. Let us look at how Claude Code manages its context window.
+
+## Context Management: Fitting Everything In
+
+LLMs have a limited context window (typically 200K tokens for Claude). Every message, tool call, and tool result consumes tokens. A long conversation with many file reads and test outputs can easily exhaust this limit. Claude Code uses several strategies to manage this.
+
+<ContextWindowDemo client:visible />
+
+### Auto-Compact
+
+When the conversation approaches the model's limit (threshold: `context_window - 13,000 tokens`), Claude Code automatically compacts the conversation:
+
+1. Sends the full conversation to the API with a compaction prompt
+2. The API returns a summary of the conversation
+3. Old messages are replaced with the summary
+4. Critical context is restored: recent files, plan files, skills, MCP instructions
+
+There is a circuit breaker that stops after 3 consecutive failures (the API might reject the compaction if the conversation is already too large).
+
+### Microcompact
+
+Instead of full compaction, Claude Code can ask the API to selectively forget old content blocks using Anthropic's cache editing API. This preserves the summary while freeing up space for the most recent context.
+
+### Tool Result Budget
+
+Each message has a budget on aggregate tool result size. Large file contents are replaced with previews: "Showing first 100 lines of 500" plus a file path. The full content is saved to disk if Claude needs it later.
+
+### Why This Matters
+
+Without context management, a long session would simply fail with a "prompt too long" error. With it, Claude Code can run for hours on a single conversation, reading hundreds of files and executing dozens of commands, all while staying within the context window.
+
+You now understand context management. Let us look at how Claude Code handles complex tasks.
+
+## Sub-Agents: Parallel Work
+
+Claude Code can spawn sub-agents to work on tasks in parallel. This is how it handles complex, multi-step requests efficiently.
+
+<SubAgentDemo client:visible />
+
+### How Sub-Agents Work
+
+When Claude decides a task would benefit from parallel execution, it uses the `Agent` tool with:
+
+- A `description` (3-5 words)
+- A `prompt` (the task for the sub-agent)
+- A `subagent_type` (specialized agent type)
+
+The sub-agent gets its own `QueryEngine` instance, its own conversation history, and its own set of tools. It runs independently and returns the result to the parent agent.
+
+### Agent Types
+
+- **General**: Full-featured agent with access to all tools
+- **Explore**: Fast agent specialized for searching codebases (read-only, fast)
+- **Plan**: Planning agent that creates structured approaches before execution
+
+### Background Tasks
+
+Sub-agents can run in the background (`run_in_background: true`). The parent agent continues working while the sub-agent runs. When the sub-agent completes, a notification appears. This is how Claude Code handles requests like "create a blog post" — it can spawn sub-agents to create each demo component in parallel.
+
+### Why Sub-Agents?
+
+Without sub-agents, Claude would have to do everything sequentially in a single conversation. With sub-agents, it can explore multiple files simultaneously, run independent analyses in parallel, and delegate specialized work to focused agents. The result is significantly faster for complex tasks.
+
+You now understand sub-agents. Let us look at how responses actually arrive at your terminal.
+
+## How Streaming Works
+
+When Claude Code calls the Anthropic API, it does not wait for the entire response. It streams. This means you see Claude thinking, typing, and calling tools in real time. The streaming system is one of the most carefully engineered parts of Claude Code.
+
+<StreamingDemo client:visible />
+
+### The SSE Protocol
+
+Claude Code calls the API with `stream: true`. The API responds with a series of Server-Sent Events (SSE), each carrying a small piece of the response. There are six event types:
+
+1. **message_start** — Confirms the connection, includes the model info and TTFB (Time To First Byte)
+2. **content_block_start** — Begins a new content block (text, tool_use, thinking)
+3. **content_block_delta** — Carries incremental content (a few characters of text, a fragment of JSON for tool input)
+4. **content_block_stop** — Marks a content block as complete
+5. **message_delta** — Includes token usage counts and the stop reason
+6. **message_stop** — Signals the stream is complete
+
+### Raw Stream vs BetaMessageStream
+
+Claude Code intentionally uses the **raw stream** from the Anthropic SDK rather than the higher-level `BetaMessageStream`. Why? The SDK's `BetaMessageStream` calls `partialParse()` on every `input_json_delta` event to try to parse incomplete JSON. This is O(n^2) — each parse re-parses the entire accumulated string. For large tool inputs, this causes noticeable lag.
+
+Instead, Claude Code accumulates tool input as a raw string by appending `delta.partial_json` to `contentBlock.input += delta.partial_json`. It only parses the JSON once, when the block is complete at `content_block_stop`.
+
+### Fine-Grained Tool Streaming (FGTS)
+
+By default, the API buffers the entire tool input before sending any `input_json_delta` events. For large tool inputs (think: a full file edit with hundreds of lines), this means you stare at a blank screen for 30+ seconds while the API generates the input silently.
+
+Claude Code solves this with `eager_input_streaming: true`, which tells the API to stream tool input character by character as it is generated. This is gated behind the `tengu_fgts` feature flag and only works with the first-party `api.anthropic.com` endpoint (proxies like Bedrock and Vertex do not support it).
+
+### Streaming Tool Execution
+
+Claude Code goes one step further: it starts executing tools as their `content_block_stop` events arrive, before the full response stream is complete. If Claude decides to read three files and then edit one, Claude Code starts reading those three files immediately after each `content_block_stop`, even while the API is still streaming the edit block. Results from completed tools are yielded immediately, interleaving tool execution with the still-streaming response.
+
+### The Stream Watchdog
+
+Streams can stall — network issues, API overload, proxy timeouts. Claude Code has a configurable idle watchdog (default 90 seconds). If no stream events arrive within the timeout, it aborts the stream and falls back to a non-streaming request. There is also stall detection at 30 seconds that logs diagnostics without aborting.
+
+You now understand streaming. Let us look at how Claude Code connects to external tools.
+
+## MCP: Extending Claude Code
+
+Claude Code's built-in tools are powerful, but they cannot do everything. You might want Claude to create GitHub issues, query a database, search Slack, or read Figma files. MCP (Model Context Protocol) lets you connect external tool servers that extend Claude's capabilities.
+
+<McpDemo client:visible />
+
+### What Is MCP?
+
+MCP is an open protocol that lets Claude Code act as a **client** connecting to external **tool servers**. Each server exposes tools (callable functions), resources (readable data), and prompts (slash commands). Claude Code discovers these tools and includes them in its tool registry, so Claude can use them just like built-in tools.
+
+The tool names are namespaced: `mcp__<server_name>__<tool_name>`. For example, `mcp__github__create_issue` or `mcp__slack__send_message`.
+
+### Transport Mechanisms
+
+MCP servers communicate over four transport types:
+
+- **stdio** (default) — Claude Code spawns the server as a child process. Communication happens over stdin/stdout using JSON-RPC. This is the simplest and most common transport.
+- **SSE** — Server-Sent Events over HTTP. Used for remote servers. Claude Code connects to a URL and receives a long-lived event stream.
+- **HTTP** — Streamable HTTP, the newer MCP transport. Supports both JSON and SSE responses with session-based connections.
+- **WebSocket** — Raw WebSocket connections with the `mcp` subprotocol. Used for real-time bidirectional communication.
+
+There are also internal transports for IDE extensions (`sse-ide`, `ws-ide`), the Claude Agent SDK (`sdk`), and proxied connections through claude.ai (`claudeai-proxy`).
+
+### The Connection Lifecycle
+
+When Claude Code starts, it loads MCP server configurations from multiple sources in priority order:
+
+1. **Enterprise** — Managed settings (`managed-mcp.json`)
+2. **Claude.ai** — Fetched from the claude.ai API
+3. **Plugin** — From installed plugins
+4. **User** — Global config (`~/.claude/claude_desktop_config.json`)
+5. **Project** — `.mcp.json` files, walking from repo root to CWD
+6. **Dynamic** — Runtime-only (SDK servers, CLI flags)
+
+Servers are connected in parallel (up to 3 local + 20 remote concurrently). After connecting, Claude Code fetches tools, commands, skills, and resources from each server. If a remote server returns HTTP 401, Claude Code creates a pseudo-tool (`McpAuthTool`) that triggers an OAuth flow when invoked.
+
+### How MCP Tools Are Called
+
+When Claude decides to use an MCP tool, the call flows through:
+
+1. Find the tool in the registry by its `mcp__<server>__<tool>` name
+2. Verify the MCP connection is still alive (reconnect if needed)
+3. Call `client.callTool()` on the connected MCP client
+4. Handle URL elicitation (if the server needs user authentication for a specific action)
+5. Process the result — images are resized, binary blobs are saved to disk, large outputs are truncated or persisted
+
+### MCP Instructions in the System Prompt
+
+MCP servers can provide instructions that tell Claude how to use their tools. These are injected into the system prompt as a markdown section:
+
+```
+# MCP Server Instructions
+
+## github
+When creating issues, always include reproduction steps...
+
+## slack
+Messages should be concise and in the channel's language...
+```
+
+These instructions are capped at 2048 characters per server to prevent verbose servers from consuming too much context. Claude Code uses a delta-based approach — it only announces newly connected or disconnected servers, avoiding cache-busting recomputation on every turn.
+
+You now understand MCP. Let us look at plan mode.
+
+## Plan Mode: Think Before You Act
+
+Sometimes you do not want Claude to start editing files immediately. You want it to explore the codebase, design an approach, and get your approval before making changes. That is what plan mode does.
+
+### How Plan Mode Works
+
+Plan mode is entered via the `EnterPlanMode` tool (which requires user approval). Once active:
+
+1. **Permission mode changes to `'plan'`** — Write operations are blocked except to the plan file itself
+2. **Claude enters a 5-phase workflow**:
+   - **Phase 1 (Explore)** — Spawns up to 3 Explore sub-agents in parallel to read the codebase
+   - **Phase 2 (Design)** — Spawns Plan sub-agents to design a solution considering trade-offs
+   - **Phase 3 (Review)** — Reviews the design for completeness
+   - **Phase 4 (Write)** — Writes the final plan to a file in `~/.claude/plans/`
+   - **Phase 5 (Exit)** — Calls `ExitPlanMode` to request user approval
+
+3. **The user sees the full plan** and can approve, request changes, or reject it
+
+### The Plan File
+
+Plans are stored as markdown files in `~/.claude/plans/` with generated slugs (e.g., `eloquent-breeze.md`). The plan file is the **only writable file** during plan mode — all other file operations are blocked by the permission system.
+
+When exiting plan mode, the tool reads the plan file from disk and presents it for approval. If approved, Claude restores the previous permission mode and begins implementation.
+
+### Plan vs Explore vs General Agents
+
+Each agent type has different capabilities:
+
+- **Explore** — Fast, read-only, uses a cheaper model (Haiku). Good for searching codebases.
+- **Plan** — Read-only, can run bash for inspection (ls, git log, grep). Designs solutions.
+- **General** — Full access to all tools. The default agent type for most tasks.
+
+Plan and Explore agents intentionally omit CLAUDE.md from their context to save tokens. The main agent already has full context and interprets their output.
+
+You now understand plan mode. Let us look at how Claude Code remembers things across conversations.
+
+## CLAUDE.md and Project Memory
+
+Claude Code can follow project-specific instructions that persist across conversations. This is how you teach Claude your coding conventions, preferred tools, and project-specific rules.
+
+<MemoryDemo client:visible />
+
+### What Is CLAUDE.md?
+
+`CLAUDE.md` is a markdown file that contains instructions for Claude Code. You can place it in several locations:
+
+- **Project root** — `CLAUDE.md` or `.claude/CLAUDE.md` (checked into the repo, shared with team)
+- **Subdirectories** — Loaded from root downward, so closer files override parent ones
+- **User home** — `~/.claude/CLAUDE.md` (private global instructions)
+- **Local only** — `CLAUDE.local.md` (gitignored, private per-machine settings)
+- **Managed** — `/etc/claude-code/CLAUDE.md` (enterprise policy)
+- **Rules directory** — `.claude/rules/*.md` (conditional rules with glob-based file matching)
+
+### How Files Are Discovered
+
+Claude Code walks from the git root down to the current working directory, loading files in priority order (root first, CWD last). It stops at the git root boundary to prevent instructions from parent repos leaking in. It handles nested git repos (submodules) and worktrees correctly.
+
+Files support `@include` directives for pulling in other files, and rules in `.claude/rules/*.md` can have frontmatter with `paths:` glob patterns for conditional loading — the rule only activates when you edit a file matching the glob.
+
+### How Instructions Flow Into the System Prompt
+
+All discovered CLAUDE.md files are concatenated and prefixed with: *"Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior."*
+
+Each file is labeled with its scope: "(project instructions, checked into the codebase)" or "(user's private global instructions for all projects)". This helps Claude understand which instructions are team-shared and which are personal.
+
+### Auto Memory
+
+Beyond CLAUDE.md, Claude Code has an **auto-memory** system that persists observations across conversations. It stores memories in `<project>/.claude/agent-memory/` with an index file (`MEMORY.md`). Memory types include user preferences, feedback about approach, ongoing work context, and references to external systems.
+
+This is gated behind feature flags and can be disabled via `CLAUDE_CODE_DISABLE_AUTO_MEMORY`.
+
+### The Scratchpad
+
+Claude Code also has a per-session scratchpad directory at `/tmp/claude-<uid>/<cwd>/<sessionId>/scratchpad/`. Writes here bypass permission checks, making it useful for Claude to jot down temporary notes without prompting you. It is session-scoped and cleaned up automatically.
+
+You now understand project memory. Let us look at how Claude Code navigates your codebase.
+
+## How Claude Code Reads Your Codebase
+
+Claude Code has four primary tools for discovering and reading files. Understanding these helps you know how Claude explores your project.
+
+### File Discovery: Glob and Grep
+
+**Glob** finds files by name pattern (e.g., `**/*.test.ts`). It delegates to **ripgrep** (`rg --files --glob <pattern>`), not Node's filesystem API. Results are capped at 100 files and sorted by modification time (most recently changed files first — a useful heuristic for finding relevant code).
+
+**Grep** searches file contents using regex. Also powered by ripgrep. It supports content search, file matching, and match counting. VCS directories (`.git`, `.svn`) are auto-excluded, and lines are capped at 500 characters to prevent noise from minified files.
+
+Both tools use a **vendored ripgrep binary** that is statically compiled and bundled with Claude Code. On macOS, the binary is auto-codesigned on first use to avoid quarantine issues.
+
+### File Reading: FileReadTool
+
+FileReadTool reads file contents with line-level offset/limit (default 2000 lines, 256KB max). It handles text, images (with resize + downsampling), PDFs (up to 20 pages), and Jupyter notebooks. It also deduplicates reads — if the same file+range is read again and the modification time matches, it returns a stub ("File unchanged since last read") to save tokens.
+
+### LSP Integration
+
+Claude Code supports Language Server Protocol integration, but it comes from **plugins only** (not user settings). When an LSP server is connected, Claude gets access to operations like:
+
+- `goToDefinition` — Jump to where a symbol is defined
+- `findReferences` — Find all usages of a symbol
+- `hover` — Get documentation for a symbol at a position
+- `documentSymbol` — List all symbols in a file
+- `workspaceSymbol` — Search symbols across the project
+
+The LSP tool is **deferred** — it is not loaded upfront in the system prompt. Claude must discover it via `ToolSearchTool` first. This saves context window space when LSP is not needed.
+
+### Tree-Sitter
+
+Tree-sitter is used in Claude Code, but **not for reading source code**. It is used exclusively for bash command security analysis — parsing bash commands into ASTs to detect dangerous patterns like command substitution, process substitution, and redirect targets. There is a pure-TypeScript fallback parser for when the native module is unavailable.
+
+You now understand how Claude reads code. Let us look at the build system.
+
+## The Build System
+
+Claude Code is built with **esbuild** (not Bun's bundler) into a single-file CLI output. The build system uses several clever techniques to keep the bundle small and fast.
+
+### Single-File Output
+
+The entry point (`src/entrypoints/cli.tsx`) compiles to `dist/cli.mjs` — one file, no code splitting. This is intentional for a CLI tool: single-file output means no module resolution at runtime, faster startup, and simpler deployment.
+
+### Dead Code Elimination via Feature Flags
+
+Claude Code uses `import { feature } from 'bun:bundle'` pervasively — **204+ imports** across the codebase. In production builds, Bun's bundler treats these as compile-time constants and eliminates entire branches of dead code. For example, internal-only features (ant-only analytics, XAA auth, team memory) are completely stripped from the external build.
+
+In the esbuild-based external build, `bun:bundle` is aliased to a shim that reads from environment variables (all defaulting to false).
+
+### Lazy Loading
+
+Several lazy loading strategies keep startup fast:
+
+- **`lazySchema`** — Memoizes Zod schema construction for 482+ tool schemas, deferring from module init to first access
+- **`shouldDefer` tools** — Tools like LSP, WebSearch, and TodoWrite are not loaded upfront. Claude discovers them via `ToolSearchTool` on demand
+- **Conditional `require()`** — Feature-gated tools use conditional requires that Bun's dead-code eliminator strips entirely
+- **Dynamic `import()`** — Cloud SDKs (AWS Bedrock, Azure, GCP), OpenTelemetry exporters, native modules (sharp, node-pty), and UI components are loaded lazily at runtime
+
+### The React Compiler
+
+Claude Code uses the **React Compiler** for automatic memoization of React components. This optimizes re-renders in the terminal UI without manual `useMemo`/`useCallback` wrappers. Developers work around its limitations (cannot auto-memoize imported functions, bails out on certain patterns) with plain functions, refs, and explicit memoization where needed.
+
+You now understand the build system. Let us look at how you can hook into Claude Code's lifecycle.
+
+## Hooks: Extending the Agent Loop
+
+Claude Code exposes **26 lifecycle events** that let you run shell commands or TypeScript functions at critical points in the agent loop. This is the primary extensibility mechanism beyond tools and plugins.
+
+<HooksDemo client:visible />
+
+### What Are Hooks?
+
+Hooks fire at specific moments during a Claude Code session. You define them in your settings and they can inspect, approve, deny, or modify the action being taken. Think of them as middleware for the agentic loop.
+
+### The Key Hook Events
+
+- **PreToolUse** — Fires before a tool runs. Can return `approve`, `deny`, or `modified` (with changed input). This is the most powerful hook — it lets you enforce policies programmatically.
+- **PostToolUse** — Fires after a tool completes. Can modify the tool result before Claude sees it.
+- **PostToolUseFailure** — Fires when a tool errors. Useful for logging or recovery logic.
+- **UserPromptSubmit** — Fires when the user sends a message. Can inject additional context into the prompt.
+- **Stop** — Fires when Claude finishes responding. Useful for post-processing or analytics.
+- **SubagentStart / SubagentStop** — Fire when sub-agents spawn and complete.
+- **PreCompact / PostCompact** — Fire around conversation compaction.
+- **PermissionRequest / PermissionDenied** — Fire when the permission system prompts the user.
+- **InstructionsLoaded** — Fires when CLAUDE.md files are (re)loaded.
+- **SessionStart / SessionEnd** — Fire at session boundaries.
+
+### How PreToolUse Hooks Work
+
+PreToolUse is the most interesting hook. It receives the tool name and input, and can return:
+
+1. **`permissionDecision: "approve"`** — Auto-approve the tool without asking the user
+2. **`permissionDecision: "deny"`** — Block the tool with a reason
+3. **`updatedInput`** — Modify the tool's parameters before execution
+4. **`additionalContext`** — Inject extra information Claude will see alongside the tool result
+
+This means you can write a hook that, for example, automatically approves `Bash(npm test)` but blocks `Bash(rm -rf *)` — all without user interaction.
+
+### Hook Types
+
+Hooks come in three forms:
+
+1. **Shell commands** — Defined in `settings.json` with matcher patterns. The hook receives event data via stdin and returns decisions via stdout as JSON.
+2. **Function hooks** — In-memory TypeScript functions registered via `addFunctionHook()`. Used by plugins and the SDK.
+3. **Async hooks** — Background processes with timeout management and progress reporting.
+
+You now understand hooks. Let us look at one of Claude Code's most fascinating optimizations.
+
+## Speculation: Predictive Execution
+
+Claude Code can pre-execute the next agentic loop before you type anything. This is like branch prediction for an AI agent — it delivers results instantly when you accept a prompt suggestion.
+
+<SpeculationDemo client:visible />
+
+### How Speculation Works
+
+After Claude finishes responding, it generates a prompt suggestion (the gray text you see below the input). Behind the scenes, Claude Code starts a **speculative execution** of that suggestion using a forked agent.
+
+The key innovation is a **copy-on-write (COW) overlay filesystem**. When the speculative agent needs to write a file:
+
+1. The original file is copied to a temporary overlay directory
+2. All writes are redirected to the overlay
+3. Reads check the overlay first — if the file was written there, the overlay version is returned
+4. The real working directory is never touched
+
+This creates a sandbox where speculation can make real edits without affecting your project. If you accept the suggestion, overlay files are copied to the real directory. If you dismiss it, the overlay is discarded.
+
+### The Forked Agent Pattern
+
+Speculation uses the `runForkedAgent()` utility, which creates an isolated sub-agent that shares the parent's **prompt cache**. The Anthropic API caches responses based on a composite key of system prompt, tools, model, and message prefix. The forked agent deliberately uses the same parameters so the API returns cached responses — making speculation cheap instead of doubling your API costs.
+
+<ForkedAgentDemo client:visible />
+
+The forked agent has its own abort controller, agent ID, and mutable state (file state cache, permission tracking). It accumulates usage separately and does not pollute the main transcript (`skipTranscript` flag).
+
+### Speculation Boundaries
+
+Speculation is not unlimited. It stops at boundaries:
+
+- Non-read-only bash commands (it will not run `rm` or `npm install`)
+- Unknown tools
+- After 20 turns or 100 messages
+- When the user manually types something (aborts speculation)
+
+If you accept the suggestion before speculation completes, partial results are injected. If speculation finishes first, the result is cached and ready for instant delivery.
+
+### Time Saved
+
+Speculation typically saves 3-5 seconds per accepted suggestion. For common follow-up actions like "run the tests" or "fix that type error", this makes Claude Code feel dramatically faster.
+
+You now understand speculation. Let us look at how Claude Code renders its terminal UI.
+
+## React + Ink: The Terminal UI
+
+Claude Code's entire CLI is a React application rendered to the terminal. Not a traditional line-by-line CLI — a full React component tree with flexbox layout, state management, and re-rendering. This is made possible by a custom fork of Ink, a React renderer for the terminal.
+
+<InkRenderingDemo client:visible />
+
+### The Render Pipeline
+
+The render pipeline goes through several stages:
+
+1. **React components** render to a virtual tree of `DOMElement` and `TextNode` nodes via a custom reconciler (react-reconciler v0.31)
+2. **Yoga layout** computes x/y/width/height for each node using flexbox rules (same engine as React Native)
+3. **Renderer** walks the laid-out tree, painting styled text into a 2D `Frame` (screen buffer)
+4. **LogUpdate** diffs the new frame against the previous one and writes only the minimal ANSI cursor-move + text sequences to stdout
+
+This means Claude Code only updates the characters that changed between frames — not the entire screen. For a streaming response, only the new text characters are written.
+
+### Memory Efficiency
+
+The `CharPool` class interns all characters as integer IDs using `Int32Array` for ASCII characters. This avoids creating millions of string objects during rendering. The `HyperlinkPool` does the same for OSC 8 hyperlink URIs. Both are critical for performance during long streaming responses.
+
+### Custom JSX Elements
+
+Claude Code registers custom JSX intrinsic elements through the reconciler: `ink-box`, `ink-text`, `ink-progress`, `ink-scroll-box`, and more. These map to terminal primitives like boxes, styled text, progress bars, and scrollable regions.
+
+### Theming
+
+A `ThemeProvider` wraps every render call so all components have access to the current color theme. There is also a live OSC 11 terminal theme watcher for auto mode — if the user changes their terminal color scheme, Claude Code adapts in real time.
+
+You now understand the terminal UI. Let us look at the plugin and skill system.
+
+## Plugins and Skills
+
+Claude Code has a full plugin architecture where plugins can contribute skills, hooks, MCP servers, LSP servers, and commands. Skills are reusable named workflows that bundle prompts and tool configurations for specific tasks.
+
+<PluginSkillDemo client:visible />
+
+### What Is a Skill?
+
+A skill is a pre-packaged workflow that tells Claude how to perform a specific type of task. Claude Code ships with 16 bundled skills: batch (process multiple files), debug (diagnose errors), loop (autonomous experiment loops), verify (check work), simplify (reduce complexity), and more.
+
+Each skill defines:
+- **Prompt template** — Instructions for how to approach the task
+- **Allowed tools** — Which tools the skill can use
+- **Agent context** — Whether it runs inline or in a forked agent
+- **Model override** — Can use a different model than the main agent
+- **`whenToUse` description** — Tells Claude when to use the skill
+
+### What Is a Plugin?
+
+A plugin is a package that bundles multiple extensions:
+
+- **Skills** — Named workflows
+- **Hooks** — Lifecycle event handlers
+- **MCP servers** — External tool connections
+- **LSP servers** — Language intelligence
+- **Commands** — Custom slash commands
+- **Settings** — Default configuration values
+
+Plugins are enabled and disabled via the `/plugin` command. Preferences persist across sessions. Built-in plugins use the `{name}@builtin` identifier format.
+
+### How Skills Are Loaded
+
+Bundled skills are registered at startup with lazy file extraction — reference files are extracted to disk on first invocation using secure file writing (atomic writes with `O_NOFOLLOW|O_EXCL`, 0o600 permissions, per-process nonce directories). Skills appear in the system prompt so Claude knows when to use them. MCP skills can also be dynamically created from MCP server resources.
+
+You now understand plugins and skills. Let us look at how Claude Code isolates work with git worktrees.
+
+## Git Worktree Isolation
+
+Claude Code can create isolated git worktrees for safe parallel work. This lets Claude experiment with changes in a separate working tree without affecting your main branch.
+
+<WorktreeDemo client:visible />
+
+### How Worktrees Work
+
+When you ask Claude to use a worktree (or Claude decides it is needed), it:
+
+1. Creates a new worktree inside `.claude/worktrees/` with a new branch based on HEAD
+2. Switches the session's working directory to the new worktree
+3. Claude works in the worktree — file reads, edits, and bash commands all operate in isolation
+4. When done, you can keep the branch (merge it) or remove it
+
+The main working tree is completely unaffected. This is safer than creating a branch and switching — you never have to switch back, and there is no risk of forgetting which tree you are in.
+
+### Hook Integration
+
+`WorktreeCreate` and `WorktreeRemove` hook events fire at the appropriate times, allowing custom isolation logic. This enables VCS-agnostic isolation for non-git projects via hooks.
+
+You now understand worktrees. Let us look at how Claude Code gets real-time error feedback from your code.
+
+## LSP Diagnostic Feedback
+
+When Claude Code is connected to a Language Server (via a plugin), it receives real-time diagnostics — errors, warnings, and hints from your language's compiler or linter. These are automatically fed back into the conversation so Claude can see and fix issues.
+
+<LspDiagnosticDemo client:visible />
+
+### How Diagnostics Flow
+
+1. Claude edits a file (e.g., removes a required import)
+2. The LSP server detects a type error and publishes a diagnostic
+3. `passiveFeedback.ts` converts the LSP diagnostic to Claude's internal format
+4. The diagnostic is registered in `LSPDiagnosticRegistry` with volume limiting (max 10 per file, 30 total)
+5. On the next API call, the diagnostic is delivered as an attachment
+6. Claude sees the error and fixes it — without you saying anything
+
+### Deduplication
+
+Cross-turn deduplication uses an LRU cache (max 500 files) mapping file URIs to diagnostic signatures (hash of message + severity + range). This prevents Claude from seeing the same error repeatedly across multiple turns.
+
+You now understand LSP feedback. Let us look at the Agent SDK.
+
+## The Agent SDK
+
+Claude Code exposes a full programmatic API — the Agent SDK — for embedding it in other applications. This is how IDE integrations, desktop apps, and CI/CD pipelines use Claude Code under the hood.
+
+<AgentSdkDemo client:visible />
+
+### SDK Capabilities
+
+The SDK provides typed interfaces for:
+
+- **Messages** — `SDKUserMessage`, `SDKAssistantMessage`, `SDKResultMessage` for full conversation control
+- **Streaming events** — Real-time `stream_event` payloads as they arrive from the API
+- **System events** — `init`, `status`, `compact_boundary`, `post_turn_summary`, `api_retry`
+- **Hook events** — All 26 lifecycle events available to SDK consumers
+- **Permission decisions** — Programmatic approve/deny/reject with classification
+- **Custom agents** — Define sub-agents with tools, model, MCP servers, memory scope, and max turns
+- **Usage metrics** — `total_cost_usd`, per-model token breakdowns, permission denial counts
+
+### Why This Matters
+
+The SDK means Claude Code is not just a CLI tool — it is an embeddable AI coding agent. VS Code extensions, JetBrains plugins, CI/CD pipelines, and custom applications can all use the same agentic loop, permission system, and tool infrastructure that powers the CLI.
+
+You now understand the Agent SDK. Let us wrap up with some practical tips.
+
+## Tips for Power Users
+
+### Permission Rules
+
+Define rules in your settings to reduce confirmation prompts:
+
+```
+Bash(git *)       — Allow all git commands
+Bash(npm test)    — Allow running tests
+FileEdit(/src/*)  — Allow edits in src/
+mcp__github       — Allow all GitHub MCP tools
+```
+
+Rules are checked in order: deny first, then allow, then ask, then fallback to the current mode.
+
+### Slash Commands
+
+Type `/` in Claude Code to see available commands:
+
+- `/help` — Show help
+- `/mcp` — Manage MCP servers
+- `/compact` — Manually trigger conversation compaction
+- `/clear` — Clear conversation history
+- `/config` — View or change settings
+
+### Keyboard Shortcuts
+
+- **Escape** — Cancel the current operation
+- **Ctrl+C** — Interrupt a running command
+- **Up/Down arrows** — Navigate command history
+
+### IDE Integration
+
+Claude Code works in VS Code and other editors via extensions. The IDE extensions use SSE and WebSocket transports to connect to MCP servers running in the editor process, giving Claude access to IDE-specific capabilities like the active file selection and editor state.
+
+You now understand the full machinery inside Claude Code. Let us bring it all together.
+
+## What You Learned
+
+You now understand the full machinery inside Claude Code:
+
+- **Architecture**: CLI parser, QueryEngine, agentic loop, tool system, permission model, context manager
+- **The agentic loop**: An infinite `while(true)` that streams from the API, executes tools, and continues until Claude is done
+- **System prompt**: Two-part design — static (cached globally) and dynamic (per-session context)
+- **Tool system**: ~40 built-in tools with a consistent interface, plus MCP tools from external servers
+- **Tool execution**: Partitioned into concurrent read-only batches and serial write batches
+- **Permission model**: Defense-in-depth with allow/deny/ask rules, ML-based classification
+- **Context management**: Auto-compact, microcompact, tool result budgets to stay within the context window
+- **Sub-agents**: Parallel task execution with specialized agent types
+- **Streaming**: Raw SSE stream with incremental content block accumulation, FGTS for tool input, streaming tool execution
+- **MCP**: External tool servers via stdio/SSE/HTTP/WebSocket with namespaced tools and OAuth auth
+- **Plan mode**: 5-phase explore-design-review-write-exit workflow with read-only enforcement
+- **Project memory**: CLAUDE.md files, auto-memory, conditional rules, and session scratchpad
+- **Codebase reading**: ripgrep-powered glob/grep, FileReadTool with dedup, LSP integration from plugins
+- **Build system**: Single-file esbuild output, feature flag dead code elimination, lazy loading, React Compiler
+- **Hooks**: 26 lifecycle events (PreToolUse, PostToolUse, Stop, etc.) for programmatic extensibility
+- **Speculation**: Copy-on-write overlay filesystem for predictive execution of prompt suggestions
+- **Terminal UI**: React + Ink custom fork with Yoga flexbox layout, character-level frame diffing
+- **Plugins and skills**: Bundled skills (batch, debug, verify), plugin architecture with hooks + MCP + LSP
+- **Git worktrees**: Isolated working trees for safe parallel experimentation
+- **LSP diagnostics**: Real-time compiler/linter feedback automatically fed back into conversation
+- **Agent SDK**: Embeddable programmatic API for IDE integrations, CI/CD, and custom applications
+
+### Self-Check
+
+- [ ] What is the agentic loop and why is it infinite?
+- [ ] How does the system prompt's two-part design save tokens?
+- [ ] What determines whether tool calls run in parallel or serial?
+- [ ] Why does Claude Code check permissions even though Claude itself generated the tool call?
+- [ ] What triggers auto-compact, and what happens to the conversation?
+- [ ] How do sub-agents enable parallel work, and what is the parent-child relationship?
+- [ ] What is deferred tool loading and why is it needed?
+- [ ] How does the tool result budget prevent context window exhaustion?
+- [ ] Why does Claude Code use the raw stream instead of BetaMessageStream?
+- [ ] What is FGTS and how does it reduce perceived latency?
+- [ ] How does streaming tool execution overlap with an in-progress API response?
+- [ ] What transport types does MCP support, and which is the default?
+- [ ] How are MCP tool names formatted in Claude's tool registry?
+- [ ] What happens when an MCP server returns HTTP 401?
+- [ ] What are the 5 phases of plan mode, and what is the only writable file?
+- [ ] Why do Explore and Plan agents omit CLAUDE.md?
+- [ ] In what order are CLAUDE.md files loaded, and why?
+- [ ] What is the `@include` directive in CLAUDE.md files?
+- [ ] What is auto-memory and where is it stored?
+- [ ] How does FileReadTool deduplicate repeated reads of the same file?
+- [ ] Why is tree-sitter used only for bash parsing and not source code?
+- [ ] How does the build system use feature flags for dead code elimination?
+- [ ] What is the `lazySchema` pattern and why is it used 482+ times?
+- [ ] How does the React Compiler optimize Claude Code's terminal UI?
+- [ ] What can a PreToolUse hook return, and what does each return value do?
+- [ ] What are the three types of hooks and how do they differ?
+- [ ] How does the copy-on-write overlay filesystem work in speculation?
+- [ ] Why does the forked agent share the parent's prompt cache?
+- [ ] What are the boundaries that stop speculation?
+- [ ] How does the Ink render pipeline go from React components to terminal output?
+- [ ] What is the CharPool and why is it needed?
+- [ ] What components can a plugin bundle (name at least 4)?
+- [ ] How do git worktrees isolate work from the main branch?
+- [ ] How do LSP diagnostics flow from the language server to Claude's context?
+- [ ] What does the Agent SDK expose beyond what the CLI provides?

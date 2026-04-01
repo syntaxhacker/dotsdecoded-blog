@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import DemoBoundary from './DemoBoundary'
+import SpeedController, { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f',
@@ -248,6 +249,7 @@ export default function IsolationDemo() {
   const [step, setStep] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [flash, setFlash] = useState(false)
+  const [speed, setSpeed] = useState(1)
 
   const sc = scenarios[si]
   const cur = sc.steps[step]
@@ -268,18 +270,18 @@ export default function IsolationDemo() {
         setPlaying(false)
         return p
       })
-    }, 2000)
+    }, getStepDelay(2000, speed))
     return () => clearTimeout(t)
-  }, [playing, step, sc])
+  }, [playing, step, sc, speed])
 
   useEffect(() => {
     const sd = scenarios[si].steps[step]
     if (sd.warning) {
       setFlash(true)
-      const t = setTimeout(() => setFlash(false), 1000)
+      const t = setTimeout(() => setFlash(false), getStepDelay(1000, speed))
       return () => clearTimeout(t)
     }
-  }, [step, si])
+  }, [step, si, speed])
 
   const next = () => {
     if (step < sc.steps.length - 1) setStep(step + 1)
@@ -558,6 +560,7 @@ export default function IsolationDemo() {
           <span style={{ color: s.text3, fontSize: 11, fontFamily: s.mono }}>
             {step + 1}/{sc.steps.length}
           </span>
+          <SpeedController speed={speed} onSpeedChange={setSpeed} />
         </div>
 
         <div style={{
