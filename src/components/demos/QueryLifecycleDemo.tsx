@@ -1,4 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-sql'
 import DemoBoundary from './DemoBoundary'
 import SpeedController, { getStepDelay } from './SpeedController'
 
@@ -68,6 +70,8 @@ const sampleRows = [
 ]
 
 export default function QueryLifecycleDemo() {
+  const sqlQuery = 'SELECT name, email FROM users WHERE age > 25 ORDER BY name'
+  const highlightedSql = useMemo(() => Prism.highlight(sqlQuery, Prism.languages.sql, 'sql'), [])
   const [activeStage, setActiveStage] = useState(-1)
   const [running, setRunning] = useState(false)
   const [execLines, setExecLines] = useState<string[]>([])
@@ -212,14 +216,21 @@ export default function QueryLifecycleDemo() {
           0%, 100% { box-shadow: 0 0 0 0 var(--pulse-color); }
           50% { box-shadow: 0 0 12px 2px var(--pulse-color); }
         }
+        code .token.keyword { color: #f92672; }
+        code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+        code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+        code .token.selector, code .token.attr-name { color: #f92672; }
+        code .token.attr-value, code .token.atrule { color: #e6db74; }
+        code .token.function, code .token.class-name { color: #a6e22e; }
+        code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+        code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+        code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd972f; }
       `}</style>
 
       <div style={{ background: s.bg, borderRadius: 10, border: `1px solid ${s.border}`, overflow: 'hidden' }}>
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${s.border}`, background: s.bg2 }}>
           <div style={{ fontFamily: s.mono, fontSize: 13, color: s.text3, marginBottom: 8 }}>SQL Query</div>
-          <code style={{ fontFamily: s.mono, fontSize: 14, color: s.accent, lineHeight: 1.6, display: 'block', whiteSpace: 'pre-wrap' }}>
-            SELECT name, email FROM users WHERE age {'>'} 25 ORDER BY name
-          </code>
+          <code style={{ fontFamily: s.mono, fontSize: 14, lineHeight: 1.6, display: 'block', whiteSpace: 'pre-wrap' }} dangerouslySetInnerHTML={{ __html: highlightedSql }} />
         </div>
 
         <div style={{ padding: '20px 20px 8px' }}>

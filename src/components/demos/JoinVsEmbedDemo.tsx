@@ -1,5 +1,7 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import SpeedController, { getStepDelay } from './SpeedController'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-sql'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -39,6 +41,9 @@ export default function JoinVsEmbedDemo() {
   const [svgLines, setSvgLines] = useState<{ x1: number; y1: number; x2: number; y2: number; color: string; len: number }[]>([])
   const [linesVisible, setLinesVisible] = useState(false)
   const sqlRef = useRef<HTMLDivElement>(null)
+
+  const joinSql = 'SELECT * FROM users JOIN orders ON users.id = orders.user_id'
+  const highlightedJoinSql = useMemo(() => Prism.highlight(joinSql, Prism.languages.sql, 'sql'), [])
 
   useEffect(() => {
     if (joinPhase !== 1 || !sqlRef.current) return
@@ -218,7 +223,18 @@ export default function JoinVsEmbedDemo() {
             {joinPhase === 2 && (
               <div style={{ marginTop: 12 }}>
                 <div style={{ fontSize: 10, fontWeight: 600, color: s.green, fontFamily: s.mono, marginBottom: 4, wordBreak: 'break-all' }}>
-                  SELECT * FROM users JOIN orders ON users.id = orders.user_id
+                  <style>{`
+                    code .token.keyword { color: #f92672; }
+                    code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+                    code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+                    code .token.selector, code .token.attr-name { color: #f92672; }
+                    code .token.attr-value, code .token.atrule { color: #e6db74; }
+                    code .token.function, code .token.class-name { color: #a6e22e; }
+                    code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+                    code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+                    code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd977f; }
+                  `}</style>
+                  <code dangerouslySetInnerHTML={{ __html: highlightedJoinSql }} />
                 </div>
                 <div style={{ border: `1px solid ${s.green}40`, borderRadius: 4, overflow: 'hidden' }}>
                   <table style={{ borderCollapse: 'collapse', width: '100%' }}>

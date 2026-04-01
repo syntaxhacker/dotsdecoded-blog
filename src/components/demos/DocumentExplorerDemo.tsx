@@ -1,4 +1,6 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-json'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -49,67 +51,26 @@ const docs: DocItem[] = [
   { label: 'Sensor Reading', icon: 'S', doc: sensorReading, color: s.orange },
 ]
 
-function highlightValue(value: unknown, depth: number): React.ReactNode {
-  if (value === null) {
-    return <span style={{ color: s.red }}>null</span>
-  }
-  if (typeof value === 'boolean') {
-    return <span style={{ color: s.purple }}>{String(value)}</span>
-  }
-  if (typeof value === 'number') {
-    return <span style={{ color: s.yellow }}>{String(value)}</span>
-  }
-  if (typeof value === 'string') {
-    return <span style={{ color: s.green }}>"{value}"</span>
-  }
-  if (Array.isArray(value)) {
-    return (
-      <span>
-        [<span style={{ color: s.green }}>{value.map((v) => `"${v}"`).join(', ')}</span>]
-      </span>
-    )
-  }
-  if (typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>)
-    return (
-      <span>
-        {'{\n'}
-        {entries.map(([k, v], i) => (
-          <span key={k}>
-            {'  '.repeat(depth + 1)}
-            <span style={{ color: s.accent }}>"{k}"</span>
-            {': '}
-            {highlightValue(v, depth + 1)}
-            {i < entries.length - 1 ? ',' : ''}
-            {'\n'}
-          </span>
-        ))}
-        {'  '.repeat(depth)}
-        {'}'}
-      </span>
-    )
-  }
-  return String(value)
-}
-
 function renderDoc(obj: Record<string, unknown>): React.ReactNode {
-  const entries = Object.entries(obj)
+  const highlighted = useMemo(() => {
+    const json = JSON.stringify(obj, null, 2)
+    return Prism.highlight(json, Prism.languages.json, 'json')
+  }, [obj])
   return (
-    <pre style={{ margin: 0, whiteSpace: 'pre', fontFamily: s.mono, fontSize: 13, lineHeight: 1.7 }}>
-      {'{'}
-      {'\n'}
-      {entries.map(([k, v], i) => (
-        <span key={k}>
-          {'  '}
-          <span style={{ color: s.accent }}>"{k}"</span>
-          {': '}
-          {highlightValue(v, 1)}
-          {i < entries.length - 1 ? ',' : ''}
-          {'\n'}
-        </span>
-      ))}
-      {'}'}
-    </pre>
+    <div style={{ margin: 0, whiteSpace: 'pre', fontFamily: s.mono, fontSize: 13, lineHeight: 1.7 }}>
+      <style>{`
+        code .token.keyword { color: #f92672; }
+        code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+        code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+        code .token.selector, code .token.attr-name { color: #f92672; }
+        code .token.attr-value, code .token.atrule { color: #e6db74; }
+        code .token.function, code .token.class-name { color: #a6e22e; }
+        code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+        code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+        code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
+      `}</style>
+      <code dangerouslySetInnerHTML={{ __html: highlighted }} />
+    </div>
   )
 }
 

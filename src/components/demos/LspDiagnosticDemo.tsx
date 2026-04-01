@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-typescript'
 import DemoBoundary from './DemoBoundary'
 import SpeedController, { getStepDelay } from './SpeedController'
 
@@ -64,6 +66,14 @@ export default function LspDiagnosticDemo() {
   const [dedupCount, setDedupCount] = useState(0)
   const [fixStep, setFixStep] = useState(-1)
   const [speed, setSpeed] = useState(1)
+
+  const highlighted = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const line of [...cleanLines, ...brokenLines]) {
+      map[line] = Prism.highlight(line, Prism.languages.typescript, 'typescript')
+    }
+    return map
+  }, [])
 
   const reset = useCallback(() => {
     setPhase('idle')
@@ -155,6 +165,17 @@ export default function LspDiagnosticDemo() {
     <DemoBoundary name="LSP Diagnostic Feedback">
       <div style={{ maxWidth: 820, margin: '0 auto', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
 
+        <style>{`
+          code .token.keyword { color: #f92672; }
+          code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+          code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+          code .token.selector, code .token.attr-name { color: #f92672; }
+          code .token.attr-value, code .token.atrule { color: #e6db74; }
+          code .token.function, code .token.class-name { color: #a6e22e; }
+          code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+          code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+          code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
+        `}</style>
         <div style={{
           background: s.bg,
           border: `1px solid ${phase === 'error' ? s.red + '60' : s.border}`,
@@ -225,7 +246,7 @@ export default function LspDiagnosticDemo() {
                     whiteSpace: 'pre',
                     transition: 'color 0.3s',
                   }}>
-                    {highlightSyntax(line)}
+                    {line ? <code dangerouslySetInnerHTML={{ __html: highlighted[line] || line }} /> : '\u00A0'}
                     {isError && diagnostic && (
                       <span style={{
                         position: 'absolute',
@@ -543,36 +564,4 @@ export default function LspDiagnosticDemo() {
       </div>
     </DemoBoundary>
   )
-}
-
-function highlightSyntax(line: string) {
-  const keywords = new Set(['function', 'const', 'return', 'console'])
-  const types = new Set(['number', 'string', 'void'])
-
-  const parts: { text: string; color: string }[] = []
-  const regex = /(\w+|[^\w]+)/g
-  let match: RegExpExecArray | null
-
-  while ((match = regex.exec(line)) !== null) {
-    const token = match[0]
-    if (keywords.has(token)) {
-      parts.push({ text: token, color: s.purple })
-    } else if (types.has(token)) {
-      parts.push({ text: token, color: s.green })
-    } else if (/^\d+$/.test(token)) {
-      parts.push({ text: token, color: s.orange })
-    } else if (token.startsWith('"') || token.startsWith("'") || token.startsWith('`')) {
-      parts.push({ text: token, color: s.yellow })
-    } else if (/[(){}:;,.]/.test(token)) {
-      parts.push({ text: token, color: s.text3 })
-    } else if (/^[A-Z]/.test(token)) {
-      parts.push({ text: token, color: s.green })
-    } else {
-      parts.push({ text: token, color: s.text })
-    }
-  }
-
-  return parts.map((p, i) => (
-    <span key={i} style={{ color: p.color }}>{p.text}</span>
-  ))
 }

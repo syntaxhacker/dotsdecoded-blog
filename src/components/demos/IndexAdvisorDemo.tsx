@@ -1,5 +1,7 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import DemoBoundary from './DemoBoundary'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-sql'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -106,6 +108,12 @@ export default function IndexAdvisorDemo() {
   const speedup = p.costWith > 0 ? (p.costWithout / p.costWith).toFixed(1) : '1.0'
   const numSpeedup = parseFloat(speedup)
 
+  const highlightedSql = useMemo(() => Prism.highlight(p.sql, Prism.languages.sql, 'sql'), [p.sql])
+  const highlightedIndex = useMemo(() => {
+    if (!p.recommendedIndex.startsWith('CREATE INDEX')) return null
+    return Prism.highlight(p.recommendedIndex, Prism.languages.sql, 'sql')
+  }, [p.recommendedIndex])
+
   const barMax = Math.max(p.costWithout, p.costWith, 1)
   const withoutBarW = (p.costWithout / barMax) * maxBarWidth
   const withBarW = p.costWith > 0 ? (p.costWith / barMax) * maxBarWidth : 0
@@ -128,6 +136,17 @@ export default function IndexAdvisorDemo() {
 
   return (
     <DemoBoundary name="Index Advisor">
+      <style>{`
+        code .token.keyword { color: #f92672; }
+        code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+        code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+        code .token.selector, code .token.attr-name { color: #f92672; }
+        code .token.attr-value, code .token.atrule { color: #e6db74; }
+        code .token.function, code .token.class-name { color: #a6e22e; }
+        code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+        code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+        code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd972f; }
+      `}</style>
       <div style={{ maxWidth: 820, margin: '0 auto', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", color: s.text }}>
 
         <div style={{ background: s.bg2, border: `1px solid ${s.border}`, borderRadius: 8, padding: '16px 20px', marginBottom: 16 }}>
@@ -173,7 +192,7 @@ export default function IndexAdvisorDemo() {
 
         <div style={{ background: s.bg, border: `1px solid ${s.border}`, borderRadius: 8, padding: '14px 18px', marginBottom: 16, fontFamily: s.mono, fontSize: 13, color: s.green }}>
           <span style={{ color: s.text3, marginRight: 6 }}>SQL:</span>
-          {p.sql}
+          <code dangerouslySetInnerHTML={{ __html: highlightedSql }} />
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 16 }}>
@@ -242,7 +261,9 @@ export default function IndexAdvisorDemo() {
             background: s.bg,
             borderRadius: 4,
           }}>
-            {p.recommendedIndex}
+            {highlightedIndex
+              ? <code dangerouslySetInnerHTML={{ __html: highlightedIndex }} />
+              : p.recommendedIndex}
           </div>
           {p.verdict === 'add' && (
             <div style={{ marginTop: 8, fontSize: 12, color: s.text3 }}>

@@ -1,4 +1,7 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-javascript'
+import 'prismjs/components/prism-json'
 
 const s = {
   bg: '#0a0c0f',
@@ -81,9 +84,21 @@ export default function StorageAnalogyDemo() {
   const [view, setView] = useState<'analogy' | 'real'>('analogy')
   const [selectedRow, setSelectedRow] = useState<number | null>(null)
   const [selectedCard, setSelectedCard] = useState<number | null>(null)
+  const highlightedNosql = useMemo(() => Prism.highlight(realNosql, Prism.languages.javascript, 'javascript'), [])
 
   return (
     <div style={{ maxWidth: 820, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", color: s.text }}>
+      <style>{`
+        code .token.keyword { color: #f92672; }
+        code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+        code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+        code .token.selector, code .token.attr-name { color: #f92672; }
+        code .token.attr-value, code .token.atrule { color: #e6db74; }
+        code .token.function, code .token.class-name { color: #a6e22e; }
+        code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+        code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+        code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
+      `}</style>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, marginBottom: 20, backgroundColor: s.bg2, borderRadius: 8, padding: 4, border: `1px solid ${s.border}` }}>
         {(['analogy', 'real'] as const).map((v) => (
           <button
@@ -233,9 +248,9 @@ export default function StorageAnalogyDemo() {
             <div style={{ fontSize: 14, fontWeight: 700, color: s.accent, marginBottom: 10, letterSpacing: 0.5 }}>
               SQL Table
             </div>
-            <pre style={{ margin: 0, padding: 14, backgroundColor: s.bg2, border: `1px solid ${s.border}`, borderRadius: 8, fontFamily: s.mono, fontSize: 11, color: s.text2, whiteSpace: 'pre', overflowX: 'auto', lineHeight: 1.6 }}>
+            <div style={{ margin: 0, padding: 14, backgroundColor: s.bg2, border: `1px solid ${s.border}`, borderRadius: 8, fontFamily: s.mono, fontSize: 11, color: s.text2, whiteSpace: 'pre', overflowX: 'auto', lineHeight: 1.6 }}>
               {realSql}
-            </pre>
+            </div>
             <div style={{ marginTop: 8, padding: '6px 10px', backgroundColor: `${s.accent}0a`, borderRadius: 6, borderLeft: `3px solid ${s.accent}` }}>
               <span style={{ fontSize: 11, color: s.text2 }}>Fixed schema: every row must have all columns</span>
             </div>
@@ -244,9 +259,9 @@ export default function StorageAnalogyDemo() {
             <div style={{ fontSize: 14, fontWeight: 700, color: s.purple, marginBottom: 10, letterSpacing: 0.5 }}>
               NoSQL Documents
             </div>
-            <pre style={{ margin: 0, padding: 14, backgroundColor: s.bg2, border: `1px solid ${s.border}`, borderRadius: 8, fontFamily: s.mono, fontSize: 11, color: s.text2, whiteSpace: 'pre', overflowX: 'auto', lineHeight: 1.6 }}>
-              {realNosql}
-            </pre>
+            <div style={{ margin: 0, padding: 14, backgroundColor: s.bg2, border: `1px solid ${s.border}`, borderRadius: 8, fontFamily: s.mono, fontSize: 11, color: s.text2, whiteSpace: 'pre', overflowX: 'auto', lineHeight: 1.6 }}>
+              <code dangerouslySetInnerHTML={{ __html: highlightedNosql }} />
+            </div>
             <div style={{ marginTop: 8, padding: '6px 10px', backgroundColor: `${s.purple}0a`, borderRadius: 6, borderLeft: `3px solid ${s.purple}` }}>
               <span style={{ fontSize: 11, color: s.text2 }}>Schema-free: each document has its own shape</span>
             </div>

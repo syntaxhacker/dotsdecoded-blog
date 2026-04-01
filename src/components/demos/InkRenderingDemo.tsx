@@ -1,4 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-jsx'
 import DemoBoundary from './DemoBoundary'
 import SpeedController, { getStepDelay } from './SpeedController'
 
@@ -157,6 +159,11 @@ function TerminalOutput({ children }: { children: React.ReactNode }) {
 }
 
 function CodeBlock({ code }: { code: string }) {
+  const lines = useMemo(() => {
+    const highlighted = Prism.highlight(code, Prism.languages.jsx, 'jsx')
+    return highlighted.split('\n')
+  }, [code])
+
   return (
     <div style={{
       backgroundColor: s.bg2,
@@ -170,7 +177,18 @@ function CodeBlock({ code }: { code: string }) {
       whiteSpace: 'pre',
       overflow: 'auto',
     }}>
-      {code.split('\n').map((line, idx) => (
+      <style>{`
+        code .token.keyword { color: #f92672; }
+        code .token.string, code .token.char, code .token.builtin, code .token.inserted { color: #e6db74; }
+        code .token.number, code .token.constant, code .token.symbol, code .token.property, code .token.tag, code .token.boolean, code .token.deleted { color: #ae81ff; }
+        code .token.selector, code .token.attr-name { color: #f92672; }
+        code .token.attr-value, code .token.atrule { color: #e6db74; }
+        code .token.function, code .token.class-name { color: #a6e22e; }
+        code .token.operator, code .token.entity, code .token.url, code .token.punctuation { color: #f8f8f2; }
+        code .token.comment, code .token.prolog, code .token.doctype, code .token.cdata { color: #75715e; font-style: italic; }
+        code .token.parameter, code .token.variable, code .token.regex, code .token.important { color: #fd971f; }
+      `}</style>
+      {lines.map((line, idx) => (
         <div key={idx} style={{ display: 'flex' }}>
           <span style={{
             color: s.text3,
@@ -180,58 +198,11 @@ function CodeBlock({ code }: { code: string }) {
             textAlign: 'right',
             marginRight: 16,
           }}>{idx + 1}</span>
-          <span>{highlightJsx(line)}</span>
+          <code dangerouslySetInnerHTML={{ __html: line }} />
         </div>
       ))}
     </div>
   )
-}
-
-function highlightJsx(line: string): React.ReactNode {
-  const parts: React.ReactNode[] = []
-  let remaining = line
-  let key = 0
-
-  const tokenRegex = /(<\/?)([\w.]+)([\s\S]*?)(\/?>)|(&quot;|&#39;|&lt;|&gt;|&amp;)|("([^"]*)")|(\{[^}]*\})|([\w-]+)/g
-
-  let match: RegExpExecArray | null
-  let lastIdx = 0
-
-  while ((match = tokenRegex.exec(remaining)) !== null) {
-    if (match.index > lastIdx) {
-      parts.push(<span key={key++}>{remaining.slice(lastIdx, match.index)}</span>)
-    }
-
-    if (match[2]) {
-      const bracket = match[1]
-      const tag = match[2]
-      const attrs = match[3]
-      const close = match[4]
-      parts.push(<span key={key++} style={{ color: s.red }}>{bracket}{tag}</span>)
-      if (attrs) {
-        parts.push(<span key={key++} style={{ color: s.yellow }}>{attrs}</span>)
-      }
-      if (close) {
-        parts.push(<span key={key++} style={{ color: s.red }}>{close}</span>)
-      }
-    } else if (match[5]) {
-      parts.push(<span key={key++} style={{ color: s.orange }}>{match[5]}</span>)
-    } else if (match[6]) {
-      parts.push(<span key={key++} style={{ color: s.green }}>{match[6]}</span>)
-    } else if (match[8]) {
-      parts.push(<span key={key++} style={{ color: s.orange }}>{match[8]}</span>)
-    } else if (match[9]) {
-      parts.push(<span key={key++}>{match[9]}</span>)
-    }
-
-    lastIdx = match.index + match[0].length
-  }
-
-  if (lastIdx < remaining.length) {
-    parts.push(<span key={key++}>{remaining.slice(lastIdx)}</span>)
-  }
-
-  return parts
 }
 
 export default function InkRenderingDemo() {
