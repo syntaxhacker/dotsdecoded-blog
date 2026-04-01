@@ -292,8 +292,8 @@ export default function TagGraphDemo({ tags, edges }: Props) {
       const clamped = Math.max(scale, 0.45)
       const scaledParams = {
         ...params,
-        minRadius: params.minRadius * clamped,
-        maxRadius: params.maxRadius * clamped,
+        minRadius: Math.min(params.minRadius * clamped, 14),
+        maxRadius: Math.min(params.maxRadius * clamped, 24),
       }
       const result = buildSimNodes(tags, w / 2, h / 2, w, h, scaledParams)
       nodesRef.current = result.nodes
