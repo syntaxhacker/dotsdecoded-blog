@@ -13,14 +13,14 @@ const url = canonicalURL ? new URL(canonicalURL, siteUrl).href : Astro.url.href
 const ogImage = new URL(image, siteUrl).href
 ---
 <!doctype html>
-<html lang="en">
+<html lang="en" data-testid="html-root">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content={description} />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <link rel="canonical" href={url} />
-  <title>{title}</title>
+  <link rel="canonical" href={url} data-testid="canonical-link" />
+  <title data-testid="page-title">{title}</title>
 
   <meta property="og:title" content={title} />
   <meta property="og:description" content={description} />
