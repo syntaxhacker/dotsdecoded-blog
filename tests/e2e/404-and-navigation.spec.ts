@@ -42,4 +42,9 @@ test.describe('Navigation', () => {
     ])
     await expect(page.locator('[data-testid="post-title"]')).toBeVisible()
   })
+
+  test('pagefind search index is available', async ({ page }) => {
+    const response = await page.goto('/pagefind/pagefind.js', { waitUntil: 'domcontentloaded' })
+    expect(response?.status()).toBe(200)
+  })
 })

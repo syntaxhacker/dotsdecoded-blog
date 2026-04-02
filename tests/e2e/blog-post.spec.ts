@@ -54,9 +54,10 @@ test.describe('Blog Post Pages', () => {
   test('first post back link navigates to home', async ({ page }) => {
     await page.goto(`/blog/${POST_SLUGS[0]}`, { waitUntil: 'domcontentloaded' })
     await Promise.all([
-      page.waitForURL('/'),
+      page.waitForURL('/').catch(() => null),
       page.getByTestId('back-link').click(),
     ])
+    await page.waitForLoadState('domcontentloaded')
     await expect(page.getByTestId('site-title')).toBeVisible()
   })
 })

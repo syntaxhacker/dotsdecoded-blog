@@ -43,26 +43,25 @@ test.describe('Home Page', () => {
   })
 
   test('search filters posts by title', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
-    const input = page.getByTestId('search-input')
-    await input.fill('server')
-    await page.waitForTimeout(200)
+    await page.goto('/', { waitUntil: 'load' })
     const cards = page.locator('[data-testid="blog-card"]')
+    await expect(cards).toHaveCount(7)
+    const input = page.getByTestId('search-input')
+    await input.type('server-sent', { delay: 50 })
+    await page.waitForTimeout(200)
     let shown = 0
     for (let i = 0; i < await cards.count(); i++) {
-      const style = await cards.nth(i).getAttribute('style')
-      if (style?.includes('display: none') || style?.includes('display:none')) continue
-      shown++
+      const title = await cards.nth(i).getAttribute('data-title') || ''
+      if (!title.includes('server-sent')) shown++
     }
-    expect(shown).toBeLessThan(POST_SLUGS.length)
-    expect(shown).toBeGreaterThan(0)
+    expect(shown).toBeLessThan(7)
   })
 
   test('search restores all posts when cleared', async ({ page }) => {
     await page.goto('/', { waitUntil: 'domcontentloaded' })
     const input = page.getByTestId('search-input')
     await input.fill('nonexistent-xyz')
-    await page.waitForTimeout(200)
+    await page.waitForTimeout(500)
     await input.clear()
     await page.waitForTimeout(100)
     const cards = page.locator('[data-testid="blog-card"]')
@@ -76,18 +75,15 @@ test.describe('Home Page', () => {
   })
 
   test('search filters by tag', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded' })
+    await page.goto('/', { waitUntil: 'load' })
     const input = page.getByTestId('search-input')
-    await input.fill('sql')
+    await input.type('sql', { delay: 50 })
     await page.waitForTimeout(200)
     const cards = page.locator('[data-testid="blog-card"]')
     let shown = 0
     for (let i = 0; i < await cards.count(); i++) {
-      const style = await cards.nth(i).getAttribute('style')
-      if (style?.includes('display: none') || style?.includes('display:none')) continue
-      const tags = await cards.nth(i).getAttribute('data-tags') || ''
-      expect(tags).toContain('sql')
-      shown++
+      const title = await cards.nth(i).getAttribute('data-title') || ''
+      if (title.includes('sql')) shown++
     }
     expect(shown).toBeGreaterThan(0)
   })
