@@ -1,9 +1,7 @@
 import { useState, useMemo } from 'react'
 import DemoBoundary from './DemoBoundary'
 import Prism from 'prismjs'
-import 'prismjs/components/prism-markup-templating'
-import 'prismjs/components/prism-markup'
-import 'prismjs/components/prism-erb'
+import 'prismjs/components/prism-ruby'
 
 const s = {
   bg: '#0a0c0f',
@@ -112,7 +110,7 @@ export default function PartialDemo() {
 
   const codeHtml = useMemo(() => {
     if (!current) return ''
-    return Prism.highlight(current.code, Prism.languages.erb, 'erb')
+    return Prism.highlight(current.code, Prism.languages.ruby, 'ruby')
   }, [current])
 
   return (

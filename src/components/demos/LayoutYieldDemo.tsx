@@ -1,9 +1,7 @@
 import { useState, useMemo } from 'react'
 import DemoBoundary from './DemoBoundary'
 import Prism from 'prismjs'
-import 'prismjs/components/prism-markup-templating'
-import 'prismjs/components/prism-markup'
-import 'prismjs/components/prism-erb'
+import 'prismjs/components/prism-ruby'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -91,10 +89,10 @@ export default function LayoutYieldDemo() {
 
   const codeHtml = useMemo(() => {
     if (view === 'layout') {
-      return Prism.highlight(layoutCode, Prism.languages.erb, 'erb')
+      return Prism.highlight(layoutCode, Prism.languages.ruby, 'ruby')
     }
     if (view === 'page') {
-      return Prism.highlight(pageCode(page), Prism.languages.erb, 'erb')
+      return Prism.highlight(pageCode(page), Prism.languages.ruby, 'ruby')
     }
     const htmlCode = `<!DOCTYPE html>
 <html>
@@ -132,7 +130,7 @@ export default function LayoutYieldDemo() {
     </footer>
   </body>
 </html>`
-    return Prism.highlight(htmlCode, Prism.languages.markup, 'markup')
+    return htmlCode.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   }, [view, page])
 
   return (

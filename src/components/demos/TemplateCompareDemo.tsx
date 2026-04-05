@@ -1,9 +1,6 @@
 import { useState, useMemo } from 'react'
 import DemoBoundary from './DemoBoundary'
 import Prism from 'prismjs'
-import 'prismjs/components/prism-markup-templating'
-import 'prismjs/components/prism-markup'
-import 'prismjs/components/prism-erb'
 import 'prismjs/components/prism-ruby'
 
 const s = {
@@ -85,7 +82,7 @@ const htmlOutput = `<h1>My First Post</h1>
   <li>Thanks for sharing.</li>
 </ul>`
 
-const htmlOutputHtml = Prism.highlight(htmlOutput, Prism.languages.markup, 'markup')
+const htmlOutputHtml = htmlOutput.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 const features: Record<Tab, string[]> = {
   erb: ['Uses <%= %> for output, <% %> for logic', 'Full Ruby power -- any Ruby code works', 'Familiar to anyone who knows HTML', 'Verbose -- lots of <% %> noise'],
@@ -101,7 +98,7 @@ export default function TemplateCompareDemo() {
 
   const templateHtml = useMemo(() => {
     if (activeTab === 'erb') {
-      return Prism.highlight(current.code, Prism.languages.erb, 'erb')
+      return Prism.highlight(current.code, Prism.languages.ruby, 'ruby')
     }
     return Prism.highlight(current.code, Prism.languages.ruby, 'ruby')
   }, [activeTab, current])

@@ -2,8 +2,7 @@ import { useState, useMemo } from 'react'
 import DemoBoundary from './DemoBoundary'
 import Prism from 'prismjs'
 import 'prismjs/components/prism-ruby'
-import 'prismjs/components/prism-markup-templating'
-import 'prismjs/components/prism-erb'
+
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
