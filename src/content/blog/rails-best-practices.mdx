@@ -1,0 +1,530 @@
+---
+title: "Rails Best Practices & Design Patterns: Writing Maintainable Code"
+description: "Great Rails code stays great as it grows. Learn the fat-model-skinny-controller approach, service objects, decorators, concerns, presenters, DRY principles, and how to avoid common anti-patterns — with interactive demos."
+date: 2026-04-05
+tags: ["ruby", "rails", "design-patterns", "best-practices", "architecture"]
+---
+
+import FatModelDemo from '../../components/demos/FatModelDemo'
+import ServiceObjectDemo from '../../components/demos/ServiceObjectDemo'
+import DecoratorPatternDemo from '../../components/demos/DecoratorPatternDemo'
+import AntiPatternDemo from '../../components/demos/AntiPatternDemo'
+import StiPolymorphicDemo from '../../components/demos/StiPolymorphicDemo'
+import ConcernDemo from '../../components/demos/ConcernDemo'
+
+## The DRY Principle
+
+Imagine you are writing a cookbook. You have a pasta recipe that appears in three different chapters. Instead of copying it three times, you write it once and add a page reference: "See page 47 for the marinara sauce." That is DRY — Don't Repeat Yourself.
+
+DRY is one of the most fundamental principles in software engineering, and Rails was designed with it baked in. The framework itself is DRY: ActiveRecord handles database queries, so you never write raw SQL for basic CRUD. ERB partials let you render the same HTML fragment in multiple views. Helpers let you reuse view logic across templates.
+
+But DRY is not about eliminating every repetition. It is about eliminating **unintentional** repetition — the kind that makes a codebase fragile when requirements change.
+
+### Where Duplication Hides in Rails
+
+**Views** are the most common hiding spot. You write the same card layout in five different partials. The fix: extract a shared partial and pass local variables. You write the same date formatting in ten places. The fix: a helper method like `formatted_date(time)`.
+
+**Controllers** repeat authorization checks, pagination setup, and error handling. The fix: `before_action` callbacks, a shared `PaginationConcern`, or a base controller with common behavior.
+
+**Models** duplicate validation patterns, scopes, and callback logic. The fix: concerns, shared modules, or base classes with common behavior.
+
+**Tests** duplicate setup code across specs. The fix: shared contexts, factory traits, or support modules.
+
+### The DRY Toolkit
+
+Rails gives you several tools to stay DRY:
+
+- **Partials** — Reusable view fragments with `<%= render partial: "card", locals: { title: ... } %>`
+- **Helpers** — Methods available in views: `module ApplicationHelper; def format_currency(amount); ...; end; end`
+- **Concerns** — Shared model or controller logic: `include Searchable` in multiple models
+- **Libraries** — Extracted gems or `lib/` code shared across applications
+- **Services** — Business logic that multiple controllers or models need
+
+### When NOT to DRY
+
+Premature abstraction is worse than duplication. If two pieces of code look similar but serve different business purposes, forcing them to share an implementation creates coupling. The Rule of Three is a good heuristic: wait until you see the same pattern three times before abstracting it.
+
+You have seen one, you have seen them all is the trap. Two similar methods might diverge next sprint. Wait for the pattern to prove itself stable before extracting it.
+
+## Fat Model, Skinny Controller
+
+Think of a restaurant. The **waiter** (controller) takes your order, relays it to the kitchen, and brings your food back. The **chef** (model) actually cooks the meal. If the waiter started cooking, the restaurant would fall apart — orders would pile up, recipes would be inconsistent, and nobody could test a dish in isolation.
+
+Rails controllers should be thin dispatchers. They receive an HTTP request, extract parameters, delegate to a model or service, and return an HTTP response. That is it. No business logic, no calculations, no complex conditional branching.
+
+Models, on the other hand, own the business domain. They encapsulate validation rules, data relationships, computed properties, and state transitions. When a controller calls `order.process_payment`, it has no idea how payment processing works — and it should not need to.
+
+### Why Skinny Controllers Matter
+
+Skinny controllers are **testable**. You can unit test the model method without setting up an HTTP request. They are **reusable**. The same `order.process_payment` method can be called from a background job, a console command, or an API endpoint. They are **readable**. A controller action should fit on a single screen.
+
+<FatModelDemo client:visible />
+
+### The Boundary
+
+"Fat model" does not mean "dump everything into the model." A model with 50 methods is just as bad as a controller with 50 lines of logic. When business logic involves multiple models, external services, or complex workflows, it belongs in a service object — not the model, not the controller. We will cover service objects next.
+
+## Service Objects
+
+Imagine you are renovating a house. You could ask the general contractor (the model) to handle plumbing, electrical, and painting. Or you could hire a specialist for each job. Service objects are the specialists.
+
+A service object is a plain Ruby class with a single public method — typically `.call` — that performs one specific operation. It is instantiated, does its job, and is discarded. No state is persisted between calls.
+
+### When to Use a Service Object
+
+Use a service object when logic involves:
+
+- **Multiple models** — processing an order touches User, Item, Order, and Payment
+- **External APIs** — calling Stripe, SendGrid, or a third-party service
+- **Complex workflows** — multi-step processes with validation, side effects, and error handling
+- **Background jobs** — the same logic needs to run both synchronously (web request) and asynchronously (Sidekiq job)
+
+### Naming Convention
+
+Service objects live in `app/services/` and follow a verb pattern:
+
+```
+app/services/
+  order_processor.rb
+  payment_handler.rb
+  report_generator.rb
+  newsletter_sender.rb
+  crm_sync_service.rb
+```
+
+Each service has a `.call` class method and private instance methods:
+
+```ruby
+class OrderProcessor
+  def initialize(user, item, quantity, payment_method)
+    @user = user
+    @item = item
+    @quantity = quantity
+    @payment_method = payment_method
+  end
+
+  def call
+    validate_inputs!
+    process_payment
+    create_order
+    { success: true, order: @order }
+  rescue StandardError => e
+    { success: false, error: e.message }
+  end
+end
+```
+
+### Why Service Objects Are Testable
+
+Since service objects are plain Ruby classes, you can test them without loading the full Rails stack. No controller, no routing, no database fixtures (unless you need them). A unit test for `OrderProcessor` creates a user, an item, and calls `.call` with specific arguments. The test checks the return value. No HTTP requests, no view rendering, no middleware.
+
+<ServiceObjectDemo client:visible />
+
+### Service Object vs. Concern vs. Helper
+
+- **Concern** — shared behavior across multiple models or controllers (e.g., `Searchable`, `SoftDeletable`)
+- **Helper** — presentation logic used in views (e.g., `format_currency`, `time_ago`)
+- **Service Object** — standalone business operation with clear inputs and outputs
+
+## Decorators
+
+Think of a picture frame. The photograph (your model data) never changes. But you can put it in a wooden frame for the living room, a metal frame for the office, or a digital frame for your website. The frame is the decorator — it changes the presentation without altering the underlying data.
+
+A decorator wraps a model instance and adds presentation methods. The model stays clean — it only knows about data and business rules. The decorator knows how to display that data in a specific context.
+
+### The Draper Gem
+
+Draper is the most popular decorator library in Rails. It provides a `ApplicationDecorator` base class and automatic wrapping in controllers:
+
+```ruby
+# app/decorators/user_decorator.rb
+class UserDecorator < Draper::Decorator
+  delegate_all
+
+  def formatted_name
+    "#{object.first_name} #{object.last_name.upcase}"
+  end
+
+  def avatar_url
+    object.avatar_url || "https://gravatar.com/#{object.email_hash}"
+  end
+
+  def joined_ago
+    h.time_ago_in_words(object.created_at) + " ago"
+  end
+end
+```
+
+In the controller, decorate the object before passing it to the view:
+
+```ruby
+@user = User.find(params[:id]).decorate
+```
+
+In the view, call decorator methods instead of raw model attributes:
+
+```erb
+<%= @user.formatted_name %>
+<%= @user.joined_ago %>
+<%= @user.avatar_url %>
+```
+
+### When to Use Decorators
+
+Use decorators when your views contain logic that does not belong in the model — formatting, conditional display, computed strings, or context-specific representations. If you find yourself writing `if` statements in ERB that depend on model state, that logic likely belongs in a decorator.
+
+### Decorators vs. Helpers
+
+Helpers are global functions. They take arguments and return values. Decorators are instance methods on a wrapped object. Use helpers for truly generic formatting (currency, dates). Use decorators for logic specific to a particular model's presentation.
+
+<DecoratorPatternDemo client:visible />
+
+## Common Anti-Patterns
+
+Every Rails developer encounters these. Some we write ourselves, some we inherit. Recognizing them is the first step to fixing them.
+
+### Fat Controllers
+
+The controller does everything: validation, calculation, external API calls, email sending. It runs 60 lines deep with nested conditionals. This is the most common anti-pattern in Rails, and it makes code untestable and unreusable.
+
+### Fat Models
+
+The opposite problem: a User model with 800 lines. It knows about orders, payments, analytics, newsletters, CRM syncs. Every new feature adds more methods until the model becomes a god object — it does everything, depends on everything, and is impossible to change without breaking something.
+
+### Callback Hell
+
+Seven `before_save`, `after_create`, and `after_commit` callbacks chained together. Order-dependent side effects fire silently. Tests pass individually but fail in combination. Debugging requires reading the entire callback chain to figure out what happens when you call `user.save!`.
+
+### Queries in Views
+
+An ERB template fires `Post.where(published: true)` directly. For each post, it fires another query for comments. Ten posts become eleven queries. This is the classic N+1 problem hiding in plain sight. The fix: eager loading with `.includes(:comments)` in the controller.
+
+### God Objects
+
+A single class that knows too much. It touches ten database tables, calls five external services, and handles business logic for three different domains. Any change risks breaking unrelated functionality.
+
+### Nested Conditionals
+
+Seven levels of `if/else` inside a controller action. The happy path is buried under guard clauses. Reading the code requires tracking indentation mentally. The fix: guard clauses that return early, and service objects that encapsulate complex branching.
+
+<AntiPatternDemo client:visible />
+
+### Self-Check
+
+- [ ] Can I test this controller action without making an HTTP request?
+- [ ] Does my model have more than 15 public methods?
+- [ ] Do I have more than 3 callbacks on a single model?
+- [ ] Are there any database queries in my ERB templates?
+- [ ] Does any method have more than 4 levels of indentation?
+
+If you answered yes to any of these, refactoring is overdue.
+
+## Presenters
+
+Think of a news anchor on television. The anchor does not gather the news — reporters in the field do that. The anchor synthesizes information from multiple sources and presents it as a coherent story. A presenter in Rails does the same thing: it gathers data from multiple models and prepares it for a specific view.
+
+Presenters are similar to decorators but serve a different purpose. A decorator wraps a single model and adds display methods. A presenter composes data from multiple models into a view-specific object.
+
+### When to Use a Presenter
+
+Use a presenter when a view needs data from several models that must be combined, calculated, or formatted together. A dashboard that shows user stats, recent activity, and revenue totals is a classic presenter use case.
+
+```ruby
+# app/presenters/dashboard_presenter.rb
+class DashboardPresenter
+  def initialize(user)
+    @user = user
+  end
+
+  def recent_orders
+    @user.orders.recent.limit(5).map(&method(:format_order))
+  end
+
+  def revenue_this_month
+    orders = @user.orders.where(
+      created_at: Date.current.beginning_of_month..
+    )
+    format_currency(orders.sum(:total))
+  end
+
+  def pending_tasks_count
+    @user.tasks.where(status: 'pending').count
+  end
+
+  def activity_feed
+    events = []
+    events += @user.comments.recent(3).map { |c| [c, :commented] }
+    events += @user.orders.recent(3).map { |o| [o, :ordered] }
+    events.sort_by { |e, _| e.created_at }.reverse.first(5)
+  end
+
+  private
+
+  def format_currency(amount)
+    "$#{amount.truncate(2)}"
+  end
+
+  def format_order(order)
+    { id: order.id, total: format_currency(order.total), status: order.status }
+  end
+end
+```
+
+### Presenter vs. Decorator
+
+| Aspect        | Decorator              | Presenter                  |
+|---------------|------------------------|----------------------------|
+| Wraps         | Single model           | Multiple models            |
+| Scope         | Reusable across views  | Specific to one view       |
+| Methods       | Presentation of 1 model| Composition of many models |
+| Example       | `UserDecorator`        | `DashboardPresenter`       |
+
+## Modularizing a Large Application
+
+A Rails monolith does not have to be a mess. But at some point — typically around 50-100 models and 100+ controllers — the application becomes difficult to navigate. Files are hard to find, tests are slow, and new developers take weeks to become productive.
+
+### Namespaces
+
+The simplest way to organize a growing application. Rails supports routing namespaces that map to module directories:
+
+```ruby
+# config/routes.rb
+namespace :admin do
+  resources :users
+  resources :settings
+end
+
+namespace :api do
+  namespace :v1 do
+    resources :articles
+    resources :comments
+  end
+end
+```
+
+This creates `app/controllers/admin/users_controller.rb` and `app/controllers/api/v1/articles_controller.rb`. Each namespace is a self-contained area with its own controllers, views, and helpers.
+
+### Engines
+
+Rails engines are miniature applications that can be mounted inside a larger application. They have their own models, controllers, views, routes, and even their own database migrations.
+
+```ruby
+# config/routes.rb
+mount BlogEngine::Engine, at: "/blog"
+mount StoreEngine::Engine, at: "/store"
+```
+
+Full engines live in their own directory with a complete Rails app structure. They are ideal for features that could eventually be extracted into a separate service — a blog, a store, an admin panel.
+
+### Packwerk and Private Gems
+
+Packwerk enforces dependency boundaries between packages (directories). It prevents circular dependencies by declaring which packages can depend on which others:
+
+```yaml
+# packwerk.yml
+enforce_dependencies: true
+
+# app/admin/package.yml
+dependencies:
+  - "core"
+  - "authentication"
+```
+
+Private gems extract entire features into gems hosted in a private gem server or a monorepo path. They are the most aggressive modularization strategy and are appropriate when a feature is truly independent.
+
+### The Monolith vs. Microservices Spectrum
+
+You do not need microservices to have a modular architecture. A well-organized monolith with namespaces and engines can scale to hundreds of developers. Extract a service when the feature has genuinely independent deployment needs — different scaling requirements, different uptime SLAs, or different technology stacks.
+
+| Strategy         | Complexity | When to Use                         |
+|------------------|------------|--------------------------------------|
+| Namespaces       | Low        | Logical grouping, different domains  |
+| Concerns         | Low        | Shared behavior across models        |
+| Services         | Low        | Complex business operations          |
+| Engines          | Medium     | Self-contained features              |
+| Packwerk         | Medium     | Enforcing dependency boundaries      |
+| Private Gems     | High       | Truly independent features           |
+| Microservices    | Very High  | Independent scaling and deployment   |
+
+## Single Table Inheritance and Polymorphic Associations
+
+These two patterns solve different problems but are often confused because both let a single database interface serve multiple model types.
+
+### Single Table Inheritance (STI)
+
+Imagine a company with three types of employees: managers, developers, and designers. They all share a name, email, and hire date. But managers have a budget, developers have a programming language, and designers have a portfolio URL.
+
+Instead of three separate tables with duplicated columns, STI uses **one table** with a `type` column that tells Rails which class to instantiate:
+
+```ruby
+class Employee < ApplicationRecord
+  # shared behavior for all employees
+  validates :name, :email, presence: true
+end
+
+class Manager < Employee
+  validates :budget, numericality: { greater_than: 0 }
+end
+
+class Developer < Employee
+  belongs_to :team
+end
+
+class Designer < Employee
+  validates :portfolio_url, presence: true
+end
+```
+
+When you query `Manager.all`, Rails adds `WHERE type = 'Manager'` automatically. When you create a new Developer, Rails sets `type = 'Developer'` before saving.
+
+**When to use STI:** When the types share most of their columns and behavior. The `type` discriminator is efficient, and you get polymorphic queries for free (`Employee.where("hire_date > ?", 1.year.ago)` returns all types).
+
+**When NOT to use STI:** When the types have many unique columns (lots of NULLs in the table), when the types have very different behavior, or when you need different database constraints per type.
+
+### Polymorphic Associations
+
+Imagine a commenting system where users can comment on both blog posts and photos. Instead of two separate foreign keys (`post_id` and `photo_id`), a polymorphic association uses a generic `commentable` reference:
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :commentable, polymorphic: true
+end
+
+class Post < ApplicationRecord
+  has_many :comments, as: :commentable
+end
+
+class Photo < ApplicationRecord
+  has_many :comments, as: :commentable
+end
+```
+
+The `comments` table stores both an `id` and a `type` to identify the parent:
+
+| id | body         | commentable_id | commentable_type |
+|----|--------------|----------------|------------------|
+| 1  | "Great post" | 42             | Post             |
+| 2  | "Love this"  | 17             | Photo            |
+
+**When to use polymorphic associations:** When a model genuinely belongs to multiple different parent types, and the set of possible parents is small and stable.
+
+**When NOT to use polymorphic associations:** When you need foreign key constraints (polymorphic references cannot have DB-level constraints), when the parent types need different join behavior, or when the set of parent types will grow large.
+
+<StiPolymorphicDemo client:visible />
+
+### STI vs. Polymorphic: Quick Comparison
+
+| Aspect               | STI                              | Polymorphic                       |
+|----------------------|----------------------------------|-----------------------------------|
+| Purpose              | Multiple models, one table       | Multiple parents, one interface   |
+| Database             | One table with `type` column     | `*_id` + `*_type` columns        |
+| Shared columns       | All types share the same columns | Each parent has its own table     |
+| Foreign key          | Standard FK on the one table     | No DB-level FK possible           |
+| Querying             | Automatic type filtering         | Manual type filtering             |
+| Best for             | Similar types, same data shape   | "Belongs to many" relationships  |
+
+## Concerns
+
+Think of concerns as chapter dividers in a textbook. Each chapter covers one topic. You can read them independently, but together they form a complete book. In Rails, concerns are modules that group related methods and include them into classes.
+
+Rails provides `ActiveSupport::Concern`, which makes it easy to write concerns that work with class methods, instance methods, and callbacks:
+
+```ruby
+# app/models/concerns/searchable.rb
+module Searchable
+  extend ActiveSupport::Concern
+
+  included do
+    scope :search, ->(query) {
+      where("name ILIKE ?", "%#{query}%")
+    }
+  end
+
+  class_methods do
+    def search_by_tag(tag)
+      joins(:tags).where(tags: { name: tag })
+    end
+  end
+end
+```
+
+Then include it in any model:
+
+```ruby
+class Article < ApplicationRecord
+  include Searchable
+end
+
+class Product < ApplicationRecord
+  include Searchable
+end
+```
+
+### Concern Location
+
+Rails expects concerns in specific directories:
+
+- `app/models/concerns/` — model concerns
+- `app/controllers/concerns/` — controller concerns
+
+Both directories are autoloaded by default.
+
+### Concern vs. Service Object
+
+This is a common point of confusion. Here is the rule:
+
+- **Concern** — shared behavior that multiple classes need. It mixes into the class and becomes part of it. Example: `Searchable` is included in Article, Product, and User.
+- **Service Object** — a standalone operation that does not belong to any single class. It is called once and discarded. Example: `OrderProcessor` orchestrates a workflow across User, Item, Order, and Payment.
+
+If the logic is reusable across classes, make it a concern. If the logic is a one-time operation with clear inputs and outputs, make it a service object.
+
+<ConcernDemo client:visible />
+
+## Keeping a Codebase Clean Over Time
+
+Writing clean code is a skill. Keeping it clean over years is a discipline. Here are the practices that make the difference between a codebase that ages gracefully and one that becomes a nightmare.
+
+### The Boy Scout Rule
+
+"Leave the campground cleaner than you found it." Applied to code: every time you touch a file, leave it slightly better. Rename a confusing variable. Extract a method. Add a missing test. These small improvements compound over time. One developer making one small improvement per day adds up to hundreds of improvements per year.
+
+### Code Reviews
+
+Code reviews are the single most effective tool for maintaining quality. They catch bugs before they reach production, spread knowledge across the team, and establish shared standards. A good code review checks:
+
+- Does this code belong where it was placed?
+- Is there existing code that does the same thing?
+- Are the tests sufficient?
+- Is the naming clear?
+- Is there a simpler way to accomplish the same goal?
+
+### RuboCop and Linting
+
+RuboCop enforces consistent style automatically. Configure it with the community standard (`.rubocop.yml` with `inherit_gem: rubocop-rails-omakase`) and run it in CI. Consistent style eliminates debates about formatting and makes the codebase easier to read for everyone.
+
+### Regular Refactoring Sprints
+
+Reserve time each sprint — even 10% — for paying down technical debt. This is not optional. Every sprint that adds features without cleaning up accumulates debt that compounds exponentially. The team that never refactors eventually spends 80% of its time working around old code instead of building new features.
+
+### Documentation
+
+Not every method needs a comment. But every public API, every complex algorithm, and every non-obvious decision should be documented. A `README.md` in each major directory explaining its purpose saves hours of confusion for the next developer.
+
+### Dependency Management
+
+Keep gems updated. Run `bundle outdated` regularly. Pin versions in `Gemfile`. Remove unused dependencies. An outdated gem with a known vulnerability is a ticking time bomb.
+
+### Self-Check: Codebase Health
+
+- [ ] All models under 200 lines
+- [ ] All controllers fit on one screen
+- [ ] No N+1 queries (verified with Bullet gem)
+- [ ] RuboCop passes with zero offenses
+- [ ] Test coverage above 80%
+- [ ] No open security warnings (`bundle audit`)
+- [ ] CI pipeline runs in under 10 minutes
+- [ ] New developers can set up the project in under 30 minutes
+- [ ] Every pull request has at least one approval
+- [ ] Technical debt items are tracked and prioritized
+
+If you can check all of these, your codebase is in good shape. If not, pick one area to improve this sprint. The Rails community has a saying: "The best time to refactor was yesterday. The second best time is today."

@@ -1,0 +1,659 @@
+---
+title: "Rails Performance: Caching, Background Jobs, and Query Optimization"
+description: "A fast Rails app keeps users happy. Learn caching strategies, eager loading, background jobs with Sidekiq, database indexing, connection pooling, and performance monitoring tools — with interactive demos."
+date: 2026-04-05
+tags: ["ruby", "rails", "performance", "caching", "optimization"]
+---
+
+import CachingStrategyDemo from '../../components/demos/CachingStrategyDemo'
+import BackgroundJobDemo from '../../components/demos/BackgroundJobDemo'
+import EagerLoadingDemo from '../../components/demos/EagerLoadingDemo'
+import DatabaseIndexDemo from '../../components/demos/DatabaseIndexDemo'
+import ConnectionPoolDemo from '../../components/demos/ConnectionPoolDemo'
+
+## Why Performance Matters
+
+Imagine walking into a restaurant, sitting down, and waiting five minutes before a waiter even acknowledges you. You would probably leave. The same thing happens on the web. Studies consistently show that 53% of mobile users abandon a site that takes longer than 3 seconds to load. Every additional second of delay reduces conversions by roughly 7%. Performance is not a luxury — it is a fundamental feature.
+
+Rails gives us a powerful framework for building web applications quickly, but that convenience comes with overhead. ActiveRecord, view rendering, middleware, and the Ruby runtime all add up. A poorly optimized Rails app can feel sluggish even on fast hardware. The good news: Rails also gives us excellent tools to diagnose and fix performance problems.
+
+### Where Rails Apps Typically Slow Down
+
+Most Rails performance issues fall into one of three categories:
+
+1. **Database queries** — the most common culprit. N+1 queries, missing indexes, and fetching too much data can turn a 50ms request into a 2-second one.
+2. **View rendering** — complex partials, unoptimized layouts, and repeated computation inside ERB templates.
+3. **External calls** — API requests to third-party services (payment processors, email providers, geocoding) that block the request cycle.
+
+We will tackle each of these throughout this post, starting with how to identify exactly where your app is slow.
+
+## Identifying Bottlenecks
+
+Think of debugging a slow app like diagnosing a patient. You would not prescribe medicine based on a guess — you would run tests, look at the results, and form a diagnosis. Rails gives us several "diagnostic tools" to pinpoint exactly where time is being spent.
+
+### Rails Logs
+
+The first place to look is your development log. Every request prints timing information:
+
+```
+Started GET "/posts" for 127.0.0.1 at 2026-04-05 10:00:00
+Processing by PostsController#index as HTML
+  Post Load (45.2ms)  SELECT "posts".* FROM "posts"
+  Rendered posts/index.html.erb within layouts/application (120.5ms)
+Completed 200 OK in 185ms (Views: 120.3ms | ActiveRecord: 47.1ms)
+```
+
+That log line tells you exactly how much time was spent in the database vs view rendering. If you see `ActiveRecord: 500ms`, you have a database problem. If `Views: 800ms`, your templates need attention.
+
+### Rack-Mini-Profiler
+
+`rack-mini-profiler` adds a small timing badge to every page in development. Click it and you get a detailed breakdown of every SQL query, partial render, and middleware call — all without switching to the terminal. It is the fastest way to spot N+1 queries.
+
+```ruby
+# Gemfile
+gem 'rack-mini-profiler'
+
+# It auto-injects in development — no configuration needed
+```
+
+### Bullet Gem
+
+The Bullet gem specifically watches for N+1 queries and unused eager loading. We will cover it in detail later, but the idea is simple: it alerts you the moment you fire more queries than necessary.
+
+### Production Monitoring
+
+In production, you need continuous monitoring. Tools like New Relic, Skylight, Datadog, and Scout APM track response times, throughput, error rates, and database time across your entire fleet. They show you which endpoints are slow, which queries are called most often, and whether performance is degrading over time.
+
+### The Profiling Workflow
+
+Here is a practical approach to finding and fixing performance issues:
+
+1. **Start with logs** — check which actions are slow
+2. **Use rack-mini-profiler** — identify the exact queries or partials causing the delay
+3. **Use Bullet** — confirm or rule out N+1 query problems
+4. **Add monitoring** — deploy New Relic or Skylight to catch regressions in production
+5. **Fix the bottleneck** — apply the right technique (caching, eager loading, indexing, background jobs)
+6. **Measure again** — confirm the fix actually improved things
+
+Guessing is expensive. Measuring is cheap. Always profile before optimizing.
+
+## Caching Strategies
+
+Imagine you are a barista at a busy coffee shop. Every time someone orders a latte, you have two choices: grind the beans, steam the milk, and pull the shot from scratch, or keep a batch of espresso ready and pour it instantly. Caching is the batch of espresso — it lets you serve the same result without redoing the work.
+
+Rails provides several caching strategies, each suited to different situations.
+
+### Fragment Caching
+
+Fragment caching stores a rendered piece of a view (a "fragment") so it does not need to be re-rendered on subsequent requests. This is the most commonly used caching strategy in Rails.
+
+```erb
+<% cache @post do %>
+  <h2><%= @post.title %></h2>
+  <p><%= @post.body %></p>
+  <span>Author: <%= @post.author.name %></span>
+<% end %>
+```
+
+The first request renders the HTML and stores it in the cache. Subsequent requests skip the rendering entirely and return the cached HTML. Rails generates a cache key automatically based on the model's class, ID, and `updated_at` timestamp — so when the post is updated, the cache key changes and the fragment is re-rendered automatically.
+
+### Russian Doll Caching
+
+Russian doll caching nests fragment caches inside one another. The outer cache wraps the inner cache, and each layer can be invalidated independently.
+
+```erb
+<% cache @post do %>
+  <article>
+    <h2><%= @post.title %></h2>
+    <% @post.comments.each do |comment| %>
+      <% cache comment do %>
+        <div class="comment">
+          <%= comment.body %>
+          <span>by <%= comment.author.name %></span>
+        </div>
+      <% end %>
+    <% end %>
+  </article>
+<% end %>
+```
+
+If a single comment changes, only that comment's fragment is re-rendered. The post's outer cache remains valid because its cache key (based on `@post.updated_at`) has not changed. This is incredibly efficient — you get cache hits on the outer layers while only rebuilding the small piece that changed.
+
+### Cache Stores
+
+Rails supports multiple cache backends:
+
+| Store        | Best For              | Persistence | Speed     |
+|-------------|-----------------------|-------------|-----------|
+| MemoryStore | Development, tests    | In-process  | Fastest   |
+| FileStore   | Single-server deploys | Disk        | Moderate  |
+| RedisStore  | Production, multi-app | Network     | Very fast |
+| MemCacheStore | Production         | Network     | Very fast |
+
+```ruby
+# config/environments/production.rb
+config.cache_store = :redis_cache_store, {
+  url: ENV['REDIS_URL'],
+  namespace: 'myapp',
+  expires_in: 12.hours
+}
+```
+
+Redis is the most popular choice for production because it is fast, supports eviction policies, and can be shared across multiple application servers.
+
+### Cache Keys and Expiration
+
+Every cached fragment has a key. Rails auto-generates keys like `posts/42-20260405120000` (model class, ID, and timestamp). When the record changes, the timestamp changes, the key changes, and the cache is invalidated. You rarely need to manage keys manually.
+
+For custom caching, you can set explicit expiration:
+
+```ruby
+Rails.cache.fetch("popular_posts", expires_in: 5.minutes) do
+  Post.order(views: :desc).limit(10).to_a
+end
+```
+
+The block runs once, stores the result, and returns the cached value for the next 5 minutes.
+
+<CachingStrategyDemo client:visible />
+
+## Background Jobs
+
+Think of a restaurant. The waiter takes your order, writes it down, and moves on to the next table. They do not stand in the kitchen watching your food cook. The chef (a background worker) prepares your meal independently, and the waiter brings it out when it is ready. Your web application should work the same way.
+
+When a user signs up, you might need to send a welcome email, create a default profile, and generate a thumbnail of their avatar. If you do all of that synchronously inside the controller action, the user waits 3-4 seconds staring at a spinner. Instead, you enqueue those tasks as background jobs. The web request finishes in 200ms, and the jobs run in a separate process.
+
+### Active Job
+
+Active Job is Rails' abstraction layer for background processing. You define a job class, and Rails handles the rest:
+
+```ruby
+class WelcomeEmailJob < ApplicationJob
+  queue_as :mailers
+
+  def perform(user_id)
+    user = User.find(user_id)
+    UserMailer.welcome(user).deliver_now
+  end
+end
+```
+
+```ruby
+# Enqueue from a controller
+WelcomeEmailJob.perform_later(user.id)
+
+# Or enqueue with a delay
+WelcomeEmailJob.set(wait: 24.hours).perform_later(user.id)
+```
+
+### Job Backends
+
+Active Job is backend-agnostic. You choose which adapter handles the actual queue:
+
+| Backend      | Concurrency | Persistence | Best For                    |
+|-------------|-------------|-------------|-----------------------------|
+| Sidekiq     | Multi-threaded | Redis     | High-throughput production  |
+| Resque      | Multi-process | Redis      | Simpler setups              |
+| DelayedJob  | Multi-process | Database   | Small apps, no Redis        |
+| Solid Queue | Multi-threaded | Database   | Rails 8 built-in default    |
+
+Sidekiq is the most popular choice because it is fast (uses threads instead of processes), reliable (persistent Redis queue), and feature-rich (scheduled jobs, retries, dead letter queues).
+
+```ruby
+# config/application.rb
+config.active_job.queue_adapter = :sidekiq
+```
+
+### Queues and Priorities
+
+Jobs are organized into queues, and workers pull from queues in priority order:
+
+```ruby
+class ProcessImageJob < ApplicationJob
+  queue_as :low_priority
+
+  def perform(image_id)
+    # thumbnail generation, compression, etc.
+  end
+end
+
+class PaymentJob < ApplicationJob
+  queue_as :critical
+
+  def perform(payment_id)
+    # charge credit card, update balance
+  end
+end
+```
+
+```yaml
+# config/sidekiq.yml
+:queues:
+  - [critical, 5]
+  - [mailers, 3]
+  - [default, 2]
+  - [low_priority, 1]
+```
+
+The numbers are weights — critical jobs get 5x more worker attention than low-priority ones.
+
+### Error Handling and Retries
+
+When a job fails, Sidekiq automatically retries it with exponential backoff:
+
+```ruby
+class ProcessVideoJob < ApplicationJob
+  retry_on TranscodingError, wait: 30.seconds, attempts: 3
+  discard_on InvalidVideoError
+
+  def perform(video_id)
+    video = Video.find(video_id)
+    video.transcode!
+  end
+end
+```
+
+`retry_on` tells Sidekiq to try again after a delay. `discard_on` gives up immediately for unrecoverable errors. After all retries are exhausted, the job moves to the "dead" queue where you can inspect and manually retry it.
+
+<BackgroundJobDemo client:visible />
+
+## Eager Loading
+
+Imagine you are loading a photo album on your phone. You could tap each thumbnail one by one and wait for the full image to download (lazy loading). Or you could tap "download all" and wait once while every image loads in the background (eager loading). Both approaches get you the same images, but eager loading is dramatically faster when you need all of them.
+
+ActiveRecord uses lazy loading by default. When you access an association for the first time, it fires a SQL query. This leads to the notorious **N+1 query problem**:
+
+```ruby
+posts = Post.limit(10)
+
+posts.each do |post|
+  puts post.author.name  # Fires a query for EACH post
+end
+
+# Result: 1 query for posts + 10 queries for authors = 11 queries
+```
+
+That is 1 query to load posts, plus N queries (one per post) to load each author. With 100 posts, that is 101 queries. With 1,000, it is 1,001. The database becomes the bottleneck.
+
+### `includes`
+
+The `includes` method tells Rails to load associations in advance using a few large queries instead of many small ones:
+
+```ruby
+posts = Post.includes(:author).limit(10)
+
+posts.each do |post|
+  puts post.author.name  # No additional query — already loaded
+end
+
+# Result: 1 query for posts + 1 query for all authors = 2 queries
+```
+
+Rails is smart about this. It loads all posts, collects the author IDs, and runs a single `SELECT * FROM authors WHERE id IN (1, 2, 3, ...)`. Two queries, regardless of how many posts you have.
+
+### `preload`
+
+`preload` works similarly but always uses separate queries (one per association):
+
+```ruby
+Post.preload(:author, :comments)
+# 3 queries: posts, authors, comments
+```
+
+### `eager_load`
+
+`eager_load` forces a single query using LEFT OUTER JOIN:
+
+```ruby
+Post.eager_load(:author)
+# 1 query: SELECT posts.*, authors.* FROM posts LEFT OUTER JOIN authors ON ...
+```
+
+This can be useful when you need to filter or sort on the association, but it produces wider result sets and duplicate rows.
+
+### When to Use Which
+
+| Method      | Queries      | Strategy          | Best When                              |
+|------------|--------------|-------------------|----------------------------------------|
+| `includes` | 2+           | Separate or JOIN  | General purpose — Rails picks the best |
+| `preload`  | 2+           | Separate always   | You specifically want separate queries  |
+| `eager_load`| 1           | LEFT OUTER JOIN   | Filtering/sorting on associations      |
+
+In practice, `includes` covers 95% of cases. Use `preload` when you know separate queries are faster (e.g., polymorphic associations). Use `eager_load` when you need to filter on the association.
+
+### Nested Associations
+
+You can eager load multiple levels deep:
+
+```ruby
+Post.includes(comments: [:author, :replies])
+# Loads posts, comments, comment authors, and replies
+```
+
+Be careful not to over-eager-load. Loading an entire object graph into memory can be worse than a few extra queries. Profile with rack-mini-profiler and load only what you actually use.
+
+<EagerLoadingDemo client:visible />
+
+## Bullet Gem: Catching N+1 Queries Automatically
+
+The Bullet gem is like a security camera for your database queries. It watches every request and alerts you when it detects an N+1 query pattern or unnecessary eager loading. Think of it as a linter for your database access.
+
+### Setup
+
+```ruby
+# Gemfile
+group :development, :test do
+  gem 'bullet'
+end
+```
+
+```ruby
+# config/environments/development.rb
+config.after_initialize do
+  Bullet.enable = true
+  Bullet.bullet_logger = true
+  Bullet.rails_logger = true
+  Bullet.add_footer = true
+end
+```
+
+### What Bullet Detects
+
+Bullet catches two types of issues:
+
+1. **N+1 queries** — you accessed an association without eager loading it
+2. **Unused eager loading** — you used `includes` but never accessed the association
+
+When Bullet detects a problem, it logs a warning and adds a visible footer to the page:
+
+```
+GET /posts
+USE eager loading detected
+  Post => [:author]
+  Add to your query: Post.includes(:author)
+```
+
+This is invaluable during development. It catches N+1 problems the moment they appear, before they reach production. You should never deploy code that Bullet has warned you about.
+
+### In Your Test Suite
+
+You can also run Bullet in your test suite to catch regressions:
+
+```ruby
+# spec/rails_helper.rb
+Bullet.enable = true
+Bullet.bullet_logger = true
+Bullet.raise = true  # Fails the test on N+1 detection
+```
+
+With `Bullet.raise = true`, any test that triggers an N+1 query will fail with a clear error message telling you exactly which association needs eager loading.
+
+## Performance Monitoring Tools
+
+Once your app is in production, you need continuous visibility into its performance. Monitoring tools track metrics over time, alert you when things degrade, and help you understand how real users experience your application.
+
+### What to Monitor
+
+The four key metrics for any web application:
+
+| Metric         | What It Measures              | Target       |
+|---------------|-------------------------------|--------------|
+| Response time | How long requests take        | p95 < 200ms  |
+| Throughput    | Requests per second           | Trend upward |
+| Error rate    | Percentage of failed requests | < 0.5%       |
+| Database time | Time spent in SQL queries     | < 30% of total |
+
+### Development Tools
+
+**rack-mini-profiler** — Adds a timing badge to every page in development. Click it to see SQL queries, partial render times, and middleware overhead. Zero configuration needed.
+
+**bullet** — Catches N+1 queries and unused eager loading in real time, as we covered in the previous section.
+
+### Production APMs
+
+**New Relic** — The most full-featured APM. Tracks response times, database queries, external service calls, and background jobs. Provides dashboards, alerts, and distributed tracing for microservice architectures.
+
+**Skylight** — Built by the Shopify team specifically for Rails. Minimal setup, beautiful interface, and it automatically detects slow endpoints and queries. A good choice if you want something Rails-native.
+
+**Datadog** — An all-in-one observability platform. APM, log management, infrastructure monitoring, and alerting in a single tool. Powerful but can be expensive at scale.
+
+**Scout APM** — Lightweight and affordable. Good for smaller teams that need the essentials without the complexity of New Relic or Datadog.
+
+### What to Look For
+
+When you open your APM dashboard, start with these questions:
+
+1. Which endpoints have the highest p95 response time?
+2. Which SQL queries are called most frequently?
+3. Are there endpoints where database time exceeds 50% of total response time?
+4. Are background jobs failing or retrying frequently?
+5. Is performance degrading over time (memory leaks, growing database)?
+
+The goal is not to optimize everything — it is to find the highest-impact changes. Fixing one endpoint that handles 40% of your traffic will have far more impact than shaving 10ms off a rarely-used admin page.
+
+## HTTP/2 Server Push
+
+HTTP/2 introduced a feature called Server Push, which allows the server to proactively send resources to the browser before the browser even asks for them. In a traditional HTTP/1.1 flow, the browser downloads the HTML, parses it, finds references to CSS and JavaScript files, and then requests those files. With Server Push, the server can send the CSS and JS alongside the HTML, saving a round trip.
+
+### How Rails Uses Server Push
+
+Rails integrates with HTTP/2 Server Push through the `link` header:
+
+```ruby
+# Rails automatically adds push headers in production
+# when using the asset pipeline with HTTP/2
+```
+
+Rails can also manually push resources:
+
+```ruby
+class ApplicationController < ActionController::Base
+  def push_assets
+    push "/assets/application.css"
+    push "/assets/application.js"
+  end
+end
+```
+
+### When It Helps and When It Does Not
+
+Server Push sounds great in theory, but in practice it has limited benefits:
+
+- **Helps** when the server can predict which assets the page needs before parsing the HTML (e.g., a known CSS file used on every page)
+- **Does not help** when the browser already has the asset cached — the push is wasted bandwidth
+- **Can hurt** if you push too much — browsers have limits on concurrent pushes, and unnecessary pushes compete with actual requests for bandwidth
+
+In most modern Rails applications, the asset pipeline already generates fingerprinted URLs and sets long cache headers. Combined with HTTP/2 multiplexing (which allows multiple requests over a single connection), the need for Server Push is reduced. Some modern browsers have even deprecated it in favor of `<link rel="preload">`.
+
+### Preload as an Alternative
+
+The `<link rel="preload">` hint tells the browser to fetch a resource with high priority, but lets the browser decide whether to actually use it:
+
+```erb
+<link rel="preload" href="<%= asset_path('critical.css') %>" as="style">
+<link rel="preload" href="<%= asset_path('hero-image.webp') %>" as="image">
+```
+
+This is generally preferred over Server Push because the browser can check its cache first and skip the download if the resource is already stored. It gives you the performance benefit without the waste.
+
+## Database Indexing
+
+Imagine searching for a specific name in a phone book. If the names are in alphabetical order, you flip to the right section and find the entry in seconds. If the names are in random order, you have to read every single page until you find it. A database index is the alphabetical ordering — it lets the database find rows without scanning the entire table.
+
+### What Is an Index?
+
+An index is a separate data structure (typically a B-tree) that stores a sorted copy of one or more columns, along with pointers to the actual table rows. When you query an indexed column, the database traverses the B-tree instead of scanning every row.
+
+Without an index, a query like `SELECT * FROM users WHERE email = 'alice@example.com'` must check every single row — an operation called a **sequential scan** or **full table scan**. With an index on the `email` column, the database jumps directly to the matching row, like looking up a word in a dictionary.
+
+### The Tradeoff
+
+Indexes make reads faster but make writes slower. Every `INSERT`, `UPDATE`, or `DELETE` must update not just the table but also every index on that table. A table with 10 indexes pays the write penalty 10 times. The rule of thumb: add indexes for columns you query frequently, and avoid indexing columns that change constantly.
+
+### Adding Indexes in Rails
+
+```ruby
+class AddIndexToUsersEmail < ActiveRecord::Migration[7.0]
+  def change
+    add_index :users, :email, unique: true
+  end
+end
+```
+
+```ruby
+# Multiple indexes in one migration
+class AddPerformanceIndexes < ActiveRecord::Migration[7.0]
+  def change
+    add_index :posts, :user_id
+    add_index :posts, :published_at
+    add_index :comments, [:post_id, :created_at]
+  end
+end
+```
+
+### Composite Indexes
+
+A composite (multi-column) index covers queries that filter on multiple columns. The column order matters — the index is useful when queries filter on the leftmost columns first:
+
+```ruby
+add_index :orders, [:user_id, :status, :created_at]
+```
+
+This index helps with:
+- `WHERE user_id = 1`
+- `WHERE user_id = 1 AND status = 'pending'`
+- `WHERE user_id = 1 AND status = 'pending' AND created_at > '2026-01-01'`
+
+But it does NOT help with:
+- `WHERE status = 'pending'` (skips the leftmost column)
+
+### When to Add Indexes
+
+Add an index when:
+- A column appears in `WHERE` clauses frequently
+- A column appears in `ORDER BY` clauses and the sort is slow
+- A column is used in `JOIN` conditions
+- A foreign key column (Rails does not add these automatically)
+
+Check which indexes your database actually uses with `EXPLAIN ANALYZE`:
+
+```ruby
+# In the Rails console
+User.where(email: 'alice@example.com').explain
+```
+
+The output shows whether the query used an index or fell back to a sequential scan.
+
+<DatabaseIndexDemo client:visible />
+
+## Connection Pooling
+
+Think of a taxi stand with five taxis. When people (web requests) need a ride (database connection), they take a taxi. If all five taxis are busy, the next person has to wait until one returns. If you have 100 people waiting and only 5 taxis, most of them will wait a long time. Adding more taxis (connections) helps, but each taxi costs money (database resources). Connection pooling is the art of finding the right number.
+
+### What Is a Connection Pool?
+
+A connection pool maintains a set of reusable database connections. Instead of creating a new connection for every request (which is expensive — TCP handshake, authentication, session setup), the pool hands out an existing idle connection. When the request finishes, the connection returns to the pool for the next request.
+
+Rails manages connection pooling through ActiveRecord:
+
+```yaml
+# config/database.yml
+development:
+  adapter: postgresql
+  database: myapp_development
+  pool: 5
+  timeout: 5000
+```
+
+- `pool` — the maximum number of connections to keep open
+- `timeout` — how long (in milliseconds) to wait for a connection before raising an error
+
+### Why This Matters
+
+Every open connection consumes memory on the database server. PostgreSQL uses roughly 10MB per connection. With 200 connections, that is 2GB of memory just for connection overhead — memory that could be used for caching query results. MySQL has similar costs.
+
+Most databases also have a maximum connection limit. PostgreSQL defaults to 100, and many cloud providers set even lower limits on managed databases. If your app tries to open more connections than the database allows, new requests will fail.
+
+### Thread-Safe Connection Handling
+
+In a multi-threaded server (like Puma), multiple threads handle requests concurrently. Each thread needs its own database connection because sharing a connection across threads would cause queries to interleave and produce incorrect results.
+
+Rails handles this automatically: each thread checks out a connection from the pool at the start of a request and returns it at the end. As long as your pool size is at least as large as your thread count, every thread gets a connection immediately.
+
+### Configuring Pool Size
+
+The pool size should match your web server's thread count:
+
+```
+Pool size >= Puma threads per worker
+```
+
+If Puma runs 5 threads per worker and you have 2 workers, each worker needs at least 5 connections:
+
+```yaml
+production:
+  pool: 5  # matches Puma's threads setting
+```
+
+```ruby
+# config/puma.rb
+threads 0, 5  # min 0, max 5 threads per worker
+workers 2      # 2 worker processes
+```
+
+Two workers each with 5 threads = 10 concurrent requests maximum, each needing a connection. With a pool of 5 per worker, you use 10 connections total. Add a few extra for background jobs and Rails console sessions.
+
+### Connection Pool Exhaustion
+
+When all connections in the pool are busy and a thread tries to check one out, it waits up to `timeout` milliseconds. If no connection becomes available, Rails raises:
+
+```
+ActiveRecord::ConnectionTimeoutError: could not obtain a connection from the pool within 5.000 seconds
+```
+
+This usually means:
+- Your pool size is too small for your traffic
+- A slow query is holding connections too long
+- A connection leak (a thread checked out a connection but never returned it)
+
+### PgBouncer: External Connection Pooling
+
+For high-traffic applications, you can use PgBouncer — an external connection pooler that sits between your app and PostgreSQL. It maintains hundreds of connections to your application but only a small number to the database:
+
+```
+App (200 connections) -> PgBouncer -> PostgreSQL (25 connections)
+```
+
+PgBouncer handles the multiplexing, so even with 200 app connections, PostgreSQL only sees 25. This is essential when running many Puma workers or when you have multiple services connecting to the same database.
+
+<ConnectionPoolDemo client:visible />
+
+## Bringing It All Together
+
+We have covered a lot of ground. Let's map each performance technique to the problem it solves:
+
+| Problem                  | Technique           | Tool/Pattern               |
+|-------------------------|---------------------|----------------------------|
+| Repeated view rendering | Caching             | Fragment, Russian doll     |
+| Slow page loads         | Background jobs     | Active Job + Sidekiq       |
+| N+1 queries             | Eager loading       | `includes`, `preload`      |
+| Detecting N+1 early     | Bullet gem          | Development + test suite   |
+| Slow queries on WHERE   | Database indexing   | B-tree indexes             |
+| Too many open conns     | Connection pooling  | Pool config + PgBouncer    |
+| No visibility in prod   | Monitoring          | New Relic, Skylight        |
+| Resource pre-fetching   | HTTP/2 preload      | `<link rel="preload">`     |
+
+### Self-Check
+
+Before moving on, verify you can answer these:
+
+- [ ] What is the difference between fragment caching and Russian doll caching?
+- [ ] Why should you use background jobs instead of doing work synchronously?
+- [ ] What is the N+1 query problem and how do you fix it?
+- [ ] How does the Bullet gem help during development?
+- [ ] When should you add a database index, and what is the tradeoff?
+- [ ] What happens when a connection pool is exhausted?
+- [ ] What metrics should you monitor in production?
+- [ ] Why is `<link rel="preload">` generally preferred over HTTP/2 Server Push?
+
+If you can answer all of these, you have a solid foundation in Rails performance optimization. The next step is applying these techniques to your own application — profile first, optimize second, and measure the results.

@@ -1,0 +1,440 @@
+---
+title: "Rails Controllers & Actions: The Brains of Your Application"
+description: "Controllers receive requests, orchestrate models, and render views. Learn the Rails controller lifecycle, strong parameters, filters, sessions, flash messages, and RESTful routing — with interactive demos."
+date: 2026-04-05
+tags: ["ruby", "rails", "controllers", "routing", "rest"]
+---
+
+import ControllerLifecycleDemo from '../../components/demos/ControllerLifecycleDemo'
+import FilterPipelineDemo from '../../components/demos/FilterPipelineDemo'
+import StrongParamsDemo from '../../components/demos/StrongParamsDemo'
+import RouteTypesDemo from '../../components/demos/RouteTypesDemo'
+import FlashMessageDemo from '../../components/demos/FlashMessageDemo'
+
+## The Controller's Role in MVC
+
+Think of a busy airport. Planes are constantly arriving from all over the world, each one carrying passengers with different destinations. The air traffic controller does not fly the planes, does not refuel them, and does not decide where passengers want to go. The controller's job is simple but critical: receive each incoming flight, figure out which gate it belongs at, and direct it there.
+
+A Rails controller works the same way. When a user visits a URL, a request arrives at your application. The controller receives it, decides what to do, coordinates with models (the database layer) and views (the presentation layer), and sends back a response. That is its entire job.
+
+Controllers live in `app/controllers/`. Every controller inherits from `ApplicationController`, which itself inherits from `ActionController::Base`. This inheritance chain gives your controllers all the power they need: parameter handling, session management, rendering, redirects, and more.
+
+A controller is not a model. It does not contain business logic. It does not query the database directly beyond simple lookups delegated to the model layer. And it is not a view. It does not contain HTML or decide how things look. A controller is the **coordinator** -- it sits between the user's request and the final response, orchestrating everything in between.
+
+```ruby
+class PostsController < ApplicationController
+  def index
+    @posts = Post.all
+  end
+end
+```
+
+That is a complete controller action. It fetches all posts from the database (through the `Post` model) and makes them available to the view (through the `@posts` instance variable). Three lines, one responsibility. This is Rails philosophy: convention over configuration, simplicity over complexity.
+
+## From Controller to View: Instance Variables
+
+Imagine a restaurant kitchen. The chef (controller) prepares the dishes and writes each order on a clipboard. The waiter (view) takes the clipboard, reads what was prepared, and presents it to the customer. The chef never goes into the dining room. The waiter never touches the stove. They communicate through the clipboard.
+
+In Rails, the clipboard is an **instance variable** -- any variable starting with `@`. When a controller action sets `@posts = Post.all`, that variable becomes available to the corresponding view template automatically. No explicit passing, no return statements, no manual data transfer.
+
+```ruby
+def show
+  @post = Post.find(params[:id])
+  @comments = @post.comments.includes(:author)
+  @related = Post.where(category: @post.category).where.not(id: @post.id).limit(3)
+end
+```
+
+This action sets three instance variables. The view at `app/views/posts/show.html.erb` can access all three:
+
+```erb
+<h1><%= @post.title %></h1>
+<p><%= @post.body %></p>
+
+<h2>Comments (<%= @comments.count %>)</h2>
+<% @comments.each do |comment| %>
+  <div><%= comment.author.name %>: <%= comment.body %></div>
+<% end %>
+
+<h2>Related Posts</h2>
+<% @related.each do |post| %>
+  <div><%= link_to post.title, post %></div>
+<% end %>
+```
+
+Local variables (without `@`) do not cross the controller-view boundary. If you write `post = Post.find(1)` in the controller, the view cannot see `post`. Only instance variables make the trip.
+
+This is deliberate. It keeps the interface between controller and view explicit. When you see an `@` in a view, you immediately know it came from the controller. When you see a plain variable, you know the view defined it locally.
+
+## The Request Lifecycle
+
+Every request that hits a Rails application follows the same sequence of steps. Understanding this lifecycle is like knowing the assembly line in a factory -- once you see how each stage connects to the next, the whole system makes sense.
+
+Here is the order:
+
+1. **Routing** -- The URL is matched against your `routes.rb` file to determine which controller and action should handle it.
+2. **Dispatching** -- Rails creates a new instance of the controller and calls the action method.
+3. **Before filters** -- Registered callbacks run before the action executes.
+4. **The action** -- Your code runs: database queries, business logic, variable assignment.
+5. **After filters** -- Registered callbacks run after the action completes.
+6. **Rendering** -- Rails renders the view template (or you explicitly render/redirect).
+7. **Response** -- The complete HTTP response is sent back to the browser.
+
+Each step happens in this exact order, every time, for every request. Filters wrap around the action like layers of an onion. The action sits at the center, and the before/after filters run on either side.
+
+<ControllerLifecycleDemo client:visible />
+
+## Working with Parameters
+
+Think of a form as a questionnaire you fill out at a doctor's office. Some fields are in your control (your name, your symptoms) and some are not (the form ID printed at the top, the date stamp). Parameters in Rails work the same way -- they are all the pieces of information that arrive with a request, coming from multiple sources.
+
+The `params` hash in a controller action contains three types of parameters:
+
+**URL parameters** -- embedded in the URL path itself. When you define `get "/posts/:id"`, the `:id` segment becomes `params[:id]`.
+
+```
+GET /posts/42          =>  params[:id] = "42"
+GET /users/7/posts     =>  params[:user_id] = "7"
+```
+
+**Query parameters** -- the part after `?` in the URL. Used for filtering, searching, and pagination.
+
+```
+GET /posts?category=rails&sort=newest
+=>  params[:category] = "rails"
+=>  params[:sort] = "newest"
+```
+
+**Form parameters** -- submitted via POST/PUT/PATCH requests from HTML forms. Nested under the form's model name.
+
+```
+POST /posts
+  post[title] = "Hello World"
+  post[body] = "My first post"
+=>  params[:post] = { "title" => "Hello World", "body" => "My first post" }
+```
+
+All parameter values arrive as strings. Rails provides type casting for known model attributes (ActiveRecord handles `"42"` becoming the integer `42`), but raw params are always strings. This is important when working with `params[:id]` -- you are working with a string, not an integer.
+
+Nested parameters are common when a form includes associated data:
+
+```ruby
+# params looks like:
+# { "post" => { "title" => "Hello", "comments_attributes" => { "0" => { "body" => "Nice!" } } } }
+
+def create
+  @post = Post.new(post_params)
+  @post.save
+end
+```
+
+The `params` hash is not a regular Ruby hash. It is an `ActionController::Parameters` object, and as of Rails 4+, it cannot be used directly for mass assignment without going through strong parameters first (more on that shortly).
+
+## Before, After, and Around Filters
+
+Think of filters as security checkpoints at a building entrance. Some checkpoints run before you enter (checking your ID badge), some run after you leave (logging that you visited), and some wrap around your entire visit (tracking how long you spent inside). Rails filters work identically.
+
+**Before filters** run before the controller action. They are the most common type. Typical use cases:
+
+- `before_action :authenticate_user!` -- redirect to login if not signed in
+- `before_action :set_post, only: [:show, :edit, :update, :destroy]` -- load the post from the database
+- `before_action :require_admin, only: [:destroy]` -- restrict destructive actions to admins
+
+**After filters** run after the action (and rendering) are complete. They cannot prevent the action from running -- they are for side effects like logging or analytics.
+
+**Around filters** wrap the entire action. They yield to let the action run, then execute more code afterward. Less common, but powerful for benchmarking or transaction wrapping.
+
+Filters accept `only:` and `except:` options to control which actions they apply to:
+
+```ruby
+class ApplicationController < ActionController::Base
+  before_action :authenticate_user!
+  before_action :set_locale
+  after_action :log_request
+end
+
+class PostsController < ApplicationController
+  before_action :set_post, only: [:show, :edit, :update, :destroy]
+  before_action :verify_admin, only: [:destroy]
+end
+```
+
+The execution order matters. Filters in the parent controller (`ApplicationController`) run before filters in the child controller (`PostsController`). Within the same class, filters run in the order they are defined. If a before filter renders or redirects, the action and any remaining filters do not run.
+
+<FilterPipelineDemo client:visible />
+
+## Redirects and Rendering
+
+Every controller action must end by producing a response. In Rails, you have two options: render a template or redirect to another URL. These are fundamentally different operations, and mixing them up causes one of the most common Rails errors.
+
+**`render`** tells Rails to generate HTML using a view template. It renders inline -- the browser stays on the same URL.
+
+```ruby
+def new
+  @post = Post.new
+  # implicitly renders app/views/posts/new.html.erb
+end
+
+def show
+  @post = Post.find(params[:id])
+  # implicitly renders app/views/posts/show.html.erb
+end
+```
+
+**`redirect_to`** sends an HTTP 302 (or 301) status code back to the browser, telling it to make a new request to a different URL. The browser navigates away.
+
+```ruby
+def create
+  @post = Post.new(post_params)
+  if @post.save
+    redirect_to @post, notice: "Post was successfully created."
+  else
+    render :new, status: :unprocessable_entity
+  end
+end
+```
+
+Why redirect after a successful create? Because of the **POST/Redirect/GET pattern**. If you render the template after a POST, and the user refreshes the page, the browser resubmits the form (creating a duplicate post). By redirecting, the browser makes a GET request for the show page. Refreshing re-requests the show page harmlessly.
+
+The **double render error** happens when you call `render` or `redirect_to` more than once in a single action:
+
+```ruby
+def update
+  @post = Post.find(params[:id])
+  if @post.update(post_params)
+    redirect_to @post
+  end
+  redirect_to posts_path   # ERROR: AbstractController::DoubleRenderError
+end
+```
+
+Rails raises this error because it cannot send two responses. Each action must produce exactly one response. Use `return` after a redirect/render to avoid falling through to the next one:
+
+```ruby
+def update
+  @post = Post.find(params[:id])
+  if @post.update(post_params)
+    redirect_to @post
+    return
+  end
+  render :edit, status: :unprocessable_entity
+end
+```
+
+## Strong Parameters
+
+Imagine a nightclub with a strict door policy. Everyone in line must show ID. The bouncer has a list of who is allowed in -- names on the guest list get through, everyone else is turned away. Even if someone forges a VIP badge, the bouncer checks the list and rejects them.
+
+Strong parameters are the bouncer. Before Rails 4, you could do this:
+
+```ruby
+@user = User.new(params[:user])
+```
+
+This took everything submitted in the form and saved it to the database. A malicious user could add a hidden field to the form: `<input type="hidden" name="user[admin]" value="true">`. Rails would happily set `admin = true`, granting the user admin privileges. This is called a **mass assignment vulnerability**.
+
+Strong parameters solve this by requiring you to explicitly permit which attributes are allowed:
+
+```ruby
+def create
+  @user = User.new(user_params)
+  @user.save
+end
+
+private
+
+def user_params
+  params.require(:user).permit(:name, :email, :password)
+end
+```
+
+`params.require(:user)` raises an error if the `:user` key is missing from the params. `.permit(:name, :email, :password)` creates a whitelist of allowed attributes. Anything not on the list is silently stripped -- even if the submitted form contains `admin: true`, it never reaches the model.
+
+For nested attributes (like a post with tags):
+
+```ruby
+def post_params
+  params.require(:post).permit(:title, :body, :published, tag_ids: [])
+end
+```
+
+The `tag_ids: []` syntax permits an array of tag IDs. Without it, nested arrays are rejected by default.
+
+Strong parameters should always be defined as a private method in the controller. Never call `params.permit!` (which permits everything) in production code -- it defeats the entire purpose.
+
+<StrongParamsDemo client:visible />
+
+## Member vs Collection Routes
+
+When you write `resources :posts` in `routes.rb`, Rails generates seven standard routes:
+
+| Verb   | Path               | Helper              | Action   |
+|--------|--------------------|---------------------|----------|
+| GET    | /posts             | posts_path          | index    |
+| GET    | /posts/new         | new_post_path       | new      |
+| POST   | /posts             | posts_path          | create   |
+| GET    | /posts/:id         | post_path(:id)      | show     |
+| GET    | /posts/:id/edit    | edit_post_path(:id) | edit     |
+| PATCH  | /posts/:id         | post_path(:id)      | update   |
+| DELETE | /posts/:id         | post_path(:id)      | destroy  |
+
+But sometimes you need routes that do not fit the standard seven. Maybe you want `/posts/:id/publish` (publish a specific post) or `/posts/search` (search all posts). These are **custom routes**, and they come in two flavors.
+
+**Member routes** operate on a single resource. They always include `:id` in the URL because they need to know which specific resource to act on.
+
+```ruby
+resources :posts do
+  member do
+    post :publish   # POST /posts/:id/publish  => posts#publish
+    get  :profile   # GET  /posts/:id/profile  => posts#profile
+  end
+end
+```
+
+**Collection routes** operate on the entire collection. They do not include `:id` because they act on all resources at once.
+
+```ruby
+resources :posts do
+  collection do
+    get :search   # GET /posts/search  => posts#search
+    get :drafts   # GET /posts/drafts  => posts#drafts
+  end
+end
+```
+
+The difference is simple: if the route needs to know *which* resource, use a member route. If it acts on *all* resources, use a collection route. For a single custom route, you can use the singular form:
+
+```ruby
+resources :posts do
+  post :publish, on: :member     # POST /posts/:id/publish
+  get  :search,  on: :collection # GET  /posts/search
+end
+```
+
+<RouteTypesDemo client:visible />
+
+## Sessions: Remembering Users Between Requests
+
+HTTP is stateless. Every request is independent. The server has no memory of who you are from one request to the next. When you visit `/posts/1`, the server serves the page. When you click "Edit", the server has no idea you were just viewing that post. It is like having a conversation with someone who has amnesia -- you have to reintroduce yourself every time you speak.
+
+Sessions solve this by giving the server a way to remember things about a user across requests. When a user first visits your app, Rails creates a session (a hash-like data structure) and sends the user a cookie containing the session ID. On every subsequent request, the browser sends this cookie back, and Rails uses it to look up the session data.
+
+```ruby
+class SessionsController < ApplicationController
+  def create
+    user = User.find_by(email: params[:email])
+    if user&.authenticate(params[:password])
+      session[:user_id] = user.id
+      redirect_to dashboard_path
+    else
+      render :new
+    end
+  end
+
+  def destroy
+    session.delete(:user_id)
+    redirect_to root_path
+  end
+end
+```
+
+`session[:user_id] = user.id` stores the user's ID in the session. On the next request, `session[:user_id]` is still there. The controller can use it to look up the current user:
+
+```ruby
+class ApplicationController < ActionController::Base
+  before_action :set_current_user
+
+  private
+
+  def set_current_user
+    @current_user = User.find_by(id: session[:user_id]) if session[:user_id]
+  end
+
+  def authenticate_user!
+    redirect_to login_path unless @current_user
+  end
+end
+```
+
+Rails supports multiple session storage backends:
+
+| Store       | Where data lives             | Performance | Persistence |
+|-------------|------------------------------|-------------|-------------|
+| Cookie      | Encrypted in the user's cookie | Fastest     | Lost when cookie is cleared |
+| Cache       | Redis, Memcached             | Fast        | May be evicted under memory pressure |
+| Database    | `sessions` table in your DB  | Slower      | Persistent until explicitly deleted |
+
+The default in modern Rails is the **cookie store**, which stores everything in an encrypted cookie on the user's browser. This means no server-side storage is needed, but it also means session data is limited to about 4KB (cookie size limit) and should never contain sensitive data like passwords or API keys.
+
+**Security rules for sessions:**
+
+- Never store raw passwords or secrets in the session
+- Never store entire model objects -- store the ID and look up the object on each request
+- Set `session[:user_id] = nil` on logout (do not just clear the cookie)
+- Use `config.force_ssl = true` in production to prevent cookie theft over HTTP
+
+## Flash Messages: One-Time Notifications
+
+Think of a sticky note that self-destructs after you read it. You write "Remember to buy milk" on it, stick it on the fridge, and the next time someone opens the fridge, they see the message. But the time after that, the note is gone. It appeared exactly once, did its job, and disappeared.
+
+Flash messages in Rails work the same way. They are session-based messages that persist for exactly **one additional request**, then automatically disappear. They are the standard way to communicate short status messages between controller actions.
+
+```ruby
+def create
+  @post = Post.new(post_params)
+  if @post.save
+    redirect_to @post, notice: "Post was successfully created."
+  else
+    render :new, status: :unprocessable_entity
+  end
+end
+```
+
+After a successful save, Rails redirects to the show page and sets `flash[:notice]`. On the show page (the next request), the flash message is available in the view:
+
+```erb
+<% if notice %>
+  <div class="notice"><%= notice %></div>
+<% end %>
+<% if alert %>
+  <div class="alert"><%= alert %></div>
+<% end %>
+```
+
+Rails provides a convenience method: `redirect_to @post, notice: "..."` is shorthand for `flash[:notice] = "..."` followed by `redirect_to @post`.
+
+### flash vs flash.now
+
+The regular `flash` hash stores messages for the **next** request. This works perfectly with redirects because the browser makes a new request after the redirect. But what if you render a template instead of redirecting? The flash message would not appear until the following request -- which is probably not what you want.
+
+`flash.now` solves this. It sets a flash message that is available on the **current** request only:
+
+```ruby
+def create
+  @post = Post.new(post_params)
+  if @post.save
+    redirect_to @post, notice: "Post was successfully created."
+  else
+    flash.now[:alert] = "Please fix the errors below."
+    render :new, status: :unprocessable_entity
+  end
+end
+```
+
+Use `flash` when you redirect. Use `flash.now` when you render. This is the most common flash-related bug -- using `flash[:alert]` with `render` and wondering why the message never appears.
+
+<FlashMessageDemo client:visible />
+
+## Self-Check
+
+Before moving on, make sure you can answer these questions:
+
+- Why should a controller never contain business logic?
+- What is the difference between `@variable` and `variable` in a controller?
+- What happens if a before filter calls `redirect_to`?
+- Why is `params.permit!` dangerous?
+- When would you use `flash.now` instead of `flash`?
+- What is the difference between a member route and a collection route?
+- Why does the POST/Redirect/GET pattern exist?
+
+If you can answer all seven, you have a solid understanding of Rails controllers and are ready to move on to models and views.

