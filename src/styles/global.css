@@ -49,10 +49,6 @@ body {
   overflow: hidden;
 }
 
-body:has(.page) {
-  overflow: auto;
-}
-
 a {
   color: var(--accent);
   text-decoration: none;
@@ -347,6 +343,7 @@ pre code {
   height: 100vh;
   height: 100dvh;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .page-inner::-webkit-scrollbar {
@@ -635,4 +632,12 @@ pre code {
     height: 100dvh;
     overflow-y: auto;
   }
+}
+
+.prose > div {
+  overflow: visible;
+}
+
+.katex-display {
+  overflow: hidden;
 }
