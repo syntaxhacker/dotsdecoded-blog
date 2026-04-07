@@ -1,0 +1,241 @@
+---
+title: "React Compiler Internals: How React Compiles Your Components"
+description: "A deep dive into the React Compiler's architecture — from HIR construction and SSA form to reactive scopes, aliasing effects, memoization cache, and code generation."
+date: 2026-04-06
+tags: ["react", "compiler", "performance", "javascript"]
+---
+
+import CompilerPipelineDemo from '../../components/demos/CompilerPipelineDemo'
+import HIRExplorerDemo from '../../components/demos/HIRExplorerDemo'
+import SSAVisualDemo from '../../components/demos/SSAVisualDemo'
+import BeforeAfterDemo from '../../components/demos/BeforeAfterDemo'
+import ReactiveScopeDemo from '../../components/demos/ReactiveScopeDemo'
+import AliasEffectDemo from '../../components/demos/AliasEffectDemo'
+import ValidationRulesDemo from '../../components/demos/ValidationRulesDemo'
+import MemoCacheDemo from '../../components/demos/MemoCacheDemo'
+
+Imagine you write a React component that computes a greeting from a user's name. On the first render, it runs the computation. On the second render, the name has not changed, but React re-runs the computation anyway. You add `useMemo` to fix it. Then you add `useCallback` for a callback. Then `React.memo` for a child component. Your code is now littered with optimization annotations that make it harder to read.
+
+The React Compiler fixes this by automatically inserting memoization where it matters. You write normal React code, and the compiler transforms it behind the scenes so that only the minimum necessary work happens on each render.
+
+But how does it actually work? What happens to your code between the moment you save the file and the moment the browser runs it? That is what we will explore in this post, by reading the actual source code of the React Compiler.
+
+## The Big Picture
+
+The React Compiler is a Babel plugin that transforms your React components and hooks at build time. It has two public interfaces: a Babel plugin for code transformation, and an ESLint plugin for reporting violations of the Rules of React. Both share the same core compiler logic.
+
+The compiler works in seven phases, each building on the output of the previous one:
+
+<CompilerPipelineDemo client:visible />
+
+Click through the pipeline to see what each phase does. The key insight is that the compiler does not just grep your code for patterns — it builds a complete mathematical model of your data flow, then uses that model to insert the minimum necessary memoization.
+
+## Phase 1: HIR Construction
+
+The first thing the compiler does is convert your JavaScript code into an internal representation called HIR — High-level Intermediate Representation. This name is borrowed from the Rust compiler, and it means the compiler keeps your code at a high level (preserving if-statements, for-loops, ternary operators) rather than flattening everything into a generic low-level form.
+
+The HIR represents your code as a **control-flow graph**: a collection of basic blocks, where each block contains a sequence of instructions followed by a terminal (a control-flow decision like if, return, or goto).
+
+<HIRExplorerDemo client:visible />
+
+Notice how the HIR preserves the structure of your code. The if-statement becomes an `If` terminal that branches to different blocks. The `useState` call becomes a single instruction. Every value gets a unique identifier — `$1`, `$2`, `$3` — which allows the compiler to track data flow precisely.
+
+The HIR builder handles all of JavaScript's control flow: if/else, ternary operators, logical expressions (which short-circuit), for/while/do-while loops, switch statements, try/catch, and even optional chaining (which also short-circuits). Each of these becomes explicit branching in the control-flow graph.
+
+## Phase 2: SSA Form
+
+After building the HIR, the compiler converts it into **Static Single Assignment (SSA) form**. In SSA, every variable is assigned exactly once. If a variable is assigned multiple times (like in an if/else), the compiler gives each assignment a unique name and inserts a **phi node** at the point where the different versions merge.
+
+<SSAVisualDemo client:visible />
+
+Why does the compiler need SSA? Because with SSA, every use of a variable can be traced back to exactly one definition. This makes data flow analysis trivial — the compiler knows exactly which computation produced each value, without having to track reassignments.
+
+Phi nodes are the key innovation. They represent the merge point: "at this point in the code, the value came from either branch A or branch B." The compiler can look at a phi node and immediately know all the possible sources of a value.
+
+## Phase 3: Type and Effect Inference
+
+The compiler does not have access to TypeScript types (it works on plain JavaScript). Instead, it runs its own type inference to figure out what kind of values flow through your code. It uses a Hindley-Milner-style constraint-based type inference — the same approach that functional languages like Haskell and ML use.
+
+But the compiler also needs something more than types: it needs to understand **effects**. Effects describe how data flows and mutates through your program. The compiler defines a rich system of aliasing effects:
+
+- **Capture**: Value from A flows into B (e.g., `const x = obj.prop`)
+- **Alias**: B aliases A (e.g., `const x = arr` — x and arr point to the same array)
+- **Mutate**: A value is mutated (e.g., `arr.push(item)`)
+- **Freeze**: A value is marked as immutable
+- **Render**: A value is used in render output (JSX)
+- **Create**: A new value is created (e.g., `[]`, `{}`, function expression)
+
+<AliasEffectDemo client:visible />
+
+These effects are the compiler's primary analysis tool. By tracking capture and mutation effects, the compiler can answer questions like: "If `props.user` changes, does the `greeting` variable need to be recomputed?" The answer comes from following the capture chain: `greeting` captures `user.name`, which is a property of `user`, which is a property of `props`. So yes, if `props.user` changes, `greeting` must be recomputed.
+
+The compiler runs several sub-passes during this phase:
+
+- **inferTypes**: Assigns types to every value (Primitive, Function, Object, etc.)
+- **analyseFunctions**: Analyzes nested function effects
+- **inferMutationAliasingEffects**: Runs abstract interpretation to track data flow
+- **inferMutationAliasingRanges**: Computes mutable ranges from effects
+- **inferReactivePlaces**: Marks reactive places (props, hooks, derived values)
+
+## Phase 4: Reactive Scope Construction
+
+This is where the magic happens. The compiler groups related computations into **reactive scopes** — contiguous blocks of code that produce values depending on reactive inputs. Each reactive scope becomes one memoization unit in the compiled output.
+
+The key algorithm works like this:
+
+1. Start with the SSA form and the effect annotations
+2. Find groups of variables that are created or mutated together (using a union-find data structure)
+3. These groups become reactive scopes
+4. Each scope has a set of **dependencies** — the external values that determine whether it needs to re-execute
+5. Each scope has a set of **declarations** — the values it produces
+
+<ReactiveScopeDemo client:visible />
+
+Notice how the compiler creates fine-grained scopes. The `greeting` computation and the `items` mapping are in separate scopes because they depend on different properties of `user`. When only `user.name` changes, the compiler can skip the `items.map()` call entirely.
+
+The compiler then does extensive optimization on these scopes:
+
+- **Align to block scopes**: Scope boundaries must align with control-flow block boundaries
+- **Merge overlapping scopes**: Two scopes with overlapping ranges are merged into one
+- **Build scope terminals**: Insert explicit scope boundary markers into the HIR
+- **Flatten loops**: Scopes inside loops are removed (the compiler cannot memoize loop bodies)
+- **Flatten hooks**: Scopes containing hook calls are removed (hooks must be called unconditionally)
+- **Propagate dependencies**: Compute the minimal set of dependencies for each scope
+
+## Phase 5: HIR to Reactive Function
+
+The HIR is a control-flow graph — a web of blocks connected by branches. But JavaScript is a tree of nested statements. Before generating code, the compiler converts the HIR back into a tree structure called a **ReactiveFunction**.
+
+This pass restores the original control flow constructs: if-statements become if-statements again, loops become loops, phi nodes become ternary expressions or logical expressions. But now the reactive scopes are explicit in the tree structure.
+
+## Phase 6: Reactive Function Optimization
+
+With the tree structure, the compiler runs several optimization passes on the reactive scopes:
+
+- **pruneUnusedScopes**: Remove scopes with no meaningful outputs
+- **pruneNonEscapingScopes**: Remove scopes whose values never leave the component
+- **pruneNonReactiveDependencies**: Remove dependencies that are not reactive (like primitive state setters)
+- **mergeScopesThatInvalidateTogether**: If two consecutive scopes always change together, merge them into one to reduce memoization overhead
+- **pruneAlwaysInvalidatingScopes**: Remove scopes that depend on values that always change (like objects or arrays created outside any scope)
+- **propagateEarlyReturns**: Handle early returns inside scopes by converting them to sentinel patterns
+
+The pruning passes are critical for keeping the compiled output small. Not every computation needs memoization — only values that are expensive to compute and depend on reactive inputs.
+
+## Phase 7: Code Generation
+
+The final phase converts the optimized ReactiveFunction back into a Babel AST — actual JavaScript code that can run in the browser. This is where the memo cache comes to life.
+
+<MemoCacheDemo client:visible />
+
+The compiler generates code that uses a memo cache — a simple array created by `useMemoCache(n)`. Each reactive scope gets one or more slots in the cache. Before computing a value, the compiler checks if the dependencies have changed by comparing them to the cached values. If nothing changed, it loads the cached result. If something changed, it recomputes and stores the new result.
+
+The sentinel pattern (`Symbol.for("react.memo_cache_sentinel")`) is used for scopes with zero dependencies — computations that should only run once. On the first render, the sentinel value triggers the computation. On subsequent renders, the cached value is loaded directly.
+
+## What the Compiled Output Looks Like
+
+Here is a real example of what the compiler generates from your code:
+
+<BeforeAfterDemo client:visible />
+
+Notice the pattern that appears in every compiled component:
+
+```js
+const $ = _c(n);
+```
+
+This creates a memo cache with `n` slots. Then for each reactive scope:
+
+```js
+let t0;
+if ($[0] !== dep1 || $[1] !== dep2) {
+  t0 = computeValue(dep1, dep2);
+  $[0] = dep1;
+  $[1] = t0;
+} else {
+  t0 = $[1];
+}
+```
+
+The compiler stores both the dependencies and the result in the cache. On the next render, it compares the current dependencies with the cached ones. If they match, it skips the computation entirely.
+
+One important detail: the compiler preserves any manual memoization you have already written. If you have `useMemo(() => compute(), [deps])`, the compiler leaves it intact and only memoizes the surrounding code. It does not double-memoize.
+
+## Validation Rules
+
+The compiler also enforces the Rules of React. It runs 17 validation passes that check for common mistakes. These are the same rules that the ESLint plugin enforces, but the compiler catches them during compilation.
+
+<ValidationRulesDemo client:visible />
+
+These validation rules are not just warnings — they are necessary for the compiler to safely transform your code. The compiler needs to know that hooks are called unconditionally, that render functions are pure, and that state is not mutated during rendering. If any of these invariants are violated, the compiler cannot safely insert memoization.
+
+The compiler is fault-tolerant: it runs all validation passes and accumulates errors rather than stopping at the first one. This means you see all your mistakes at once, not one at a time.
+
+## What the Compiler Cannot Do
+
+The compiler is powerful, but it has limitations:
+
+**It does not support class components.** Class components have mutable instance fields shared across methods, which makes it impossible to safely analyze data flow. Only function components and hooks are supported.
+
+**It does not memoize everything.** Some computations are always-invalidating (they produce objects, arrays, or JSX that are always new references). The compiler detects these and prunes the scope rather than adding useless memoization.
+
+**It does not memoize inside loops.** The compiler cannot reconcile across loop iterations, so reactive scopes inside loops are flattened (not memoized). If you need memoization inside a map callback, consider extracting a child component.
+
+**It does not support eval, with, or nested class declarations.** These JavaScript features make it impossible to statically analyze code, so the compiler bails out on them.
+
+**It does not eliminate all re-renders.** The compiler optimizes individual computations within a component, but it does not eliminate the component's re-render itself. If a parent re-renders, the child component function still runs — but the compiler ensures that only the necessary computations within it are re-executed.
+
+## How to Use the React Compiler
+
+The compiler is available as a Babel plugin:
+
+```bash
+npm install babel-plugin-react-compiler
+```
+
+Then configure it in your Vite or Webpack setup:
+
+```js
+// vite.config.js
+export default {
+  plugins: [
+    react(),
+    {
+      name: 'babel-plugin-react-compiler',
+      options: { target: '19' },
+    },
+  ],
+}
+```
+
+The compiler works out of the box for any React code that follows the Rules of React. You do not need to add any annotations or type information. Just write normal React code, and the compiler handles the rest.
+
+You can also opt out individual components or functions with a `'use no memo'` directive:
+
+```js
+function ExpensiveComponent() {
+  'use no memo';
+  return <div>{expensiveComputation()}</div>
+}
+```
+
+## The Architecture in One Diagram
+
+The compiler's internal architecture follows a clean pipeline pattern. Each pass transforms the HIR or ReactiveFunction, and the output of one pass becomes the input of the next. This makes the compiler easy to understand, test, and extend.
+
+The key data structures are:
+
+- **HIRFunction**: The control-flow graph representation of your code
+- **ReactiveFunction**: The tree representation with explicit reactive scopes
+- **ReactiveScope**: A group of computations with dependencies and declarations
+- **AliasingEffect**: A description of how data flows between values
+- **Environment**: The compiler's configuration, error collection, and feature flags
+
+Each compiler pass is a pure function that takes one of these data structures and transforms it. The pipeline in `Pipeline.ts` orchestrates the pass ordering, and validation passes are wrapped in error collection so the compiler can report all errors at once.
+
+## What This Means for You
+
+If you are a React developer, the React Compiler means you can stop writing `useMemo`, `useCallback`, and `React.memo` in most cases. Write your components naturally, and the compiler will insert the right memoization in the right places.
+
+If you are curious about compilers, the React Compiler is a real-world example of how modern compilers work. It uses techniques from academic compiler research — SSA form, Hindley-Milner type inference, abstract interpretation, and union-find data structures — to solve a practical problem that affects millions of React developers every day.
+
+The source code is at [github.com/facebook/react/tree/main/compiler](https://github.com/facebook/react/tree/main/compiler). Every pass is documented in `compiler/packages/babel-plugin-react-compiler/docs/passes/`. If you want to understand how a specific optimization works, start there.
