@@ -1,0 +1,238 @@
+---
+title: "How AI Teaches Itself to Code Better (Without Any Teacher)"
+description: "A beginner-friendly guide to Simple Self-Distillation (SSD) — the surprising technique that lets AI models improve at coding by practicing on their own mistakes, with no teacher, no answer key, and no feedback."
+date: 2026-04-08
+tags: ["llm", "ai", "machine-learning", "code-generation", "distillation"]
+---
+
+import SsdPipelineDemo from '../../components/demos/SsdPipelineDemo'
+import PrecisionExplorationDemo from '../../components/demos/PrecisionExplorationDemo'
+import ForkLockDemo from '../../components/demos/ForkLockDemo'
+import TemperatureDemo from '../../components/demos/TemperatureDemo'
+import SsdResultsDemo from '../../components/demos/SsdResultsDemo'
+import EffectiveTempDemo from '../../components/demos/EffectiveTempDemo'
+import BadDataDemo from '../../components/demos/BadDataDemo'
+import DistributionReshapeDemo from '../../components/demos/DistributionReshapeDemo'
+
+## Can You Get Better at Something Without Anyone Telling You What You Did Wrong?
+
+Think about learning to cook. You try a recipe. Nobody tastes it. Nobody tells you if it is good or bad. You just make it again. And again. And again.
+
+Can you get better this way?
+
+Most people would say no. Without feedback, you have no way to know which attempts were good and which were bad. You might accidentally get worse by practicing mistakes over and over.
+
+Now imagine a chef who does exactly this — tries recipes blindly, never gets feedback — and somehow gets significantly better. That sounds impossible.
+
+In 2026, researchers at Apple published a paper showing that AI models can do exactly this. Their technique is called **Simple Self-Distillation**. It improved one of the best coding AI models from 42% accuracy to 55% on hard programming challenges. No teacher. No answer key. No grading system. Just the model, practicing on its own output.
+
+This post explains how that is possible, step by step, assuming you have never studied machine learning.
+
+## What Is an AI Code Model, Really?
+
+You have probably used an AI that writes code — GitHub Copilot, ChatGPT, Claude, or similar. But how do they actually work under the hood?
+
+Here is the key idea: **an AI code model is just a very sophisticated autocomplete.**
+
+It does not "think" about your problem the way a human does. It does not plan out an algorithm, draw a diagram, or reason about edge cases. Instead, it looks at what has been written so far and guesses the next word.
+
+Not the next line. Not the next function. The next **word**.
+
+Well, not exactly a word. AI models work with pieces of words called **tokens**. A token might be a whole word like `function`, or a piece of a word like `ing`, or even a single character like `(`. But the principle is the same: the model generates code one token at a time, left to right, top to bottom.
+
+Every time it needs to pick the next token, it looks at everything written so far and asks: "given all of this, what should come next?"
+
+## How Does It Pick the Next Token?
+
+Here is where it gets interesting. The model does not just pick one token. It scores **every possible token** and assigns each one a probability — a number from 0% to 100% representing how likely that token is the right next choice.
+
+Imagine the model has written `for (let i = 0; i < ` and needs to pick the next token. It might score the options like this:
+
+- `arr` — 55% chance
+- `n` — 20% chance
+- `nums` — 12% chance
+- `length` — 8% chance
+- `10` — 3% chance
+- everything else — 2% combined
+
+Then it **picks one** based on those probabilities. Most of the time it picks `arr` (55% chance). But sometimes it picks `n` (20% chance). Rarely, it picks something else.
+
+The model does this for every single token in the entire program. Thousands of tiny decisions, one after another, each one a probability-weighted coin flip.
+
+## The Temperature Knob
+
+There is a setting called **temperature** that controls how "random" these coin flips are. Think of it as a creativity dial.
+
+- **Low temperature (like 0.3)**: the model almost always picks the highest-probability token. If `arr` is 55% likely, it picks `arr` almost every time. Output is predictable, safe, and repetitive.
+- **High temperature (like 2.0)**: the probabilities get flattened out. That 55% for `arr` might drop to 20%, while the 20% for `n` might rise to 18%. Now the model picks unexpected tokens much more often. Output is creative, diverse, and sometimes completely wrong.
+
+Here is a real-world analogy:
+
+- Low temperature is like always ordering your favorite dish at a restaurant. You know you will like it. But you never try anything new.
+- High temperature is like closing your eyes and pointing at a random item on the menu. Sometimes you discover something amazing. Sometimes you end up with something you hate.
+
+The temperature affects **every single token decision** in the output. There is no way to say "be creative here but careful there" — it is one global dial for the entire program.
+
+## The Big Idea: Practice, Then Study, Then Perform
+
+Now we can explain the actual technique. Simple Self-Distillation (SSD) has three steps. That is it. Three steps.
+
+**Step 1: Practice.** Ask the model to solve a bunch of programming problems. Set the temperature **high** so it generates diverse, creative solutions. Collect all these outputs into a big pile of training data. Here is the crucial part: do NOT check if the solutions are correct. Do not run them. Do not look at them. Just pile them up.
+
+**Step 2: Study.** Take the model and show it all the outputs it generated in Step 1. Adjust the model's internal settings so it becomes more likely to produce outputs like those in the future. This process of adjusting a model based on examples is called **fine-tuning**. Think of it like a musician listening to recordings of their own practice sessions and gradually adjusting their playing style to match the patterns they hear.
+
+**Step 3: Perform.** Use the fine-tuned model to solve new problems. But this time, turn the temperature **lower** than in Step 1. The model is more focused now, less random.
+
+<SsdPipelineDemo client:visible />
+
+That is the entire technique. No teacher model grading the outputs. No test runner checking correctness. No reward signal saying "good job" or "bad job." Just the model, practicing on its own raw, ungraded attempts.
+
+The question that makes this surprising: why does it work at all?
+
+## Why This Should Not Work (The Copying Homework Problem)
+
+Consider the simplest version of this idea. Take a model, ask it to generate code at its normal temperature, then fine-tune it on those exact outputs.
+
+This is like a student copying their own homework and then studying from the copy. If the model already generates `for` 60% of the time and `while` 20% of the time, and then you train it to do exactly that... nothing changes. The model was already doing that. You just told it to keep doing what it was already doing.
+
+This is a **closed loop** — no new information enters the system. The model outputs something, then gets trained to output the same thing. Round and round, no progress.
+
+SSD avoids this trap by using **different temperatures** for Step 1 and Step 3. The model does not study its normal output. It studies a **shifted** version of its output — what it produces when forced to be more creative than usual. That difference between normal and creative is where the learning signal comes from.
+
+Think of it like this: a basketball player normally shoots free throws in a standard way. But if you force them to practice trick shots (high temperature), they develop new muscle memory and coordination. When they go back to standard free throws (low temperature), they are better — not because the trick shots themselves were useful, but because the process of attempting them strengthened underlying skills.
+
+## Two Kinds of Decisions the Model Makes
+
+To understand why temperature matters so much, we need to zoom into what happens at each token position. Not all decisions are the same.
+
+**Some positions are obvious.** After writing `arr.`, the next token should almost certainly be `length`. The model knows this — it assigns 95% probability to `length`. The other options (`size`, `push`, `map`) are distractors. They should never be picked. We call these positions **locks** because there is one clearly correct answer.
+
+**Other positions are genuine choices.** When starting to write a sorting function, the model needs to choose an approach. It could use quicksort, mergesort, heapsort, or even a simple bubble sort. Each is valid. Each leads to a completely different implementation. We call these positions **forks** because the code branches in multiple directions.
+
+Here is the problem: **temperature affects both locks and forks the same way.**
+
+- Low temperature is great at locks (it confidently picks `length`, never gets distracted) but terrible at forks (it always picks quicksort and never explores other valid approaches).
+- High temperature is great at forks (it tries different sorting algorithms) but terrible at locks (it might write `size` instead of `length`).
+
+<PrecisionExplorationDemo client:visible />
+
+This is the core dilemma. You cannot set one temperature that works well for both situations. The temperature that makes locks precise makes forks repetitive. The temperature that makes forks creative makes locks sloppy. With a single dial, the best you can do is a mediocre compromise.
+
+## How SSD Breaks the Dilemma
+
+SSD solves this problem by not just changing the temperature — by changing the model itself.
+
+After fine-tuning on high-temperature samples, the model's internal probability distributions are reshaped. But they are reshaped differently at different positions.
+
+**At locks** (where one answer is clearly correct), the fine-tuning process aggressively suppresses the distractors. Here is why: during Step 1 (high temperature), the model occasionally produced wrong tokens at these positions — it wrote `size` instead of `length`, or `push` instead of `length`. Then in Step 2, it got trained on those wrong outputs. Over many examples, the model learned: "those distractors appear in my training data but they are actually bad." The result: locks become **much sharper**. The correct token gets even more probability, and the distractors almost disappear.
+
+**At forks** (where multiple answers are valid), the fine-tuning process does the opposite. During Step 1, the model frequently chose different algorithms at these positions — sometimes quicksort, sometimes mergesort. In Step 2, it got trained on all of those choices. Over many examples, the model learned: "all of these are reasonable." The result: forks become **broader**. The model maintains probability mass across several valid options instead of collapsing onto just one.
+
+<ForkLockDemo client:visible />
+
+The magic: after SSD, locks are hardened while forks are preserved. The model can safely use a higher temperature to explore different approaches at forks, because the locks are no longer fragile — they will not produce garbage even with more randomness.
+
+## Two Knobs for Reshaping Distributions
+
+SSD uses two mechanisms to reshape how the model assigns probabilities. We already talked about temperature. The second one is called **truncation**.
+
+**Temperature** shifts probabilities. High temperature flattens the distribution (makes unlikely tokens more likely). Low temperature sharpens it (makes the top token even more dominant).
+
+$$p^T(v) = \frac{p(v)^{1/T}}{\sum_u p(u)^{1/T}}$$
+
+This formula shows what temperature does to a probability. When $T = 1$, nothing changes. When $T > 1$, the probabilities flatten out. When $T < 1$, they sharpen.
+
+**Truncation** simply cuts off the tail. It says: "only consider these top tokens, ignore everything else." Two common ways to do this:
+
+- **Top-k**: keep only the $k$ most probable tokens. Set everything else to zero. If $k = 50$, only the top 50 tokens survive.
+- **Top-p**: keep the smallest set of tokens whose combined probability exceeds a threshold $p$. If $p = 0.95$, you keep tokens until their total probability reaches 95% and drop the rest.
+
+Think of truncation like a casting director who says "we only audition these actors — everyone else is automatically out, regardless of talent."
+
+<TemperatureDemo client:visible />
+
+Together, temperature and truncation determine which tokens survive and how their probabilities are distributed. SSD uses high temperature plus truncation during Step 1 to generate diverse-but-not-insane practice data.
+
+## The Results: Every Model Got Better
+
+SSD was tested on five different AI models, ranging from 4 billion to 30 billion "parameters" (parameters are the internal numbers the model uses to make decisions — more parameters generally means a smarter model). The models came from two different families. Every single model improved.
+
+<SsdResultsDemo client:visible />
+
+The highlights:
+
+- The largest model went from 42.4% to 55.3% accuracy on hard programming problems. That is a **30% improvement** — a huge jump for a model that was already state-of-the-art.
+- The improvements were biggest on **hard problems**, not easy ones. This makes sense if you think about it: hard problems have more forks (more valid approaches to choose from), so SSD's diversity preservation helps more where there is more to explore.
+- Models also improved at **pass@5**, which means "did the model get the right answer in at least one of five attempts?" This shows SSD does not just make the model more accurate on its first try — it makes the model more creative overall, more willing to try genuinely different approaches.
+- Simply changing the temperature of the original model (without any training) could not achieve the same results. The improvement comes from actual changes inside the model, not from different settings on the same old model.
+
+## The Multiplication Trick: Why the Numbers Combine So Neatly
+
+One of the elegant findings from the paper is that training temperature and test temperature combine through simple multiplication.
+
+$$T_{\text{eff}} = T_{\text{train}} \times T_{\text{eval}}$$
+
+This "effective temperature" is what actually determines performance. The results follow a smooth curve that peaks around $T_{\text{eff}} \approx 1.2$. This means:
+
+- A model trained at temperature 1.6 and tested at temperature 0.9 has effective temperature $1.6 \times 0.9 = 1.44$ — close to optimal.
+- A model trained at temperature 0.8 and tested at temperature 1.5 has effective temperature $0.8 \times 1.5 = 1.2$ — exactly optimal.
+
+<EffectiveTempDemo client:visible />
+
+What this means in practice: you can tune performance by adjusting either knob. A model trained at higher temperature responds more sensitively to test-time temperature changes. It is like a car with a more sensitive steering wheel — small adjustments at test time produce bigger effects. Truncation provides an additional boost by cutting off distractors during the practice phase.
+
+## The Wildest Finding: Garbage In, Better Code Out
+
+Here is perhaps the most surprising result in the entire paper.
+
+In a stress test, the researchers cranked the training temperature way up (to 2.0) and turned off truncation entirely. The model generated chaotic outputs. About 62% of the time, the output was not even recognizable code. Many "solutions" started in Python and then devolved into a mix of English, French, and German words mid-program. By any human standard, this was completely useless training data.
+
+Yet the fine-tuned model still improved. Accuracy went from 42.4% to 48.1%. The gains on hard problems were even bigger.
+
+<BadDataDemo client:visible />
+
+How is this possible? Remember: SSD is not learning from whether the programs are **correct**. It is learning from the **structure** of the token sequences. Even gibberish code follows some patterns — valid syntax fragments, plausible variable names, reasonable-looking function structures. The model learns which tokens tend to follow which other tokens, regardless of whether the overall program makes sense.
+
+Think of it like learning grammar from a book in a language you do not speak. You might not understand what the book says, but you learn which letter combinations are common, how sentences start and end, and what characters are valid. That structural knowledge — the patterns of which tokens follow which other tokens — turns out to be enough to make the model better at generating code.
+
+## What SSD Is Actually Doing to the Model's Probabilities
+
+Let us look at exactly what happens to the model's probability distributions during SSD. The training process does three things at once:
+
+<DistributionReshapeDemo client:visible />
+
+**First: throw away the junk.** The model learns to push probability away from tokens that almost never appear. If a token has a 0.001% chance of being correct after a certain context, SSD pushes it even lower — closer to zero. This cleans up the distribution by removing noise. At lock positions (where there is one obvious answer), this effect is strongest. The model aggressively removes distractors.
+
+**Second: rebalance the survivors.** Among the tokens that remain, the model adjusts their relative probabilities. At fork positions (where multiple answers are valid), this tends to even things out — the top choice loses a little probability, and the second and third choices gain some. This preserves diversity.
+
+**Third: stay grounded.** The model does not drift too far from what it originally knew. The reshaping is constrained — the model cannot completely forget its training and start from scratch. It adjusts what it already believes, rather than replacing it with something new.
+
+At **lock positions**, the first job dominates. The model aggressively throws away alternatives, making the correct answer even more dominant.
+
+At **fork positions**, the second job has more room. The model keeps multiple reasonable options alive and rebalances them to be more equal.
+
+This is why SSD works differently at different positions in the code — not because anyone told it to, but because the structure of the probabilities at each position naturally leads to different outcomes from the same training process.
+
+## Why You Cannot Just Change the Temperature Instead
+
+A natural question: if the whole trick is about temperature, why not skip the training entirely? Why not just find a better temperature setting at test time?
+
+The answer: temperature is one global dial. It affects every position in the output the same way. You cannot tell the model "be creative at forks but precise at locks." You have one temperature for everything.
+
+This is like having one volume knob for both the vocals and the bass in a song. You cannot turn up the bass without also making the vocals louder. The same constraint applies here: the temperature that helps forks explore is the same temperature that makes locks fragile.
+
+SSD escapes this limitation by modifying the model's internal probability distributions. After training, the model has different distributions at different positions — some sharp, some broad. The temperature dial then acts on these already-different distributions, producing a better overall result than any single temperature could achieve on the unmodified model.
+
+The model is no longer using one temperature for everything. It has effectively given itself different temperatures at different positions, built into its own weights.
+
+## Self-Check
+
+- Why does training a model on its own outputs at the same temperature teach it nothing?
+- What is the difference between a "fork" and a "lock" in code generation?
+- Why does SSD improve more on hard problems than easy ones?
+- What happens if you train at high temperature and also test at high temperature?
+- Why does SSD still work when the training data is mostly garbage?
+- Why can you not achieve SSD's results just by tuning the temperature at test time?
+- What are the three things SSD does to the model's probability distributions?
+
+The big takeaway: AI models contain more capability than they typically show. Under normal settings, they are forced to compromise between being precise and being creative. Simple self-distillation reshapes their internal knowledge so they can be both — precision where it matters, creativity where it helps — without any external feedback at all.
