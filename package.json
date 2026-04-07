@@ -26,6 +26,8 @@
     "prismjs": "^1.30.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "rehype-katex": "^7.0.1",
+    "remark-math": "^6.0.0",
     "wrangler": "^4.78.0"
   },
   "overrides": {
