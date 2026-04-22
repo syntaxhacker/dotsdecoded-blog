@@ -1,0 +1,438 @@
+---
+title: "Attention Mechanism Explained: The Math Behind Q, K, and V"
+description: "A step-by-step visual guide through the Scaled Dot-Product Attention formula — from word embeddings to Q, K, V matrices, softmax, and the final output — with interactive demos at every stage."
+date: 2026-04-07
+tags: ["llm", "ai", "machine-learning", "transformers"]
+---
+
+import EmbeddingExplorerDemo from '../../components/demos/EmbeddingExplorerDemo'
+import QKVProjectionDemo from '../../components/demos/QKVProjectionDemo'
+import DotProductDemo from '../../components/demos/DotProductDemo'
+import AttentionHeatmapDemo from '../../components/demos/AttentionHeatmapDemo'
+import AttentionScalingDemo from '../../components/demos/AttentionScalingDemo'
+import SoftmaxDemo from '../../components/demos/SoftmaxDemo'
+import OutputDemo from '../../components/demos/OutputDemo'
+import AttentionPipelineDemo from '../../components/demos/AttentionPipelineDemo'
+import MatrixMultiplyDemo from '../../components/demos/MatrixMultiplyDemo'
+import AttentionFlowDemo from '../../components/demos/AttentionFlowDemo'
+import TransposeAnimation from '../../components/demos/TransposeAnimation'
+import SoftmaxCurveDemo from '../../components/demos/SoftmaxCurveDemo'
+
+## The Library Analogy
+
+Imagine you walk into a massive library looking for a book about black holes. You walk up to the front desk and describe what you want: "I need something about the physics of black holes." The librarian listens to your description, compares it against every book's title and summary in the catalog, and then hands you the three most relevant books.
+
+That is exactly how the attention mechanism works in a Transformer:
+
+- **You** are a word in a sentence. Your description of what you want is your **Query (Q)**.
+- **The catalog entries** for every book are the **Keys (K)**. Each book advertises what it contains.
+- **The actual books** the librarian hands you are the **Values (V)**. These are the real information you receive.
+
+The librarian compares your Query against every Key, scores the match, and then gives you a weighted blend of the most relevant Values. The stronger the match between your Query and a Key, the more of that book's Value you receive.
+
+This one mechanism — repeated billions of times inside models like GPT, Claude, and Gemini — is what lets them understand context, resolve pronouns, and reason about meaning.
+
+## The Attention Formula
+
+The core formula for **Scaled Dot-Product Attention** is:
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right) V
+$$
+
+Let us decode each piece:
+
+| Symbol | Meaning | Library Analogy |
+|--------|---------|-----------------|
+| $Q$ | Query matrix | Your search description |
+| $K$ | Key matrix | Every book's catalog entry |
+| $V$ | Value matrix | The actual book contents |
+| $K^T$ | Transpose of $K$ | Rearranging the catalog for comparison |
+| $d_k$ | Dimension of $K$ vectors | Length of each catalog entry |
+| $\sqrt{d_k}$ | Square root of $d_k$ | A scaling factor to keep scores stable |
+| softmax | Normalization function | Converting match scores into percentages |
+
+Do not worry if this looks abstract. We will walk through every single operation with real numbers. By the end of this post, each symbol in that formula will feel intuitive.
+
+The key idea: we compare what each word is looking for ($Q$) with what every other word offers ($K$), then collect the actual information ($V$) from the most relevant words.
+
+## From Words to Numbers
+
+Neural networks do not understand text. They understand numbers. So before attention can do anything, we need to convert words into vectors — lists of numbers that capture meaning.
+
+Let us use a simple sentence: **"I love AI"**
+
+In a real model, each word becomes a vector of 512 or 1024 numbers. For our walkthrough, we will use tiny 4-dimensional vectors so we can do the math by hand:
+
+$$
+\text{"I"} \rightarrow \begin{bmatrix} 1.0 & 0.0 & 1.0 & 0.0 \end{bmatrix} \quad
+\text{"love"} \rightarrow \begin{bmatrix} 0.0 & 1.0 & 0.0 & 1.0 \end{bmatrix} \quad
+\text{"AI"} \rightarrow \begin{bmatrix} 1.0 & 1.0 & 0.0 & 0.0 \end{bmatrix}
+$$
+
+Think of each dimension as a different "feature detector." Dimension 1 might respond to pronouns. Dimension 2 might respond to verbs. Dimension 3 might respond to technical terms. The exact interpretation does not matter — the model learns these representations during training.
+
+We stack these three vectors into an **input matrix $X$** of shape $3 \times 4$ (3 words, 4 dimensions each):
+
+$$
+X = \begin{bmatrix}
+1.0 & 0.0 & 1.0 & 0.0 \\
+0.0 & 1.0 & 0.0 & 1.0 \\
+1.0 & 1.0 & 0.0 & 0.0
+\end{bmatrix}
+\begin{array}{l}
+\leftarrow \text{"I"} \\
+\leftarrow \text{"love"} \\
+\leftarrow \text{"AI"}
+\end{array}
+$$
+
+Each row is a word. Each column is a dimension. This matrix $X$ is our starting point.
+
+<EmbeddingExplorerDemo client:visible />
+
+Click through the words above to see how text becomes vectors. In a real model, these embeddings are learned from massive datasets, not set by hand. But the principle is the same: every word becomes a row of numbers.
+
+## Creating Q, K, and V
+
+A single set of embeddings is not enough. The attention mechanism needs three different "views" of the input — one for searching, one for being searched, and one for delivering content.
+
+We create these three views by multiplying $X$ with three separate **weight matrices**:
+
+$$
+Q = XW_Q \qquad K = XW_K \qquad V = XW_V
+$$
+
+Think of each weight matrix as a lens that projects the input into a different space. $W_Q$ extracts "what am I looking for?" information. $W_K$ extracts "what do I contain?" information. $W_V$ extracts "what information should I share?" information.
+
+In our example, we want $Q$, $K$, and $V$ vectors of size 3 (so $d_k = 3$). Each weight matrix has shape $4 \times 3$ (mapping from 4 input dimensions to 3 output dimensions). Here are our weight matrices:
+
+$$
+W_Q = \begin{bmatrix} 1 & 0 & 1 \\ 0 & 1 & 0 \\ 1 & 0 & 0 \\ 0 & 1 & 1 \end{bmatrix} \quad
+W_K = \begin{bmatrix} 0 & 1 & 0 \\ 1 & 0 & 1 \\ 0 & 0 & 1 \\ 1 & 1 & 0 \end{bmatrix} \quad
+W_V = \begin{bmatrix} 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1 \\ 1 & 1 & 0 \end{bmatrix}
+$$
+
+Let us compute $Q = XW_Q$. For the first row ("I"):
+
+$$
+\begin{bmatrix} 1 \cdot 1 + 0 \cdot 0 + 1 \cdot 1 + 0 \cdot 0, & 1 \cdot 0 + 0 \cdot 1 + 1 \cdot 0 + 0 \cdot 1, & 1 \cdot 1 + 0 \cdot 0 + 1 \cdot 0 + 0 \cdot 1 \end{bmatrix} = \begin{bmatrix} 2 & 0 & 1 \end{bmatrix}
+$$
+
+Doing this for all three words:
+
+$$
+Q = \begin{bmatrix}
+2 & 0 & 1 \\
+0 & 2 & 1 \\
+1 & 1 & 1
+\end{bmatrix}
+\begin{array}{l}
+\leftarrow \text{"I"} \\
+\leftarrow \text{"love"} \\
+\leftarrow \text{"AI"}
+\end{array}
+$$
+
+Similarly, $K = XW_K$:
+
+$$
+K = \begin{bmatrix}
+0 & 1 & 1 \\
+2 & 1 & 1 \\
+1 & 1 & 1
+\end{bmatrix}
+\begin{array}{l}
+\leftarrow \text{"I"} \\
+\leftarrow \text{"love"} \\
+\leftarrow \text{"AI"}
+\end{array}
+$$
+
+And $V = XW_V$:
+
+$$
+V = \begin{bmatrix}
+1 & 0 & 1 \\
+1 & 2 & 0 \\
+1 & 1 & 0
+\end{bmatrix}
+\begin{array}{l}
+\leftarrow \text{"I"} \\
+\leftarrow \text{"love"} \\
+\leftarrow \text{"AI"}
+\end{array}
+$$
+
+In a real Transformer, these weight matrices are not set by hand. They are learned during training — the model discovers the best projections automatically by seeing billions of examples.
+
+<QKVProjectionDemo client:visible />
+
+Step through the projection above to see how each word's embedding gets multiplied by the weight matrices to produce Q, K, and V. Notice how the same input produces three different representations depending on which lens we look through.
+
+## Computing Attention Scores
+
+Now comes the heart of attention: comparing every word's Query against every word's Key. We do this by computing $QK^T$ (the Query matrix times the transpose of the Key matrix).
+
+First, let us transpose $K$. Transposing means swapping rows and columns:
+
+$$
+K^T = \begin{bmatrix}
+0 & 2 & 1 \\
+1 & 1 & 1 \\
+1 & 1 & 1
+\end{bmatrix}
+$$
+
+<TransposeAnimation client:visible />
+
+Click "Transpose" above to watch each element physically move to its new position. The diagonal elements (0, 1, 1) stay put while the off-diagonal pairs swap places.
+
+Now we multiply $Q$ ($3 \times 3$) by $K^T$ ($3 \times 3$) to get a $3 \times 3$ score matrix. Each cell tells us how much one word should "pay attention" to another.
+
+For "I" attending to "love": dot product of $Q$'s first row with $K^T$'s second column:
+
+$$
+2 \cdot 2 + 0 \cdot 1 + 1 \cdot 1 = 5
+$$
+
+<MatrixMultiplyDemo client:visible />
+
+Watch the multiplication above: the row slides across the column, element pairs light up one by one, and the running total accumulates to the final score of 5.
+
+The word "I" scores "love" a 5 — the highest score in the entire matrix. This means "I" finds "love" the most relevant word in the sentence. That makes linguistic sense: "I" is a pronoun that needs context, and "love" tells us what "I" is doing.
+
+Computing the full score matrix:
+
+$$
+\text{Scores} = QK^T = \begin{bmatrix}
+1 & 5 & 3 \\
+3 & 3 & 3 \\
+2 & 4 & 3
+\end{bmatrix}
+\begin{array}{l}
+\leftarrow \text{"I"} \\
+\leftarrow \text{"love"} \\
+\leftarrow \text{"AI"}
+\end{array}
+$$
+
+Key observations:
+
+- **"I" strongly attends to "love"** (score 5). The pronoun needs the verb for context.
+- **"love" attends equally to all words** (score 3 each). As the central verb, it connects everything.
+- **"AI" attends most to "love"** (score 4), then itself (3), then "I" (2).
+
+<DotProductDemo client:visible />
+
+Select any pair of words above to see the dot product computation step by step. Each element of the Query vector pairs with the corresponding element of the Key vector, they multiply, and the results sum to produce a single attention score.
+
+## The Attention Heatmap
+
+Before we move on, let us visualize these scores as a heatmap. Each cell's color intensity represents how strongly one word attends to another.
+
+<AttentionHeatmapDemo client:visible />
+
+The heatmap makes the attention pattern immediately visible. The brightest cell is "I" attending to "love" — that score of 5 dominates. "love" is a uniform gray because it distributes attention equally. This visual pattern tells us something about the sentence structure: the pronoun reaches out to the verb, while the verb stands in the middle connecting everything.
+
+<AttentionFlowDemo client:visible />
+
+Select a source word above and watch particles flow to each target. The thicker the stream, the higher the attention weight. "I" sends a torrent toward "love" while barely trickling to itself.
+
+## Scaling the Scores
+
+Raw scores can grow very large. In our tiny example the maximum is 5, but in a real model with 512-dimensional vectors, dot products can reach into the hundreds. That causes a problem.
+
+The next step in the formula is **softmax**, which converts scores into probabilities using exponentials. If the scores are too large, $e^{100}$ is astronomically bigger than $e^{50}$, and softmax will push all probability mass onto the highest score while assigning near-zero to everything else. The model cannot learn from such extreme distributions.
+
+The fix is simple: divide every score by $\sqrt{d_k}$. In our case, $d_k = 3$, so we divide by $\sqrt{3} \approx 1.732$:
+
+$$
+\text{Scaled} = \frac{\text{Scores}}{\sqrt{d_k}} = \frac{1}{1.732} \begin{bmatrix}
+1 & 5 & 3 \\
+3 & 3 & 3 \\
+2 & 4 & 3
+\end{bmatrix}
+= \begin{bmatrix}
+0.577 & 2.887 & 1.732 \\
+1.732 & 1.732 & 1.732 \\
+1.155 & 2.309 & 1.732
+\end{bmatrix}
+$$
+
+The relative order is unchanged — "I" still attends most to "love" — but the magnitudes are smaller and more manageable for softmax.
+
+Why $\sqrt{d_k}$ specifically? The dot product of two random vectors of dimension $d_k$ has an expected magnitude proportional to $\sqrt{d_k}$. Dividing by $\sqrt{d_k}$ normalizes the variance back to approximately 1, keeping the softmax outputs in a stable range regardless of vector dimension.
+
+<AttentionScalingDemo client:visible />
+
+Toggle the scaling above to see how dividing by $\sqrt{d_k}$ compresses the scores into a range that softmax can work with. Notice that the relative ranking stays the same — only the magnitudes change.
+
+## Applying Softmax
+
+Softmax converts each row of scaled scores into a probability distribution. Every value becomes a number between 0 and 1, and each row sums to exactly 1.
+
+The formula for one value in a row:
+
+$$
+\text{softmax}(x_i) = \frac{e^{x_i}}{\sum_j e^{x_j}}
+$$
+
+Let us work through the "I" row: $\begin{bmatrix} 0.577 & 2.887 & 1.732 \end{bmatrix}$
+
+$$
+e^{0.577} = 1.781, \quad e^{2.887} = 17.940, \quad e^{1.732} = 5.651
+$$
+
+$$
+\text{Sum} = 1.781 + 17.940 + 5.651 = 25.372
+$$
+
+Dividing each by the sum:
+
+$$
+\begin{array}{lcl}
+\text{"I"} \rightarrow \text{"I"} &: & 1.781 \,/\, 25.372 = 0.070 \quad (7.0\%) \\
+\text{"I"} \rightarrow \text{"love"} &: & 17.940 \,/\, 25.372 = 0.707 \quad (70.7\%) \\
+\text{"I"} \rightarrow \text{"AI"} &: & 5.651 \,/\, 25.372 = 0.223 \quad (22.3\%)
+\end{array}
+$$
+
+The word "I" pays **70.7%** of its attention to "love", **22.3%** to "AI", and only **7.0%** to itself. The softmax has amplified the differences — the original score for "love" was only about 3x the score for "I", but the probability gap is now 10x.
+
+For the "love" row, all scores are equal (1.732 each), so softmax produces uniform probabilities:
+
+$$
+\text{"love"} \rightarrow \text{"I"} = 0.333 \quad \text{"love"} \rightarrow \text{"love"} = 0.333 \quad \text{"love"} \rightarrow \text{"AI"} = 0.333
+$$
+
+For the "AI" row: $\begin{bmatrix} 1.155 & 2.309 & 1.732 \end{bmatrix}$
+
+$$
+\begin{array}{lcl}
+\text{"AI"} \rightarrow \text{"I"} &: & 0.168 \quad (16.8\%) \\
+\text{"AI"} \rightarrow \text{"love"} &: & 0.533 \quad (53.3\%) \\
+\text{"AI"} \rightarrow \text{"AI"} &: & 0.299 \quad (29.9\%)
+\end{array}
+$$
+
+The full **Attention Weight Matrix**:
+
+$$
+\text{Weights} = \begin{bmatrix}
+0.070 & 0.707 & 0.223 \\
+0.333 & 0.333 & 0.333 \\
+0.168 & 0.533 & 0.299
+\end{bmatrix}
+\begin{array}{l}
+\leftarrow \text{"I"} \\
+\leftarrow \text{"love"} \\
+\leftarrow \text{"AI"}
+\end{array}
+$$
+
+Each row sums to 1.0. Softmax guarantees this.
+
+<SoftmaxDemo client:visible />
+
+Watch the softmax transformation above. The raw scores go through exponentiation (which stretches differences) and then normalization (which forces each row to sum to 1). The result is a set of clean probabilities that the model can use to mix information.
+
+<SoftmaxCurveDemo client:visible />
+
+Drag the sliders above to see how changing the input scores reshapes the probability distribution. Try making all scores equal — the distribution flattens to uniform. Then drag one score high and watch softmax sharpen into a near-one-hot.
+
+## Computing the Final Output
+
+The last step: we multiply the Attention Weight Matrix by the Value matrix $V$. This produces the final output — one new vector for each word.
+
+$$
+\text{Output} = \text{Weights} \times V = \begin{bmatrix}
+0.070 & 0.707 & 0.223 \\
+0.333 & 0.333 & 0.333 \\
+0.168 & 0.533 & 0.299
+\end{bmatrix}
+\begin{bmatrix}
+1 & 0 & 1 \\
+1 & 2 & 0 \\
+1 & 1 & 0
+\end{bmatrix}
+$$
+
+For "I":
+
+$$
+0.070 \begin{bmatrix} 1 \\ 0 \\ 1 \end{bmatrix} + 0.707 \begin{bmatrix} 1 \\ 2 \\ 0 \end{bmatrix} + 0.223 \begin{bmatrix} 1 \\ 1 \\ 0 \end{bmatrix}
+= \begin{bmatrix} 0.070 \\ 0 \\ 0.070 \end{bmatrix} + \begin{bmatrix} 0.707 \\ 1.414 \\ 0 \end{bmatrix} + \begin{bmatrix} 0.223 \\ 0.223 \\ 0 \end{bmatrix}
+= \begin{bmatrix} 1.000 \\ 1.637 \\ 0.070 \end{bmatrix}
+$$
+
+Notice: the output for "I" is **dominated by the Value of "love"** (weight 0.707). The second dimension (1.637) comes almost entirely from "love"'s Value vector. This is the power of attention — "I" now carries information about "love" in its representation.
+
+For "love":
+
+$$
+0.333 \begin{bmatrix} 1 \\ 0 \\ 1 \end{bmatrix} + 0.333 \begin{bmatrix} 1 \\ 2 \\ 0 \end{bmatrix} + 0.333 \begin{bmatrix} 1 \\ 1 \\ 0 \end{bmatrix}
+= \begin{bmatrix} 1.000 \\ 1.000 \\ 0.333 \end{bmatrix}
+$$
+
+For "AI":
+
+$$
+0.168 \begin{bmatrix} 1 \\ 0 \\ 1 \end{bmatrix} + 0.533 \begin{bmatrix} 1 \\ 2 \\ 0 \end{bmatrix} + 0.299 \begin{bmatrix} 1 \\ 1 \\ 0 \end{bmatrix}
+= \begin{bmatrix} 1.000 \\ 1.365 \\ 0.168 \end{bmatrix}
+$$
+
+$$
+\text{Output} = \begin{bmatrix}
+1.000 & 1.637 & 0.070 \\
+1.000 & 1.000 & 0.333 \\
+1.000 & 1.365 & 0.168
+\end{bmatrix}
+\begin{array}{l}
+\leftarrow \text{"I"} \\
+\leftarrow \text{"love"} \\
+\leftarrow \text{"AI"}
+\end{array}
+$$
+
+Every word now has a new representation that is a **weighted mixture** of all words' Values. The output for "I" is no longer just about "I" — it contains information from "love" and "AI", weighted by how relevant they are. This is how the model builds context-aware representations.
+
+<OutputDemo client:visible />
+
+Click on each word above to see how its output vector is assembled from the Value vectors of all words. The colored segments show how much each source word contributes to each dimension of the output.
+
+## Putting It All Together
+
+Let us review the full pipeline in one view:
+
+**Step 1:** Start with input embeddings $X$ (each word becomes a vector).
+
+**Step 2:** Project $X$ through three learned weight matrices to get $Q$ (queries), $K$ (keys), and $V$ (values).
+
+**Step 3:** Compute attention scores by multiplying $Q$ with $K^T$. Each score measures how relevant one word is to another.
+
+**Step 4:** Scale scores by dividing by $\sqrt{d_k}$ to prevent softmax from producing extreme probabilities.
+
+**Step 5:** Apply softmax to convert scores into attention weights (probabilities that sum to 1).
+
+**Step 6:** Multiply attention weights by $V$ to get the final output — each word's new context-aware representation.
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right) V
+$$
+
+<AttentionPipelineDemo client:visible />
+
+Step through the full pipeline above. Watch data flow from raw text through embeddings, projections, scoring, scaling, normalization, and final output. Every cell in the formula has a corresponding visual step.
+
+## Self-Check
+
+Before we finish, test your understanding:
+
+- Can you explain why "I" attends strongly to "love" but not to itself?
+- What would happen if we skipped the scaling step and $d_k$ was very large?
+- If two words have identical Keys, how would their attention weights differ?
+- Why does each row of the attention weight matrix sum to 1?
+- What happens to the output if a word pays equal attention to all other words?
+
+Every large language model — GPT, Claude, Gemini, Llama — runs this exact computation billions of times during inference. The numbers we used were tiny (3 words, 4 dimensions) for clarity, but the math is identical at scale. Understanding these six steps means understanding the core mechanism behind modern AI.

@@ -49,10 +49,6 @@ body {
   overflow: hidden;
 }
 
-body:has(.page) {
-  overflow: auto;
-}
-
 a {
   color: var(--accent);
   text-decoration: none;
@@ -77,8 +73,12 @@ pre code {
 }
 
 ::selection {
-  background: var(--accent);
-  color: #fff;
+  background: rgba(59, 130, 246, 0.25);
+  color: var(--text);
+}
+
+[data-theme="light"] ::selection {
+  background: rgba(37, 99, 235, 0.2);
 }
 
 .home {
@@ -471,6 +471,7 @@ pre code {
   height: 100vh;
   height: 100dvh;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .page-inner::-webkit-scrollbar {
@@ -759,4 +760,12 @@ pre code {
     height: 100dvh;
     overflow-y: auto;
   }
+}
+
+.prose > div {
+  overflow: visible;
+}
+
+.katex-display {
+  overflow: hidden;
 }

@@ -16,6 +16,7 @@ Technical blog built with Astro 6 + React + MDX. Static output. Deployed to Clou
 - **Runtime**: Bun (not npm/node)
 - **Build**: Vite 7, esbuild 0.24.2 (pinned — 0.27+ crashes on Node v24)
 - **Syntax highlighting**: prismjs 1.30 (Monokai theme, hand-rolled CSS, bundled in BaseLayout)
+- **Math rendering**: KaTeX via `remark-math` + `rehype-katex` (CSS loaded from CDN in BaseLayout)
 - **Search**: Pagefind (full-text, builds at `astro build` time)
 - **No WebGPU, no ASCII banners, no emoji in UI, no comments in code**
 
@@ -58,9 +59,10 @@ Frontmatter fields:
 4. Code blocks use standard markdown fenced blocks with language tags (`js`, `bash`, `c`, `python`, `json`, `typescript`, `cpp`)
 5. Prism auto-highlights all `<code>` blocks. Supported languages are imported in BaseLayout.astro — add new ones there if needed
 6. Inline code uses single backticks. Code blocks use triple backticks with language tag
-7. Keep paragraphs concise. Technical depth over verbosity
-8. Assume zero knowledge — explain concepts with analogies before diving into technical details
-9. Each major section should have an interactive demo placed inline immediately after the relevant heading
+7. Use KaTeX for all math: inline with `$...$`, display with `$$...$$`. Prefer LaTeX matrices (`\begin{bmatrix}`) over code-block matrices
+8. Keep paragraphs concise. Technical depth over verbosity
+9. Assume zero knowledge — explain concepts with analogies before diving into technical details
+10. Each major section should have an interactive demo placed inline immediately after the relevant heading
 
 ## Demo Architecture
 
@@ -114,6 +116,18 @@ Examples:
 - `SpeculationDemo.tsx` — see copy-on-write overlay filesystem in predictive execution
 - `LspDiagnosticDemo.tsx` — watch LSP detect errors and feed them back to Claude
 - `AgentSdkDemo.tsx` — run an SDK session with permission decisions and event log
+- `EmbeddingExplorerDemo.tsx` — click words to see embedding vectors animate as bars
+- `QKVProjectionDemo.tsx` — step through X x W projections with staggered cell animations
+- `DotProductDemo.tsx` — click any cell in score grid to see step-by-step dot product
+- `AttentionHeatmapDemo.tsx` — animated heatmap with staggered fade-in and hover tooltips
+- `AttentionScalingDemo.tsx` — toggle raw/scaled scores with smooth bar transitions
+- `SoftmaxDemo.tsx` — play animation showing exponentiation then normalization phases
+- `OutputDemo.tsx` — stacked bars showing weighted contribution per dimension
+- `AttentionPipelineDemo.tsx` — 7-step pipeline with auto-play and detailed matrix views
+- `MatrixMultiplyDemo.tsx` — row-column multiplication with connecting lines and running sum
+- `AttentionFlowDemo.tsx` — canvas particles flowing along bezier curves between words
+- `TransposeAnimation.tsx` — cells physically slide to swapped positions on transpose
+- `SoftmaxCurveDemo.tsx` — interactive sliders reshaping probability distribution
 
 ## Demo Component Rules
 
@@ -164,6 +178,8 @@ const s = {
 - **Object keys**: Never use duplicate keys in style objects — esbuild will error on `Duplicate key "fontSize"`
 - **SVG overflow**: Never use `overflow: 'visible'` on SVG elements. Root nodes render at y=0, causing content to bleed above the viewBox. Always add padding to the viewBox (e.g., `viewBox={-40 -30 ${w + 80} ${h + 40}}`) and ensure the outer container has `overflow: 'hidden'`
 - **No scrollIntoView**: Never use `element.scrollIntoView()` in demos — it scrolls the entire page (`.page-inner`), not just the demo container. Instead, use `container.scrollTop = container.scrollHeight` on the demo's own scrollable container (the parent div with `overflowY: 'auto'`)
+- **No overflow: hidden on root**: Never set `overflow: 'hidden'` on a demo's root div — it traps scroll events and prevents the page from scrolling when the cursor is over the demo. Use `overflow: 'visible'` (or omit it) on the outermost container. Only use `overflow: 'hidden'` on inner elements like bar containers where clipping is needed.
+- **No onWheel stopPropagation**: Never call `e.stopPropagation()` on wheel events in demos — it prevents `.page-inner` (the scroll container) from receiving the event. If a canvas needs to not capture scroll, use `touchAction: 'pan-y'` CSS instead.
 - **SpeedController**: For demos with timed animations (setInterval/setTimeout step sequences), import and add `<SpeedController speed={speed} onSpeedChange={setSpeed} />` next to the action button. Replace hardcoded delays with `getStepDelay(baseDelay, speed)` from `./SpeedController`. For setInterval, recreate the interval via `useEffect` when `speed` changes
 - **No demo count cap**: There is no maximum number of demos per blog post. Use as many as needed to cover each concept (comprehensive posts may have 15-17+)
 
@@ -227,11 +243,31 @@ Each post should follow a layered progression from zero knowledge to mastery:
 - **No GitHub Actions** — deployment is handled entirely by the dashboard Git integration on push to `main`
 - The Cloudflare adapter is NOT used — it crashes on Node v22+ due to miniflare EPIPE
 
+## Scroll Architecture
+
+The blog post page uses a custom scroll setup:
+
+- `body` has `overflow: hidden` — the body itself does not scroll
+- `.page` (grid container) has `height: 100vh; overflow: hidden`
+- `.page-inner` is **the scroll container** with `height: 100vh; overflow-y: auto; overscroll-behavior: contain`
+- Do NOT add `body:has(.page) { overflow: auto }` — it creates scroll conflicts with `.page-inner`
+- All demos must allow scroll events to propagate to `.page-inner` (see Common Demo Pitfalls above)
+
 ## Adding a New Prism Language
 
 1. Install if needed (most are bundled with prismjs)
 2. Add `import 'prismjs/components/prism-LANG'` in BaseLayout.astro's Prism `<script>` block
 3. Use the language tag in fenced code blocks: ````LANG`
+
+## KaTeX Math Rendering
+
+Configured globally in `astro.config.mjs` with `remark-math` and `rehype-katex`. KaTeX CSS is loaded from CDN in `BaseLayout.astro`.
+
+- **Inline math**: `$x_i$` or `$\sqrt{d_k}$`
+- **Display math**: `$$\begin{bmatrix} 1 & 2 \\ 3 & 4 \end{bmatrix}$$`
+- **Always use KaTeX for matrices, formulas, and any mathematical notation** — never use code blocks for math
+- Common LaTeX: `\begin{bmatrix}` for matrices, `\frac{}{}` for fractions, `\sqrt{}` for roots, `\sum`, `\prod`, `\int`, `\text{}` for text in math mode
+- The `katex-display` class has `overflow: hidden` in global.css — do not override this
 
 ## Prism in Demos
 

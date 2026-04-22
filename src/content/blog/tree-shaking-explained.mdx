@@ -1,0 +1,222 @@
+---
+title: "Tree Shaking Explained: How Bundlers Remove Dead Code"
+description: "How JavaScript bundlers like Vite, Rollup, and Webpack eliminate unused code from your production builds — and why ES modules make it possible."
+date: 2026-04-06
+tags: ["javascript", "bundlers", "performance", "vite", "rollup"]
+---
+
+import TreeShakeVisualDemo from '../../components/demos/TreeShakeVisualDemo'
+import EsmVsCjsDemo from '../../components/demos/EsmVsCjsDemo'
+import ImportGraphDemo from '../../components/demos/ImportGraphDemo'
+import SideEffectDemo from '../../components/demos/SideEffectDemo'
+import ShakePatternsDemo from '../../components/demos/ShakePatternsDemo'
+import BundleImpactDemo from '../../components/demos/BundleImpactDemo'
+
+Imagine you are packing for a weekend trip. You walk into your closet, which has 200 shirts, 50 pairs of pants, and 30 jackets. You need exactly three shirts and one pair of pants. But instead of picking those four items, you dump the entire closet into your suitcase and lug it to the airport.
+
+That is what happens when you build a JavaScript app without tree shaking. You import one function from a library, and the bundler packs the entire library into the file your users download. Every function. Every utility. Every helper that no line of your code will ever call.
+
+<TreeShakeVisualDemo client:visible />
+
+Click the exports to toggle what your app uses, then hit "Shake Tree" to see the unused code fall away. The bundle size drops accordingly. That reduction is what your users experience as a faster page load.
+
+## What Exactly Is Tree Shaking?
+
+Tree shaking is a **dead code elimination** technique. The name comes from a visual metaphor: your code is a tree of modules connected by import branches. When you shake the tree, the dead branches — exports that nothing imports — fall off.
+
+The term was coined by the Rollup bundler in 2015. Rollup's creator, Rich Harris, described it as eliminating "code that is never actually used." Since then, every major bundler — Webpack, Vite, esbuild, Parcel — has adopted the technique.
+
+The key insight is this: if the bundler can prove that a piece of code is never referenced, it can safely remove it without changing how your app behaves.
+
+## Why Can't We Always Do This?
+
+You might be wondering: why do we need a special technique? Why doesn't the bundler just automatically remove unused code?
+
+The answer depends on **how** the code is written. Not all JavaScript module systems give the bundler enough information to make safe decisions. The difference comes down to one question: can the bundler figure out what is exported and what is imported **without running the code**?
+
+This is where the two JavaScript module systems diverge.
+
+## ES Modules vs CommonJS
+
+JavaScript has two module systems:
+
+- **ES Modules (ESM)**: The modern standard. Uses `import` and `export` keywords.
+- **CommonJS (CJS)**: The Node.js legacy system. Uses `require()` and `module.exports`.
+
+They look similar, but they behave very differently from a bundler's perspective.
+
+With ES modules:
+
+```js
+import { formatDate } from './utils.js'
+```
+
+This is a **static declaration**. The bundler can read it and know, before running any code, that only `formatDate` is imported from `utils.js`. It does not need to guess. It does not need to execute anything.
+
+With CommonJS:
+
+```js
+const utils = require('./utils')
+const result = utils.formatDate(date, 'yyyy-MM-dd')
+```
+
+This is a **function call**. `require()` is just a regular JavaScript function. The bundler has no way to know what `utils` will contain without actually running the code. And `require()` can do anything:
+
+```js
+const lib = Math.random() > 0.5 ? require('lib-a') : require('lib-b')
+```
+
+Since the bundler cannot predict what `require()` returns, it plays it safe and includes everything.
+
+<EsmVsCjsDemo client:visible />
+
+The left panel shows what happens with ES modules — only the imported function makes it into the bundle. The right panel shows CommonJS — the entire module gets included because the bundler cannot safely determine what is used.
+
+## The Dependency Tree
+
+Real applications do not import from a single file. They import from libraries, which import from other files, which import from more files. This creates a **dependency tree** — a web of modules connected by import statements.
+
+When Vite builds your app, it starts at your entry point (usually `main.js` or `index.js`) and follows every import, building a complete map of every module, every export, and every connection between them.
+
+<ImportGraphDemo client:visible />
+
+Click on any module to see what the bundler finds when it traces through. Notice how the bundler starts at the entry point and follows the import chain — only the exports that are reachable from the entry point survive.
+
+## How the Bundler Decides What to Keep
+
+The algorithm that bundlers use is elegant in its simplicity:
+
+1. Start at the entry point
+2. Find every `import` statement
+3. For each import, check which **named exports** are actually used in the importing file
+4. Recursively trace into each imported module
+5. Mark every export that gets reached as "live"
+6. Everything else is "dead" — remove it from the output
+
+This process is called **reachability analysis**. It is the same algorithm used in compilers for languages like Rust and Go to eliminate dead code.
+
+The critical requirement is that the bundler must be able to parse the `import` and `export` statements statically — without executing the code. ES modules guarantee this because `import` and `export` are syntax, not function calls. You cannot write `import(dynamicVariable)` the way you can write `require(dynamicVariable)`.
+
+## Side Effects: The Complication
+
+If tree shaking were as simple as tracing imports, every bundler would be perfect. But there is a complication: **side effects**.
+
+A side effect is code that does something observable beyond returning a value. Consider this module:
+
+```js
+// analytics.js
+window.__analytics = []
+window.addEventListener('error', (e) => {
+  window.__analytics.push({ type: 'error', message: e.message })
+})
+export function track(event) {
+  window.__analytics.push({ type: 'track', event })
+}
+export function identify(userId) {
+  window.__analytics.push({ type: 'identify', userId })
+}
+```
+
+This module does two things: it sets up a global error listener (a side effect), and it exports two functions. If your app only imports `track`, the bundler might want to remove `identify`. But what about the `window.addEventListener` call? It runs when the module is first imported, regardless of which exports you use. If the bundler removes it, your error tracking silently stops working.
+
+The bundler cannot tell the difference between "safe to remove" code and "critical side effect" code by looking at the syntax alone. So it makes the conservative choice: if a module might have side effects, keep the entire module.
+
+<SideEffectDemo client:visible />
+
+Notice how the pure module gets tree-shaken perfectly, but the module with side effects forces the bundler to keep everything. The `sideEffects: false` declaration tells the bundler "trust me, this module is pure" — but that only works if the declaration is truthful.
+
+## The `sideEffects` Field in package.json
+
+To solve the side effect problem, the `package.json` spec includes a `sideEffects` field. This is a promise from the library author to the bundler:
+
+```json
+{
+  "sideEffects": false
+}
+```
+
+This means: "Importing any file in this package does not do anything beyond exporting values. You can safely remove unused exports."
+
+You can also be specific:
+
+```json
+{
+  "sideEffects": ["./src/polyfills.js", "*.css"]
+}
+```
+
+This means: "Most files are pure, but `polyfills.js` and any CSS files have side effects — always include them."
+
+Most modern libraries set `"sideEffects": false`. lodash-es, date-fns, RxJS, and thousands of other packages rely on this field to enable tree shaking. If a library does not set it, your bundler may include the entire package even if you only use one function.
+
+## Patterns That Prevent Tree Shaking
+
+Not all code is equally tree-shakeable. Some patterns make it impossible for the bundler to determine what is used.
+
+<ShakePatternsDemo client:visible />
+
+The key takeaway: **named exports** are your friend. The more specific your imports, the more the bundler can remove. Default exports, classes, and dynamic patterns force the bundler to be conservative.
+
+## How Much Can You Actually Save?
+
+Tree shaking is not a theoretical optimization. It produces dramatic, measurable results in real applications.
+
+<BundleImpactDemo client:visible />
+
+Libraries like lodash-es can drop from 72 KB to 3 KB when you only use a couple of utilities. That is a 95% reduction. For users on slow connections or mobile devices, that difference determines whether your page loads in one second or five.
+
+## Tree Shaking in Vite
+
+Vite uses Rollup for production builds, so tree shaking works out of the box for ES modules. The default configuration is:
+
+```js
+// vite.config.js
+export default {
+  build: {
+    rollupOptions: {
+      treeshake: true,
+    },
+  },
+}
+```
+
+Vite automatically handles several types of tree shaking:
+
+- **JavaScript**: Removes unused function exports from ES modules
+- **CSS**: Removes unused CSS rules when using framework-specific extractors (like Vue SFC scoped styles or styled-components)
+- **Components**: Framework plugins can mark components as side-effect-free, enabling component-level tree shaking
+
+You can verify tree shaking is working by checking the build output:
+
+```bash
+bun run build
+```
+
+Then inspect the `dist` folder. If you see unexpectedly large chunks, you may have a side effect or CommonJS dependency preventing tree shaking.
+
+## Debugging Tree Shaking Issues
+
+When tree shaking does not seem to be working, check these common culprits:
+
+1. **The library uses CommonJS** — Check the library's `package.json`. If it has `"main"` but no `"module"` or `"exports"` field pointing to ES module files, the bundler falls back to CommonJS and cannot tree-shake.
+
+2. **The library does not set `sideEffects: false`** — Even with ES modules, the bundler may keep the entire package if it cannot confirm there are no side effects.
+
+3. **You are using a default export** — Switch to named exports for better tree shaking.
+
+4. **Your import path hits a barrel file** — Some barrel files re-export everything with `export *`. Modern bundlers handle this, but older configurations may not.
+
+5. **The dependency has a transitive CommonJS dependency** — Even if your direct dependency uses ES modules, its dependencies might not. Tools like `rollup-plugin-commonjs` help, but they cannot fully tree-shake CommonJS code.
+
+## Tree Shaking Checklist
+
+Before shipping your application, run through this checklist to verify your tree shaking is working:
+
+- Are all your own modules using ES module syntax (`import`/`export`)?
+- Do your dependencies provide ES module builds (check for `"module"` or `"exports"` in their `package.json`)?
+- Have you set `"sideEffects": false` in your own `package.json`?
+- Are you using named imports instead of default imports where possible?
+- Have you run `vite build` and inspected the output for unexpected bundle sizes?
+- Have you used a bundle analyzer (like `rollup-plugin-visualizer`) to identify which libraries are contributing the most to your bundle?
+
+Tree shaking is one of the most impactful optimizations available to frontend developers. It costs nothing — no code changes, no architectural shifts, no new tools. You just need ES modules, a modern bundler, and libraries that declare themselves side-effect-free. The result is smaller bundles, faster page loads, and happier users.
