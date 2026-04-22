@@ -1,0 +1,183 @@
+---
+title: "Async Processing & Data Pipelines: Building Systems That Don't Block"
+description: "Message queues, pub/sub, event-driven architecture, batch vs stream processing, ETL pipelines, and storage systems — how to decouple, process, and store data at scale."
+date: 2026-04-22
+tags: ["system-design", "async", "message-queues", "streaming", "etl"]
+---
+
+import SyncAsyncDemo from '../../components/demos/SyncAsyncDemo'
+import MessageQueueDemo from '../../components/demos/MessageQueueDemo'
+import PubSubDemo from '../../components/demos/PubSubDemo'
+import EventFlowDemo from '../../components/demos/EventFlowDemo'
+import BatchVsStreamDemo from '../../components/demos/BatchVsStreamDemo'
+import StorageTypeDemo from '../../components/demos/StorageTypeDemo'
+
+Imagine you walk into a restaurant. There are two ways you can get your food. In the first, you stand at the counter, place your order, and wait exactly where you are until the chef finishes cooking. You cannot do anything else. Your entire evening is paused. In the second, you place your order, the host hands you a buzzer, and you go sit down. You check your phone, chat with friends, order a drink. When the food is ready, the buzzer lights up. You walk over and grab it.
+
+The first model is synchronous processing. The second is asynchronous processing. The entire field of distributed systems is built on understanding when to use each one, and how to build systems that handle the asynchronous case reliably at scale.
+
+This post covers the core building blocks: message queues, pub/sub systems, event-driven architecture, batch vs stream processing, ETL pipelines, and storage systems. By the end, you will understand how large systems decouple their components, process data without blocking, and store the results.
+
+## Synchronous vs Asynchronous
+
+Every interaction between two systems falls into one of two categories: synchronous (sync) or asynchronous (async). The distinction is simple once you see it, but the implications are enormous.
+
+In a **synchronous** interaction, the caller sends a request and waits. Nothing else happens until the response comes back. Think of a regular HTTP request: your browser sends a GET to a server, the browser tab spins, and eventually the page loads. During that waiting period, the caller is blocked. It cannot move on.
+
+In an **asynchronous** interaction, the caller sends a request and immediately gets back an acknowledgment. The actual result arrives later, through a different channel. Think of sending an email: your mail client accepts it instantly, but the recipient gets it minutes or hours later. Your client was never blocked.
+
+When should you use each? Synchronous is simpler to reason about. You call a function, you get a result. The mental model is straightforward. Use it when the operation is fast (under a few hundred milliseconds) and when the caller genuinely needs the result before proceeding. Examples: fetching a user profile, validating a password, looking up a product price.
+
+Asynchronous is essential when the operation is slow, when the caller does not need the result immediately, or when you need to handle many operations concurrently. Examples: sending a welcome email after signup, generating a PDF report, processing a video upload, running a machine learning model.
+
+The rule of thumb: if the operation takes more than 500 milliseconds and the caller does not strictly need the result right now, make it async.
+
+<SyncAsyncDemo client:visible />
+
+The key insight is that async does not make things faster. The work still takes the same amount of time. But it frees the caller to do other things while waiting, which is what makes the whole system feel faster and more responsive.
+
+## Message Queues
+
+A message queue is like a post office for your data. A producer drops a message into the queue, and a consumer picks it up later. The producer does not need to know who the consumer is, or whether the consumer is even running right now. The queue sits in between, holding messages until someone is ready to process them.
+
+This is **point-to-point communication**: each message goes to exactly one consumer. If you have three consumers pulling from the same queue, each message is delivered to one of them. This is how you distribute work across multiple workers.
+
+The three delivery guarantees matter enormously:
+
+- **At-most-once**: messages may be lost, but are never duplicated. The queue tries its best to deliver, but if a consumer crashes before acknowledging, the message is gone. Simple but lossy.
+- **At-least-once**: messages are never lost, but may be delivered more than once. If a consumer crashes after processing but before acknowledging, the queue re-delivers. Your consumer must be able to handle duplicates (idempotency).
+- **Exactly-once**: the holy grail. Each message is delivered precisely once, no more, no less. This requires coordination between the queue and the consumer (usually through transactions or deduplication). Systems like Kafka and AWS SQS FIFO queues support this, but it comes with performance overhead.
+
+Ordering is another consideration. FIFO queues preserve the order messages were sent in. Priority queues deliver higher-priority messages first, regardless of arrival order. Most real systems use FIFO within a partition and multiple partitions for parallelism.
+
+<MessageQueueDemo client:visible />
+
+Real-world message queue systems include RabbitMQ (flexible routing, AMQP protocol), AWS SQS (fully managed, at-least-once by default), and Apache Kafka (log-based, partitioned, used for both messaging and event streaming).
+
+## Pub/Sub Systems
+
+A pub/sub (publish/subscribe) system is like a newspaper. The publisher writes an article and drops it into a topic. Anyone who subscribed to that topic receives a copy. The publisher has no idea who the subscribers are, how many there are, or whether they are even online.
+
+This is **fan-out communication**: one message goes to many receivers. Contrast this with a message queue where each message goes to exactly one consumer.
+
+The core concepts are simple. **Publishers** send messages to **topics** (sometimes called channels). **Subscribers** register interest in specific topics and receive all messages published to those topics. The message broker (the system itself) handles the routing.
+
+Pub/sub is the right pattern when you need to notify multiple systems about the same event. A new user signs up, and you need to send a welcome email, update analytics, provision their workspace, and notify the sales team. With pub/sub, the signup service publishes a "user.created" event, and all four systems subscribe and react independently.
+
+Common use cases: event notifications (order placed, payment received), log aggregation (collect logs from hundreds of services), real-time updates (stock prices, sports scores), and system monitoring (alerts when metrics exceed thresholds).
+
+<PubSubDemo client:visible />
+
+The key difference from message queues: in a queue, each message is consumed by one worker. In pub/sub, each message is received by all subscribers. You can combine both patterns: use a queue for work distribution and pub/sub for event broadcasting.
+
+## Event-Driven Architecture
+
+Event-driven architecture (EDA) is a design paradigm where the flow of a system is determined by events: significant state changes that have already happened. Instead of services calling each other directly, they emit events, and other services react to those events.
+
+Think of a chain reaction. The first domino falls (an event), which knocks over the second, which knocks over the third. No domino "calls" the next one. Each simply reacts to being hit.
+
+There are two important distinctions in EDA. First, **events vs commands**. An event says "something happened" (OrderPlaced). A command says "do something" (ProcessPayment). Events are passive facts. Commands are requests. Events are easy to replay and reason about. Commands require a handler that might fail.
+
+Second, **event sourcing**. Instead of storing the current state of an entity, you store every event that ever happened to it. To reconstruct the current state, you replay all events from the beginning. A bank account does not store "balance = $500". It stores: [Deposited $1000, Withdrew $300, Withdrew $200]. The balance is derived. This gives you a complete audit trail and the ability to time-travel to any point in history.
+
+There are two ways to coordinate event flows:
+
+**Choreography**: each service independently listens for events and decides what to do. Order service emits OrderPlaced. Payment service listens and processes payment. Inventory service listens and reserves stock. No central coordinator. This is decentralized, loosely coupled, but hard to debug when something goes wrong because there is no single place to see the full flow.
+
+**Orchestration**: a central coordinator (often called an orchestrator or workflow engine) manages the flow. It receives the initial event, then explicitly tells each service what to do next: "Payment service, process this payment. Once done, tell inventory service to reserve stock." This is easier to monitor and retry, but creates coupling to the orchestrator.
+
+<EventFlowDemo client:visible />
+
+Most large systems use a mix: choreography for simple, well-defined flows and orchestration for complex, multi-step processes that need close monitoring.
+
+## Task Queues & Background Jobs
+
+Some work should never happen inside a request handler. Generating a report that takes 30 seconds. Sending 10,000 marketing emails. Resizing a uploaded image into five different sizes. Encoding a video. If you do these synchronously, your web server is blocked, your users see loading spinners, and your system falls apart under load.
+
+The solution is task queues. Instead of doing the work immediately, you write a job description to a queue and return a response to the user instantly. Background workers pick up jobs from the queue and process them one at a time (or in parallel, if you run multiple workers).
+
+A background job system typically includes:
+
+- **Enqueue**: serialize the job (what to do, what data it needs) and push it to a queue
+- **Workers**: long-running processes that pull jobs and execute them
+- **Retry**: if a job fails, retry it with exponential backoff (1s, 2s, 4s, 8s...)
+- **Dead letter queue (DLQ)**: after too many failures, move the job to a separate queue for manual inspection
+- **Priority**: some jobs are more important than others. VIP users get their emails sent first
+
+Real examples you interact with daily. When you upload a profile picture, the web server returns immediately. A background worker resizes it to avatar, thumbnail, and full-size versions. When you request a data export from GitHub, you get an email 10 minutes later with a download link. That export was generated by a background job. When you order something online, the confirmation email arrives seconds later because a background worker picked up the "send confirmation" job.
+
+## Batch vs Stream Processing
+
+Data processing comes in two flavors, and the distinction is as fundamental as the difference between a nightly backup and a live TV broadcast.
+
+**Batch processing** means accumulating data over a period of time and then processing all of it at once. Think of a restaurant closing at night: the manager tallies up every receipt from the day, calculates total revenue, and generates a report. The data sits there all day, unprocessed, until the end-of-day batch job runs.
+
+Advantages of batch: simpler to build, easier to reason about, more efficient at scale (process 10 million records in one job instead of one at a time), easier to handle errors (re-run the whole batch). Disadvantages: high latency (data from this morning might not be processed until tonight), stale results.
+
+**Stream processing** means processing each piece of data the instant it arrives. Think of a live TV broadcast: the video frame is captured, compressed, transmitted, and displayed almost instantly. There is no "accumulate and process later" step.
+
+Advantages of stream: low latency (results are near real-time), continuous insights, immediate detection of anomalies. Disadvantages: more complex infrastructure, harder to handle out-of-order data, state management is tricky (you need to remember aggregations over time), more expensive to run at scale.
+
+The **Lambda architecture** combines both: a batch layer that computes accurate results from all historical data, and a speed layer that provides real-time approximations. The final result merges both. Modern systems are increasingly moving toward a "Kappa architecture" that uses only stream processing, but with the ability to reprocess historical data by replaying the stream.
+
+<BatchVsStreamDemo client:visible />
+
+When to use which? Batch is better for: daily reports, billing cycles, model training, data warehousing. Stream is better for: fraud detection, real-time dashboards, live recommendations, alerting systems, IoT sensor data.
+
+## ETL Pipelines
+
+ETL stands for Extract, Transform, Load. It is the process of moving data from one place to another, cleaning and reshaping it along the way. ETL pipelines are the plumbing of the data world.
+
+**Extract** means pulling data from source systems. This could be a database (via SQL queries or change data capture), an API (polling or webhooks), log files, flat files, or third-party services. The challenge is doing this without impacting the source system's performance.
+
+**Transform** means cleaning, standardizing, and enriching the data. This is where the heavy lifting happens. Common transformations: removing duplicates, filling in missing values, converting date formats, joining data from multiple sources, aggregating (sum, average, count), anonymizing personal data, and computing derived fields.
+
+**Load** means pushing the transformed data into a destination system. This could be a data warehouse (columnar storage optimized for analytics), a data lake (raw files in object storage, schema-on-read), a search index, or another application database.
+
+The distinction between a **data warehouse** and a **data lake** matters. A warehouse is structured: data is cleaned, schema-enforced, and optimized for SQL queries. Think of a well-organized filing cabinet. A lake is unstructured: raw data is dumped as-is, and you define the schema when you read it (schema-on-read). Think of a massive warehouse where you dump boxes and figure out what is inside later. Most organizations use both: a lake for raw data ingestion and a warehouse for structured analytics.
+
+Tools in the ETL ecosystem: Apache Airflow (workflow orchestration, schedule and monitor pipelines), Apache Spark (distributed data processing, batch and micro-batch), Apache Flink (true stream processing), dbt (SQL-based transformations, increasingly popular), and cloud-native services like AWS Glue, Google Dataflow, and Azure Data Factory.
+
+## Storage Systems
+
+Not all storage is created equal. The three fundamental storage types serve different purposes, and choosing the wrong one is a quick way to build a system that is slow, expensive, or both.
+
+**Block storage** gives you raw disk blocks. You read and write fixed-size chunks of data at specific addresses. There is no concept of files, folders, or names. Just bytes at offsets. Think of a safe deposit box: you get a numbered box, you can put anything in it, and you access it by number. It is the fastest storage type because there is no metadata overhead.
+
+Block storage is what databases run on. When PostgreSQL needs to read page 47 of table "users", it asks the block storage device for bytes at a specific offset. No directory traversal, no file lookups. Just raw I/O. VM disks also use block storage. Examples: AWS EBS, GCE Persistent Disk, Azure Disk Storage.
+
+**File storage** gives you a hierarchical namespace: directories containing directories and files. You access data by path (`/home/user/documents/report.pdf`). The storage system handles mapping paths to disk blocks. Think of a filing cabinet: drawers contain folders, which contain documents. You navigate by labels.
+
+File storage is what you use for shared file systems, source code repositories, configuration files, and any organized collection of files. It supports concurrent access (multiple readers, often a single writer) and permissions. Examples: NFS, SMB/CIFS, AWS EFS, Azure Files.
+
+**Object/Blob storage** gives you a flat namespace with rich metadata. Each object has a unique key (a string, not a path), the data itself, and arbitrary metadata (content type, custom headers). Think of a warehouse where every box has a barcode. There are no shelves or sections. You scan the barcode, the system tells you exactly where the box is.
+
+Object storage is the default for anything that does not need low-latency random access: images, videos, backups, logs, static website assets, datasets, and ML model checkpoints. It is incredibly cheap, infinitely scalable, and accessible over HTTP. Examples: AWS S3, Google Cloud Storage, Azure Blob Storage, MinIO (self-hosted).
+
+<StorageTypeDemo client:visible />
+
+| Property | Block | File | Object |
+|---|---|---|---|
+| Access pattern | Raw byte offsets | File paths | HTTP + key |
+| Latency | Sub-millisecond | Low | Medium |
+| Throughput | Very high | Medium | High (parallel reads) |
+| Cost | High | Medium | Low |
+| Scalability | Limited per volume | Medium | Virtually unlimited |
+| Best for | Databases, VMs | Shared code, configs | Media, backups, logs |
+
+## Self-Check
+
+Before moving on, make sure you can answer these:
+
+- When would you choose synchronous over asynchronous communication?
+- What is the difference between at-least-once and exactly-once delivery?
+- How does pub/sub differ from a message queue?
+- What is the difference between choreography and orchestration?
+- When should you move work to a background job?
+- What are the tradeoffs between batch and stream processing?
+- What does ETL stand for, and what does each step do?
+- Which storage type would you use for a database? For user-uploaded photos?
+- What is the difference between a data warehouse and a data lake?
+- Why is idempotency important in at-least-once delivery systems?
+
+If you can answer all of these, you have a solid understanding of async processing and data pipelines. The next step is to pick a technology (RabbitMQ, Kafka, SQS, Airflow) and build something with it. Theory is necessary, but hands-on practice is what makes it stick.

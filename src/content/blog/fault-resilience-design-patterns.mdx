@@ -1,0 +1,301 @@
+---
+title: "Fault Handling, Performance & Design Patterns: Making Systems Unbreakable"
+description: "Retries with exponential backoff, timeouts, graceful degradation, idempotency, distributed transactions, saga pattern, connection pooling, CQRS, event sourcing, and distributed locking."
+date: 2026-04-22
+tags: ["system-design", "resilience", "design-patterns", "cqrs", "performance"]
+---
+
+import RetryBackoffDemo from '../../components/demos/RetryBackoffDemo'
+import GracefulDegradationDemo from '../../components/demos/GracefulDegradationDemo'
+import IdempotencyDemo from '../../components/demos/IdempotencyDemo'
+import SagaDemo from '../../components/demos/SagaDemo'
+import ConnectionPoolDemo from '../../components/demos/ConnectionPoolDemo'
+import CqrsDemo from '../../components/demos/CqrsDemo'
+
+## Why Systems Fail
+
+A chain is only as strong as its weakest link. Your system is a chain of services, databases, networks, and human decisions. When any link breaks, the whole system feels it.
+
+Think of a restaurant kitchen during Friday dinner rush. The waiter takes an order (API gateway). The kitchen prepares the food (backend service). The ingredients come from the walk-in fridge (database). If the fridge door jams, the kitchen can't cook. If the kitchen is backed up, the waiter can't serve. If the waiter is overwhelmed, customers leave.
+
+Systems fail in predictable ways:
+
+| Failure Type | Example | Impact |
+|---|---|---|
+| **Network** | DNS resolution fails, packet loss, connection timeout | Services can't talk to each other |
+| **Hardware** | Disk dies, server crashes, datacenter loses power | Everything on that machine goes down |
+| **Software** | Memory leak, infinite loop, bad deployment, race condition | One bad deploy takes down the fleet |
+| **Human error** | Wrong config, accidental data deletion, bad migration | The most common cause of outages |
+
+The goal isn't preventing failures -- that's impossible. The goal is handling them so the user barely notices. A resilient system fails gracefully, recovers automatically, and degrades instead of crashing.
+
+## Retries with Exponential Backoff
+
+Imagine calling someone who doesn't answer. You don't call them 10 times in 5 seconds -- you wait a minute, then 2 minutes, then 5. Each time you wait longer. That's exponential backoff.
+
+When a request fails, the naive approach is to retry immediately. But if the server is overloaded, immediate retries make it worse. 1,000 clients all retry at the same instant = 1,000 new requests hitting an already struggling server. This is called the **thundering herd** problem.
+
+Exponential backoff solves this by increasing the delay between retries:
+
+```
+delay = base * 2^attempt + jitter
+```
+
+- **base**: starting delay (e.g., 1000ms)
+- **attempt**: retry number (0, 1, 2, 3...)
+- **jitter**: small random value to prevent synchronized retries
+
+So with a 1-second base: 1s, 2s, 4s, 8s, 16s... Each retry waits twice as long. Jitter adds randomness so all clients don't retry at the exact same moment.
+
+Always combine retries with a **max retry count** (typically 3-5) and a **circuit breaker** -- if the server keeps failing, stop retrying and return an error immediately instead of wasting resources.
+
+<RetryBackoffDemo client:visible />
+
+**Real work example:** Your payment gateway returns 500 errors during a flash sale. Without backoff, your retry logic hammers the gateway with 50 req/s, making recovery impossible. With exponential backoff, retries spread out over seconds instead of milliseconds, giving the gateway breathing room to recover. Add jitter so 100 clients don't all retry at exactly 2.0s.
+
+## Timeouts & Deadlines
+
+Every request should have a timeout. No exceptions. A request without a timeout is a request that hangs forever, consuming a thread, a connection, and your sanity.
+
+Two types of timeouts you must set:
+
+| Timeout Type | What It Does | Default You Should Use |
+|---|---|---|
+| **Connection timeout** | Max time to establish a connection (TCP handshake + TLS) | 5-10 seconds |
+| **Read timeout** | Max time to wait for the first byte of the response | 15-30 seconds |
+
+If you're making a chain of service calls, propagate a **deadline**. The first service sets a 30-second deadline. It calls service B with 28 seconds remaining (accounting for its own processing time). Service B calls service C with 25 seconds. Each service knows the total budget and can fail fast instead of waiting for a timeout that will never come.
+
+```
+Client -> Service A (30s deadline)
+              -> Service B (25s remaining)
+                    -> Service C (20s remaining)
+```
+
+Without deadline propagation, each service has its own independent timeout. Service C might have a 30-second timeout even though only 20 seconds remain. The client waits 30 seconds total, then gets a timeout from service A -- but service C is still running, wasting resources on a response nobody will read.
+
+**Real work example:** Your API calls an external weather service that sometimes hangs. Without a timeout, that one stuck request holds a thread for minutes, eventually exhausting your thread pool. Every new request starts queueing. Your entire API goes down because of one slow external service. Set a 5-second read timeout. If the weather service doesn't respond in 5 seconds, return cached data or a "weather unavailable" message.
+
+## Graceful Degradation
+
+Emergency lighting in a building doesn't mean everything works -- it means nobody gets hurt. The elevators stop, but the stairs have lights. The AC shuts off, but ventilation keeps running. The building degrades gracefully.
+
+In software, graceful degradation means: when something breaks, show what you can instead of showing nothing.
+
+| Component Down | Without Degradation | With Degradation |
+|---|---|---|
+| Database | 500 error page | Show cached data with "data may be stale" banner |
+| Search service | Search bar returns errors | Hide search, show category browsing |
+| Recommendations | Empty recommendation section | Show popular items instead |
+| Image CDN | Broken images everywhere | Serve lower-quality fallback images |
+| Payment processor | Checkout crashes | Show "payment temporarily unavailable, try again" |
+
+The key decisions: what's essential (must always work) vs what's nice-to-have (can be disabled). Your core product pages should load even if the database is down -- serve from cache. Your search feature can be disabled without losing sales.
+
+<GracefulDegradationDemo client:visible />
+
+**Real work example:** Your e-commerce site's recommendation engine goes down. Without degradation: every product page shows a 500 error -- zero sales. With degradation: recommendations are hidden, product pages still work, sales continue at 85% of normal. The fix happens in the background and nobody files a support ticket.
+
+## Idempotency
+
+Press an elevator button once, and the elevator comes. Press it 10 times, and the elevator still comes once. That's idempotency -- the operation produces the same result no matter how many times it's executed.
+
+In distributed systems, idempotency is critical because **networks are unreliable**. A client sends a payment request, the server processes it, but the response gets lost. The client thinks it failed and retries. Without idempotency: two payments. With idempotency: the server recognizes the duplicate and returns the original result.
+
+The mechanism is an **idempotency key**: a unique identifier the client sends with each request.
+
+```
+POST /api/payments
+Idempotency-Key: pay_abc123
+```
+
+The server stores the key and result. If it sees the same key again, it returns the stored result without re-executing.
+
+| HTTP Method | Idempotent? | Example |
+|---|---|---|
+| GET | Yes | Reading a user profile 10 times = same as once |
+| PUT | Yes | Setting name to "Alice" 10 times = name is "Alice" |
+| DELETE | Yes | Deleting user #42 twice = user #42 is deleted |
+| POST | No | Creating an order twice = two orders |
+| PATCH | Maybe | Depends on implementation |
+
+POST is the dangerous one. Most write operations use POST, and most write operations can't be safely retried without an idempotency key.
+
+<IdempotencyDemo client:visible />
+
+**Real work example:** A user submits a $500 payment. The network drops the response. They click "Submit" again. Without idempotency: $1,000 charged. With idempotency: the second request's key matches the first, so the server returns "already processed" with the original transaction ID. This is why Stripe, PayPal, and every payment API requires idempotency keys.
+
+## Distributed Transactions
+
+A regular database transaction is simple: debit account A, credit account B, all or nothing. ACID guarantees handle it.
+
+But what if the debit happens in Service A's database and the credit happens in Service B's database? You can't wrap both in a single `BEGIN/COMMIT`. They're separate systems.
+
+### Two-Phase Commit (2PC)
+
+A coordinator asks all participants: "can you commit?" (prepare phase). If everyone says yes, the coordinator says "commit" (commit phase). If anyone says no, the coordinator says "abort" and everyone rolls back.
+
+The problem: it's a **blocking protocol**. If the coordinator crashes after phase 1, all participants are left holding locks, waiting forever. This is why 2PC is rarely used in modern microservices -- it creates tight coupling and reduces availability.
+
+### Saga Pattern
+
+Instead of one big transaction, the saga breaks the operation into a sequence of smaller, local transactions. Each step runs independently. If any step fails, the saga runs **compensating actions** in reverse to undo the previous steps.
+
+```
+Create Order -> Reserve Inventory -> Process Payment -> Ship
+     |                |                  |              |
+  Cancel Order   Release Inventory    Refund Payment  Cancel Shipment
+```
+
+No distributed locks. No coordinator. Each service manages its own compensation. The trade-off: you might see intermediate states (order created but payment pending) -- but the system stays available.
+
+<SagaDemo client:visible />
+
+**Real work example:** An e-commerce order flow: create order, reserve inventory, charge payment, ship. If payment fails after inventory is reserved, the saga releases the inventory. No locks held, no coordinator needed. Each service is independent. The user sees "Payment failed, please try again" but their reserved inventory is already released back to the pool.
+
+## Performance Optimization
+
+### Lazy Loading
+
+Don't load everything upfront. Load what the user sees first, defer the rest. An image below the fold doesn't need to load until the user scrolls to it. A user profile page doesn't need to load the user's 10,000 order history until they click "View Orders."
+
+```javascript
+const orders = await fetchOrders() // only when user clicks "Orders" tab
+```
+
+### Connection Pooling
+
+Creating a database connection is expensive -- TCP handshake, authentication, TLS negotiation, session setup. It takes 50-200ms. If every query creates a new connection, your API spends more time connecting than querying.
+
+A connection pool maintains a set of ready-to-use connections. When a query needs a connection, it borrows one from the pool (instant). When done, it returns the connection (not closed, just recycled).
+
+Pool too small: requests wait for available connections. Pool too large: waste of database resources. The sweet spot depends on your database's max connections and your query patterns.
+
+<ConnectionPoolDemo client:visible />
+
+### Compression
+
+Enable gzip or Brotli compression on your API responses. JSON compresses 70-80%. A 100KB response becomes 20KB. The CPU cost of compression is negligible compared to the network savings.
+
+### Pagination
+
+Never send 10,000 rows in one response. Paginate: `?page=1&limit=20`. For large datasets, use cursor-based pagination instead of offset -- it performs consistently regardless of how deep you page.
+
+**Real work example:** Your API returns a list of products. Without pagination: 50,000 products, 5MB JSON response, 2-second load time. With pagination: 20 products per page, 10KB response, 50ms load time. The frontend fetches more as the user scrolls.
+
+## CQRS
+
+Command Query Responsibility Segregation -- a fancy name for a simple idea: separate your writes from your reads.
+
+Think of a retail store. The **inventory system** (write side) tracks what comes in and goes out. It's optimized for fast, consistent updates. The **catalog** (read side) is what customers browse. It's optimized for fast, flexible queries with filters, full-text search, and sorting.
+
+These are two different access patterns. One data model can't optimize for both.
+
+### How CQRS Works
+
+1. **Write side** receives commands (CreateOrder, UpdateProduct). Data is stored in a normalized form optimized for consistency.
+2. An **event** is published (OrderCreated, PriceUpdated).
+3. A **projection** listens to events and updates the read model. The read model is denormalized -- category names are pre-computed, search text is pre-built, availability is pre-calculated.
+4. **Read side** receives queries. It reads from the denormalized read model -- fast, no JOINs needed.
+
+```
+Write Command -> Write DB -> Event -> Read DB Updated -> Query Result
+```
+
+### When CQRS Helps
+
+- Different read and write patterns (complex queries vs simple inserts)
+- High read volume with low write volume (most applications)
+- You need to optimize reads and writes independently
+- You're using event sourcing (events feed the read model)
+
+### When CQRS Is Overkill
+
+- Simple CRUD application with similar read/write patterns
+- Low traffic where a single database handles everything
+- Your team is small and the complexity isn't justified
+
+<CqrsDemo client:visible />
+
+**Real work example:** A product catalog with 1 million products. Users search by name, filter by category, sort by price. On the write side, an admin updates a product's price. Without CQRS: the query JOINs products, categories, and inventory tables on every search -- slow. With CQRS: the read model has pre-joined data with full-text search. Price updates take a few milliseconds to propagate, but searches return in under 5ms.
+
+## Event Sourcing
+
+Instead of storing the current state, store every event that led to the current state.
+
+Think of a bank ledger. The bank doesn't store "Alice has $5,000." It stores every transaction:
+
+```
++1000 (initial deposit)
++2000 (transfer from Bob)
+-500  (ATM withdrawal)
++1500 (direct deposit)
+```
+
+Alice's balance is the sum of all events: $4,000. The current state is **derived** from the event history.
+
+In event sourcing, your database is an append-only log of events. The current state is computed by replaying those events. This gives you:
+
+- **Full audit trail**: every change is recorded, immutable
+- **Time travel**: rebuild state as of any point in time
+- **Debugging**: replay events to reproduce bugs
+- **Event replay**: fix bugs by replaying events through corrected logic
+
+```
+events = [UserCreated, EmailChanged, PasswordChanged, RoleAssigned]
+state = replay(events) // current user state
+```
+
+Event sourcing pairs naturally with CQRS. Events from the write side feed the read model projections. The write model stores events, the read model stores computed state.
+
+The trade-offs: events are append-only, so you can't "update" old data -- you add a compensating event. Event replay gets slower as the log grows, so you need **snapshots** (periodic state saves to avoid replaying from the beginning).
+
+**Real work example:** An inventory system using event sourcing tracks every stock change: `ItemReceived(50)`, `ItemSold(3)`, `ItemSold(1)`, `ItemReturned(1)`. To find the current stock: sum all events. To find stock on March 1st: replay events up to that date. To debug a stock discrepancy: find the exact event that caused it.
+
+## Distributed Locking & Leader Election
+
+### Distributed Locks
+
+In a single process, a mutex prevents two threads from modifying the same data simultaneously. In a distributed system, you need a **distributed lock** -- a mechanism to prevent multiple nodes from acting on the same resource.
+
+Redis-based locks (Redlock) are the most common approach:
+
+```
+SET lock:order:123 my_unique_value NX PX 30000
+```
+
+- `NX`: only set if the key doesn't exist (atomic acquire)
+- `PX 30000`: auto-expire after 30 seconds (prevents deadlocks)
+- The lock holder must periodically renew the lease (heartbeat)
+- When done, the holder deletes the key to release
+
+Use cases: preventing double-spending, coordinating cron jobs across multiple servers, ensuring only one instance migrates the database.
+
+### Leader Election
+
+In a cluster of identical nodes, one node needs to be the **leader** that coordinates work. The others are **followers** that wait for instructions.
+
+If the leader dies, the remaining nodes hold an election and promote a new leader. This is how systems like etcd, ZooKeeper, and Consul work.
+
+```
+Node A (leader) -- coordinates task assignment, config updates
+Node B (follower) -- waits for work
+Node C (follower) -- waits for work
+```
+
+When Node A crashes, Nodes B and C detect it (via heartbeat timeout) and hold an election. Node B wins, becomes the new leader, and Node C becomes a follower again. The transition is automatic and usually completes in seconds.
+
+**Real work example:** You have 5 API servers running the same cron job to send daily emails. Without leader election: 5 emails sent per user. With leader election: one server wins the lock and sends emails, the other 4 skip. If the leader crashes mid-job, another server picks up where it left off (using a cursor/checkpoint in the database).
+
+## Self-Check
+
+- Can you explain why immediate retries are worse than exponential backoff?
+- What's the difference between a connection timeout and a read timeout?
+- When would you choose graceful degradation over failing fast?
+- Why does POST need an idempotency key but PUT doesn't?
+- What's the main difference between 2PC and the Saga pattern?
+- Why is a connection pool faster than creating connections per query?
+- When would CQRS be overkill for your application?
+- What's the trade-off of event sourcing versus traditional state storage?
+- Why does a distributed lock need an expiration time?
+- What happens in a leader election when the old leader comes back online?

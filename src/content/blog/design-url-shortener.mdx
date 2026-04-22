@@ -1,0 +1,311 @@
+---
+title: "Design a URL Shortener: From Bit.ly to Interview Ready"
+description: "Full system design interview walkthrough: requirements, capacity estimation, API design, database schema, encoding schemes, caching, and scaling — everything you need to design a URL shortener like bit.ly."
+date: 2026-04-22
+tags: ["system-design", "interview", "url-shortener", "design-problem"]
+---
+
+import RequirementsDemo from '../../components/demos/RequirementsDemo'
+import CapacityCalcDemo from '../../components/demos/CapacityCalcDemo'
+import ApiDesignDemo from '../../components/demos/UrlApiDesignDemo'
+import SchemaDesignDemo from '../../components/demos/SchemaDesignDemo'
+import EncodingDemo from '../../components/demos/EncodingDemo'
+import Base62Demo from '../../components/demos/Base62Demo'
+import HashCollisionDemo from '../../components/demos/HashCollisionDemo'
+import ArchitectureDemo from '../../components/demos/ArchitectureDemo'
+
+You are in a system design interview. The interviewer says: "Design a URL shortener like bit.ly." What do you do? You do not jump into databases and load balancers. You start by understanding what the thing actually is, what it needs to do, and how big it needs to get. This is the complete walkthrough — from the first question to the final follow-up.
+
+## Understanding the Problem
+
+What is a URL shortener? Think of it like a valet parking ticket. You hand the attendant your car (a long, complicated URL), and they hand you a small paper ticket (a short code like `aB3x9Q`). When you come back, you hand them the ticket, and they return your car. The ticket is meaningless on its own — it is just a reference to something stored behind the counter.
+
+You have used these hundreds of times. When someone tweets a link and it looks like `bit.ly/3kR9xP`, that is a short URL. When you click it, the service looks up `3kR9xP` in its database, finds the original long URL, and redirects your browser there. The whole thing takes under 50 milliseconds.
+
+Real-world examples: bit.ly (the OG), TinyURL (one of the first, launched in 2002), t.co (Twitter/X's built-in shortener), goo.gl (Google's, now retired), and Short.io (custom domain shortening for businesses).
+
+Why do companies build these? Three reasons. First, analytics — every click is tracked, so you know where your users come from, what device they use, and what time they clicked. Second, branding — `nyti.ms/arts` looks better in a newspaper than `https://www.nytimes.com/2026/04/22/arts/design/museum-exhibition-review.html`. Third, link management — if the destination URL changes, you update it in one place and every short link automatically points to the new address.
+
+## Requirements Gathering
+
+Before designing anything, you need to know what you are building. In an interview, you ask the interviewer clarifying questions. Here is what a typical conversation looks like:
+
+"Should users need to log in?" — Probably not for basic shortening, but yes for managing links and viewing analytics.
+
+"Do we need custom aliases?" — Yes, brands want `nyti.ms/arts` not `nyti.ms/7xK2pQ`.
+
+"Do links expire?" — Optional, but useful for temporary campaigns.
+
+"Are we focused on reads or writes?" — Mostly reads. People create a link once but share it thousands of times.
+
+<RequirementsDemo client:visible />
+
+### Functional Requirements
+
+These are the things the system **must do**:
+
+1. **Shorten a URL** — given a long URL, return a short code
+2. **Redirect** — given a short code, return an HTTP redirect to the original URL
+3. **Custom aliases** — allow users to specify their own short code (like `my-brand/sale`)
+4. **Analytics** — track clicks, referrers, locations, devices
+5. **Expiration** — optionally set a time-to-live on links
+
+### Non-Functional Requirements
+
+These are the **quality constraints**:
+
+1. **High availability** — the redirect endpoint must never go down (99.9%+ uptime)
+2. **Low latency** — redirects must complete in under 50ms at p99
+3. **Scalability** — handle billions of URLs and millions of requests per second
+4. **Durability** — no URL mapping should ever be lost, even during failures
+5. **Predictability** — performance should not degrade under load spikes
+
+### Out of Scope
+
+For this interview, we are explicitly NOT building: user authentication, payment processing, link preview generation, QR code creation, or bulk import/export. Mentioning these shows the interviewer you understand scope boundaries.
+
+## Capacity Estimation
+
+This is where you show the interviewer you can do back-of-the-napkin math. You state your assumptions clearly, then calculate.
+
+**Assumptions:**
+
+- 500 million new URLs per month (bit.ly-scale)
+- 100:1 read-to-write ratio (one person creates a link, roughly 100 people click it)
+- Average URL size: 500 bytes (original URL + metadata)
+- Data retention: 5 years
+
+**Calculations:**
+
+- **Write QPS:** 500M / 2,592,000 seconds/month = ~193 writes/second
+- **Read QPS:** 193 x 100 = ~19,300 reads/second = ~20K QPS
+- **Storage per year:** 500M URLs x 500 bytes = ~250 GB/year
+- **5-year total:** 250 GB x 5 = ~1.25 TB
+- **Bandwidth per day:** 20K reads/sec x 300 bytes response x 86,400 sec = ~518 GB/day
+
+These numbers tell us something important: reads dominate by 100x. That means our system design should be read-optimized. Cache everything. The write path only handles ~200 QPS — that is trivial.
+
+<CapacityCalcDemo client:visible />
+
+## System API Design
+
+Now we define the contract between clients and servers. A clean REST API with four endpoints covers everything:
+
+```
+POST /api/shorten           → Create a short URL
+GET  /{shortCode}           → Redirect to original
+DELETE /api/links/{id}      → Delete a link
+GET  /api/links/{id}/stats  → View analytics
+```
+
+The first two are the critical path. The second two are management endpoints. Let us walk through each one.
+
+<ApiDesignDemo client:visible />
+
+### Design Decisions
+
+**Why 301 vs 307?** A 301 (Moved Permanently) tells the browser to cache the redirect forever. Great for performance, bad if the URL changes. A 307 (Temporary Redirect) always hits the server. Use 307 for links with expiration dates, 301 for permanent links.
+
+**Why not use query parameters?** `GET /redirect?code=aB3x9Q` works, but `GET /aB3x9Q` is shorter, more shareable, and easier to print on physical media. The short code goes in the URL path.
+
+**Idempotency:** `POST /api/shorten` should return the existing short code if the same URL was already shortened, rather than creating a duplicate. This is not strictly idempotent, but it is what users expect.
+
+## Database Schema Design
+
+We need two tables: one for URL mappings and one for analytics. The URL table is the critical path — every redirect queries it. The analytics table is write-heavy but read-only for dashboard queries.
+
+<SchemaDesignDemo client:visible />
+
+### SQL vs NoSQL
+
+**SQL (PostgreSQL):** Better if you need joins (users + their links), complex queries (analytics aggregations), and strong consistency. Easier to reason about. Sharding is harder at scale.
+
+**NoSQL (DynamoDB/Cassandra):** Better if you need horizontal scale, simple key-value lookups (short_code → URL), and flexible schemas. Built-in replication. Harder to do aggregations.
+
+**The interview answer:** Start with SQL for the URL table (you need strong consistency — two requests for the same custom alias must not both succeed). Use a separate time-series database or NoSQL table for analytics (write-heavy, append-only, eventual consistency is fine).
+
+### Indexes Matter
+
+The most important index is `UNIQUE INDEX (short_code)`. Every redirect query does `SELECT original_url FROM urls WHERE short_code = ?`. Without this index, every redirect is a full table scan on a table with billions of rows. With it, the lookup is O(1).
+
+## The Core Problem: Generating Short Codes
+
+This is the heart of the interview. How do you turn a long URL into a short, unique string? There are three approaches, and the interviewer expects you to compare them.
+
+<EncodingDemo client:visible />
+
+### Option 1: Auto-Increment ID + Base62
+
+Give each URL a sequential numeric ID (1, 2, 3, ...) and encode it in Base62. ID `12345` becomes `3d7` in Base62. Simple, no collisions, but predictable — anyone can enumerate all URLs by incrementing the counter.
+
+### Option 2: Hash + Truncate
+
+Run the URL through MD5 or SHA-256, take the first 6-7 characters. Same URL always produces the same code (deterministic). But collisions are possible (two different URLs might hash to the same prefix). You handle collisions by checking the database and appending characters if needed.
+
+### Option 3: Random Generation
+
+Pick 6-7 random characters from `[0-9a-zA-Z]`. No coordination needed. Truly unpredictable. But you must check the database for uniqueness on every write, and under high load you will get collisions that require retries.
+
+### Which One?
+
+For an interview, **Option 1 (Base62)** is the strongest answer. It guarantees no collisions, is easy to implement, and the predictability problem is solved by using a distributed ID generator (Snowflake IDs) instead of a single auto-increment counter. Mention the other two as alternatives you considered and explain why you rejected them.
+
+## Base62 Encoding
+
+Base62 is the most common encoding scheme for URL shorteners. The character set is `0-9` (10 digits), `a-z` (26 lowercase), `A-Z` (26 uppercase) — 62 characters total. Why 62? Because these are all "URL-safe" characters that do not need percent-encoding in a URL path.
+
+The math is compelling:
+
+- 6 characters: 62^6 = 56.8 billion combinations
+- 7 characters: 62^7 = 3.5 trillion combinations
+- 8 characters: 62^8 = 218 trillion combinations
+
+Even at bit.ly's scale (500M new URLs/year), 7 characters gives you 3.5 trillion IDs — enough for 7,000 years at current rates. Eight characters is overkill.
+
+<Base62Demo client:visible />
+
+### How It Works
+
+Encoding is just repeated division. Take the numeric ID, divide by 62, the remainder gives you the rightmost character. Repeat with the quotient until you reach zero. Read the remainders in reverse order.
+
+Decoding is the reverse: for each character, multiply the running total by 62 and add the character's index value.
+
+### Distributed ID Generation
+
+A single auto-increment counter is a bottleneck. Instead, use a distributed ID generator like Twitter's Snowflake: a 64-bit number where the first bits are a timestamp, the middle bits are a machine ID, and the last bits are a sequence number. This gives you unique, time-ordered IDs across multiple servers without coordination.
+
+## Hash Collisions
+
+If you choose the hash approach, collisions are a real concern. The birthday paradox tells us that collisions become likely much sooner than you would expect. With 7 characters (62^7 = 3.5 trillion possible codes) and 500 million URLs, the collision probability is still low — but not zero.
+
+<HashCollisionDemo client:visible />
+
+### Collision Resolution Strategies
+
+**Rehash:** If the short code is already taken, hash the URL with a salt (append a counter) and try again. `hash(url + "1")`, `hash(url + "2")`, etc. until you find an unused code.
+
+**Append:** If `aB3x9Q` is taken, try `aB3x9Q1`, `aB3x9Q2`, etc. Simple but makes the code longer.
+
+**Pre-check:** Before committing, query the database. If the code exists, generate a new one. This is the most common approach but adds latency to the write path.
+
+### Why It Matters
+
+With the auto-increment + Base62 approach, collisions are impossible — each ID is unique by definition. This is why most production systems use it. The hash approach sounds elegant but adds complexity for no real benefit.
+
+## High-Level Design
+
+Here is the full architecture. A user creates a short URL, and later someone clicks it. These are two completely different paths through the system, and they have different performance requirements.
+
+<ArchitectureDemo client:visible />
+
+### The Shorten Path (Write)
+
+1. Client sends `POST /api/shorten` with the long URL
+2. Load balancer routes to an available API server
+3. API server validates the URL (check for malware, verify format)
+4. Generate a unique short code (Base62 encode a Snowflake ID)
+5. Store the mapping in the database
+6. Populate the cache (`SET short:aB3x9Q <original_url>`)
+7. Return the short URL to the client
+
+This path is not performance-critical. 200 QPS is trivial. Latency of 100-200ms is acceptable.
+
+### The Redirect Path (Read) — Cache Hit
+
+1. Client sends `GET /aB3x9Q`
+2. CDN checks its cache — found!
+3. Returns `301 Location: <original_url>` immediately
+
+This is the happy path. It takes under 10ms because the CDN serves it from an edge node near the user. The origin server never sees the request.
+
+### The Redirect Path (Read) — Cache Miss
+
+1. Client sends `GET /aB3x9Q`
+2. CDN cache miss — forward to origin
+3. Load balancer routes to API server
+4. API server checks Redis cache — miss
+5. Query database: `SELECT original_url FROM urls WHERE short_code = 'aB3x9Q'`
+6. Populate Redis cache for future requests
+7. Publish click event to message queue (async analytics)
+8. Return `301` to client, CDN caches the response
+
+This path is slower (30-50ms) but should be rare for popular links. The 80/20 rule applies: 20% of URLs get 80% of traffic, so caching the top URLs eliminates most database queries.
+
+## Scaling Considerations
+
+The basic design works for millions of URLs. Here is what changes when you need to handle billions.
+
+### Caching Hot URLs
+
+The single highest-impact optimization. Cache the redirect response at the CDN level. Most URL shorteners see extreme skew — a viral link might get millions of clicks in an hour while most links get single-digit clicks. Cache the top 20% of URLs and you eliminate 80% of database reads.
+
+Cache strategy: cache-aside pattern. On a redirect, check Redis first. If miss, query the database and populate the cache with a TTL (e.g., 1 hour). The CDN sits in front of everything and caches the actual 301 response.
+
+### Database Sharding
+
+When a single database cannot hold all your data, shard by short_code. Use consistent hashing to distribute URLs across N shards. Each shard holds roughly 1/N of the data. Add more shards as you grow.
+
+The redirect query only needs one shard: `hash(short_code) % N → shard_id`. This means every redirect touches exactly one shard, keeping latency low.
+
+### Rate Limiting
+
+The shorten endpoint is the most abusable. Someone could write a script to create millions of short URLs. Use a token bucket rate limiter: 10 requests per minute per IP for anonymous users, 100 per minute for authenticated users. Implement with Redis counters.
+
+### Async Analytics Pipeline
+
+Writing analytics on every redirect adds latency and database load. Instead, fire-and-forget: the API server publishes a click event to a message queue (Kafka, SQS), then returns the redirect immediately. Worker processes consume events from the queue, parse IP addresses, look up countries, and write to a time-series database. The redirect path never waits for analytics.
+
+### Multi-Region Deployment
+
+For 99.99%+ availability, deploy to 3+ regions with active-active replication. Use geoDNS to route users to the nearest region. The trade-off is eventual consistency — a URL created in US-East might take a few seconds to appear in EU-West.
+
+## Trade-offs & Follow-up Questions
+
+Every design decision has a trade-off. Good interviewers will poke at your choices. Here is how to handle the common follow-ups.
+
+### What if someone guesses short codes?
+
+With 62^7 = 3.5 trillion possibilities, random guessing is impractical. But if you use sequential IDs, an attacker could enumerate URLs by incrementing. Solutions: add random padding to the Base62 string, use Snowflake IDs (which include machine ID bits), or add a secret salt before encoding.
+
+### What if the original URL is malicious?
+
+Short URLs hide the destination. Someone could shorten a phishing page and share it widely. Solutions: scan URLs against threat intelligence databases (Google Safe Browsing API), require users to verify ownership for custom domains, and show a preview page for unknown short URLs.
+
+### What if the service goes down?
+
+Every redirect returns an error page. At bit.ly's scale, this means millions of broken links. Solutions: multi-region active-active deployment, database replicas in each region, automated failover, and health checks that remove unhealthy nodes from the load balancer.
+
+### How to handle custom aliases?
+
+Custom aliases are harder than random codes because you need to check for availability AND prevent namespace conflicts. Solutions: reserve popular prefixes, implement a "taken" check with eventual consistency, and allow users to claim namespaces (like `brand.*`).
+
+### Design Decision Summary
+
+| Decision | Choice | Alternative | Why |
+|---|---|---|---|
+| Short code generation | Auto-increment + Base62 | Hash + truncate | No collisions, simpler logic |
+| Database | Sharded PostgreSQL | DynamoDB | Strong consistency for aliases |
+| Cache | Redis + CDN | Memcached | Data persistence, CDN for edge |
+| Analytics | Async message queue | Synchronous write | Zero impact on redirect latency |
+| ID generation | Snowflake IDs | Single auto-increment | No single point of failure |
+| Redirect | 301 permanent | 307 temporary | Better caching at CDN |
+
+## Self-Check
+
+Before walking into an interview, make sure you can answer all of these without looking:
+
+- [ ] Can you explain the valet parking analogy for URL shortening?
+- [ ] Can you calculate QPS, storage, and bandwidth from a given scale?
+- [ ] Can you design all four API endpoints with request/response formats?
+- [ ] Can you draw the database schema with correct types and indexes?
+- [ ] Can you explain why `short_code` needs a UNIQUE index?
+- [ ] Can you encode and decode a number in Base62 by hand?
+- [ ] Can you explain the birthday paradox and why it matters for hashing?
+- [ ] Can you draw the architecture diagram with all components labeled?
+- [ ] Can you trace both the shorten path and the redirect path?
+- [ ] Can you explain why caching eliminates 80% of database reads?
+- [ ] Can you name three collision resolution strategies?
+- [ ] Can you explain the trade-off between 301 and 307 redirects?
+- [ ] Can you explain why SQL is better for the URL table but NoSQL for analytics?
+- [ ] Can you explain the 80/20 rule and how it informs your caching strategy?
+- [ ] Can you handle the "what if" follow-up questions without pausing?

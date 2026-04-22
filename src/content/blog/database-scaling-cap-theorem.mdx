@@ -1,0 +1,251 @@
+---
+title: "Scaling Databases & The CAP Theorem: Making Trade-offs at Scale"
+description: "Replication, sharding, federation, and read replicas — plus the CAP theorem, consistency models, and quorum. How to keep your database fast when data outgrows one machine."
+date: 2026-04-22
+tags: ["system-design", "databases", "cap-theorem", "scaling", "distributed"]
+---
+
+import ReplicationFlowDemo from '../../components/demos/ReplicationFlowDemo'
+import ShardingStrategyDemo from '../../components/demos/ShardingStrategyDemo'
+import CapTriangleDemo from '../../components/demos/CapTriangleDemo'
+import ConsistencySpectrumDemo from '../../components/demos/ConsistencySpectrumDemo'
+import QuorumDemo from '../../components/demos/QuorumDemo'
+import ReadReplicaDemo from '../../components/demos/ReadReplicaDemo'
+
+Your app is growing. Users are signing up faster than expected. Queries that took 5 milliseconds last month now take 500. Your single database server is sweating. You upgrade the CPU, add more RAM, slap in a faster SSD — and it helps, for a while. But hardware has a ceiling, and your traffic does not. At some point, you cannot buy a bigger box. You need more boxes. That is where database scaling begins. It is not just "add another server." It is a series of deliberate trade-offs about what you are willing to sacrifice — consistency, simplicity, or money — to keep your system fast and available. By the end of this, you will know exactly which trade-offs to make and when.
+
+## Why a Single Database Is Not Enough
+
+Imagine a grocery store with one cashier. When there are 5 customers, everything is fine. When there are 50, the line wraps around the store. When there are 500, people leave. You could try to make that one cashier faster — give them a better scanner, a bigger belt, faster hands — but there is a limit to how fast one person can scan groceries. At some point, you need more cashiers.
+
+A single database server is that one cashier. It handles every read and every write. Reads are queries like "show me this user's profile." Writes are operations like "update this user's email." Most applications are read-heavy — for every write, there are 5 to 20 reads. A social media feed is almost entirely reads. A banking transaction system is closer to 50/50.
+
+### Vertical Scaling Hits a Wall
+
+Vertical scaling means upgrading one machine: more CPU cores, more RAM, faster disks, more network bandwidth. It works well up to a point. The problem is that hardware gets exponentially more expensive as you approach the top of the line. A server with 256 GB of RAM costs 4x more than one with 128 GB, but it is not 4x faster. And even the most powerful single machine has hard limits:
+
+- **CPU**: No matter how many cores, there is a maximum number of operations per second
+- **Disk I/O**: Even NVMe SSDs max out at millions of operations per second — and your queries may need billions
+- **Network**: A single network card has a bandwidth ceiling
+- **Memory**: You cannot fit a 10 TB dataset into 1 TB of RAM
+
+Once you hit any of these ceilings, vertical scaling cannot help you anymore. You need to spread the work across multiple machines. That is horizontal scaling, and it is where things get interesting.
+
+### When You Need to Split
+
+You know it is time to scale horizontally when:
+
+- Query latency is rising despite hardware upgrades
+- Your database is consistently above 70% CPU, memory, or disk utilization
+- You are paying premium prices for marginal hardware improvements
+- Your team is spending more time optimizing single-query performance than building features
+- You need high availability — if one machine dies, your entire service goes down
+
+The rest of this post covers every major technique for splitting data across machines, the trade-offs each one requires, and the theoretical framework (the CAP theorem) that explains why you cannot have everything at once.
+
+## Replication: Copying Data Across Machines
+
+Think of replication like making photocopies of an important document and handing them out to multiple people. Now, instead of one person holding the only copy (a single point of failure), three people each have a copy. If one person is busy, you can ask another. If one person loses their copy, the others still have it. That is the core idea: store the same data on multiple machines so you can read from any of them and survive hardware failures.
+
+### Master-Slave (Single Leader)
+
+The most common replication setup: one master node handles all writes, and multiple slave nodes handle reads. The master is the single source of truth. Every write goes to the master first. The master then copies that data to the slaves.
+
+Here is how it works in practice:
+
+1. Your application sends a `UPDATE users SET email = 'new@example.com' WHERE id = 42` query
+2. The query goes to the master, which executes it and writes to its local storage
+3. The master sends the change to each slave
+4. The slaves apply the change to their local copies
+5. Future reads of user 42 can be served by any slave
+
+### Synchronous vs Asynchronous Replication
+
+This is the critical trade-off in replication. In **synchronous replication**, the master waits for all slaves to confirm they received the write before telling the application "write successful." It is safer but slower — your write latency is limited by the slowest slave. In **asynchronous replication**, the master fires off the change to slaves and immediately tells the application "write successful." It is faster, but a slave might not have the latest data yet.
+
+### Replication Lag
+
+In async replication, there is a delay between the master writing data and the slaves catching up. This is called replication lag. Under normal conditions, it might be a few milliseconds. Under heavy load, it could be seconds or even minutes. During that window, a read from a slave might return stale data — the user's old email address instead of the new one.
+
+This is the fundamental tension: do you want fast writes (async, risk stale reads) or guaranteed consistency (sync, slower writes)?
+
+<ReplicationFlowDemo client:visible />
+
+### Multi-Master Replication
+
+In some systems, every node accepts both reads and writes. When a write happens on one node, it propagates to the others. This is more complex because you need conflict resolution — what happens when two people update the same user's email on different nodes at the same time? Most multi-master systems use conflict resolution strategies like "last write wins" (based on timestamps) or application-level merge logic.
+
+Multi-master is useful for geographically distributed systems where you want writes to be fast from any location. But it adds significant complexity.
+
+## Sharding: Splitting Data Across Machines
+
+Replication copies the same data everywhere. Sharding does the opposite: it splits different data onto different machines. Think of a phone book split by first letter — A through C goes on shelf 1, D through F on shelf 2, G through I on shelf 3. Each shelf holds a different slice of the data. No shelf has the complete phone book, but together they do.
+
+Sharding is the primary technique for scaling writes. Since replication copies writes to all nodes, it does not help with write capacity. Sharding distributes writes across machines because each write only goes to one shard.
+
+### Horizontal vs Vertical Partitioning
+
+**Horizontal partitioning** (sharding) splits rows: users 1-1000 on shard 1, users 1001-2000 on shard 2. Each shard has the same schema but different data. **Vertical partitioning** splits columns: user profiles on one database, user preferences on another. It is really just a special case of sharding where the partition key is the column group rather than a row identifier.
+
+### Sharding Strategies
+
+There are three main ways to decide which data goes on which shard:
+
+**Hash-based sharding** applies a hash function to a key (like user ID) and uses the result modulo the number of shards. `hash(user_id) % num_shards = shard_id`. This distributes data evenly but makes range queries expensive — to find "all users with names starting with A", you have to check every shard.
+
+**Range-based sharding** assigns key ranges to shards. Users A-M go to shard 1, N-Z go to shard 2. Range queries are fast (just ask the right shard), but hotspots form if certain ranges are more popular than others. If 80% of your users have names starting with S, shard 2 gets crushed.
+
+**Directory-based sharding** uses a lookup table that maps each key to its shard. A separate service (the directory) tells your application "user 42 is on shard 3." This is the most flexible — you can move individual keys between shards without rehashing everything — but the directory itself becomes a single point of failure and a performance bottleneck.
+
+<ShardingStrategyDemo client:visible />
+
+### The Problems With Sharding
+
+Sharding solves write scalability but introduces new problems:
+
+- **Cross-shard queries**: "Find all orders for users who live in New York" requires querying every shard and merging results. This is slow and complex.
+- **Hotspots**: Uneven data distribution means some shards get more traffic than others. A celebrity joining your platform might send all their fan traffic to one shard.
+- **Rebalancing**: When you add a new shard, you need to move data around. During this migration, some data is on the old shard and some on the new one, making queries even more complicated.
+- **Joins across shards**: If user data is on shard 1 and order data is on shard 2, you cannot do a SQL JOIN. You need two separate queries and application-level merging.
+
+## Other Scaling Techniques
+
+Replication and sharding are the big two, but there are several other techniques that complement them.
+
+### Federation: Split by Function
+
+Instead of splitting one table across machines, federation puts different tables on different machines. The users database lives on one server, products on another, orders on a third. Each server is specialized for its workload. The users database might be read-heavy (profile lookups), while the orders database is write-heavy (placing orders).
+
+Federation is simple to implement — your application just connects to different databases for different data. But cross-database queries (like "show me all orders with user details") require application-level joins, which means more code and more round trips.
+
+### Denormalization: Duplicate to Avoid Joins
+
+In a normalized database, you store each piece of data once. A user's name lives only in the users table. To show it on an order, you JOIN orders with users. In a denormalized database, you copy the user's name into the orders table. No JOIN needed, but now you have to update the name in two places every time it changes.
+
+Denormalization trades consistency for speed. It is extremely common in read-heavy systems. Social media platforms denormalize aggressively — a user's name, profile picture, and handle are copied into millions of posts, comments, and messages so that rendering a feed requires zero JOINs.
+
+### Read Replicas: Dedicated Read-Only Copies
+
+A read replica is a special kind of replication slave whose sole job is handling read queries. The master handles all writes and some reads, while replicas handle the read flood. Your application needs logic to route writes to the master and reads to replicas (or to the master when you need the latest data).
+
+### When to Use Each Technique
+
+| Technique | Solves | Trade-off | Best For |
+|---|---|---|---|
+| Replication | Read scale, high availability | Replication lag, stale reads | Read-heavy workloads |
+| Sharding | Write scale, data size | Complex queries, rebalancing | Write-heavy workloads |
+| Federation | Independent data domains | Cross-domain queries | Multi-service architectures |
+| Denormalization | Read speed (no JOINs) | Write complexity, data duplication | Read-heavy, rarely updated data |
+| Read Replicas | Read load distribution | Stale reads on replicas | High read-to-write ratios |
+
+## The CAP Theorem
+
+In 2000, Eric Brewer proposed a theorem that became the foundation of distributed systems design. It states that a distributed data store can only provide two of three guarantees simultaneously:
+
+- **Consistency (C)**: Every read receives the most recent write. If you write a value, every subsequent read returns that value.
+- **Availability (A)**: Every request receives a response (not an error). The system is always up and responsive.
+- **Partition Tolerance (P)**: The system continues to work despite network failures that prevent communication between nodes.
+
+The key insight: in a distributed system, network partitions are inevitable. Cables get cut, switches fail, routers misbehave. So P is not optional — you must have it. That means you are really choosing between C and A when a partition occurs. You can either:
+
+- **Choose CP**: Block writes until the partition heals, ensuring no inconsistent data. Your system returns errors during partitions.
+- **Choose AP**: Accept writes on both sides of the partition, knowing they might conflict. Your system stays available but might return stale data.
+
+There is also a theoretical CA option — consistency and availability without partition tolerance. This describes a single-node database. If there is only one machine, there are no partitions, so you get both C and A. But the moment you add a second machine, you must choose.
+
+<CapTriangleDemo client:visible />
+
+### Real-World Examples
+
+- **CP systems**: HBase, MongoDB (with majority write concern), ZooKeeper. They block operations during partitions to prevent inconsistency. Used when data correctness is critical — financial systems, inventory management.
+- **AP systems**: Cassandra, DynamoDB, CouchDB. They keep serving reads and writes during partitions, even if some data is stale. Used when availability is critical — shopping carts, social feeds, real-time analytics.
+- **CA systems**: Single-node PostgreSQL, SQLite, Redis (standalone). No partition tolerance needed because there is only one node. Used when your dataset fits on one machine.
+
+## Strong vs Eventual Consistency
+
+The CAP theorem forces a binary choice during partitions: consistent or available. But in practice, consistency is a spectrum, not a switch. There are many levels between "every read is perfect" and "reads might be wildly wrong."
+
+### Strong Consistency
+
+With strong consistency, every read returns the most recent write. No exceptions. This is what you get when you read from the master in a master-slave setup, or when you use synchronous replication. The guarantee is simple: after a write completes successfully, any subsequent read from any node will return that write.
+
+The cost is latency. Every read might need to check with the master, and every write must wait for confirmation from replicas.
+
+### Eventual Consistency
+
+With eventual consistency, the system guarantees that if no new writes are made, eventually all reads will return the same value. "Eventually" might mean milliseconds, seconds, or minutes depending on the system. During that window, different nodes might return different values for the same data.
+
+Think of it like a group chat. When you send a message, some people see it immediately (their phone was online), while others see it a few seconds later (their phone was syncing). Nobody sees wrong data — they just see it at different times. Eventually, everyone has the same messages.
+
+<ConsistencySpectrumDemo client:visible />
+
+### When Each Is Acceptable
+
+- **Strong consistency**: Bank balances, inventory counts, auction bids, password changes. The cost of stale data is high — you do not want two people to withdraw money from the same account simultaneously.
+- **Eventual consistency**: Social media likes, view counts, comment feeds, recommendation lists. The cost of stale data is low — it is fine if a like count is a few seconds behind.
+- **Session consistency**: A user's own writes are always visible to them, but other users might see stale data. This is what most social media platforms use — you see your own new post immediately, but your friends might not see it for a few seconds.
+
+## Quorum: The Middle Ground
+
+What if you want something between strong and eventual consistency? That is where quorum comes in. Quorum lets you tune the trade-off by controlling how many nodes must participate in reads and writes.
+
+The quorum rule is simple: **R + W > N**, where:
+
+- **N** is the total number of replicas
+- **W** is the number of nodes that must acknowledge a write
+- **R** is the number of nodes that must respond to a read
+
+If R + W > N, then every read is guaranteed to overlap with at least one node that has the latest write. Here is why: if W nodes have the latest write, then at most N - W nodes do not. If you read from R nodes and R > N - W (which is the same as R + W > N), then at least one of your R read nodes must be among the W write nodes. So you always get the latest data.
+
+### Tuning for Performance
+
+You can shift the trade-off by adjusting R and W:
+
+- **N=3, W=3, R=1**: Every write goes to all 3 nodes (slow writes), reads only need 1 node (fast reads). Maximize read performance.
+- **N=3, W=1, R=3**: Writes only need 1 node (fast writes), reads query all 3 nodes (slow reads). Maximize write performance.
+- **N=3, W=2, R=2**: Balanced. Every read overlaps with the write set. This is what most systems use as their default.
+
+If R + W {'<='} N, you lose the consistency guarantee. With N=3, W=1, R=1, you might read from a node that did not receive the write.
+
+<QuorumDemo client:visible />
+
+### Quorum in Practice
+
+DynamoDB uses quorum internally. When you configure a table with "strongly consistent reads," it uses R = N (reads from all replicas). With "eventually consistent reads," it uses R = 1 (reads from the nearest replica). Cassandra lets you set consistency levels per-query: `QUORUM` for reads and writes gives you the R + W > N guarantee, while `ONE` and `ALL` give you speed or safety at the extremes.
+
+## Putting It All Together
+
+You now know the full toolkit: replication for read scaling, sharding for write scaling, federation for domain separation, denormalization for read speed, read replicas for load distribution, consistency models for correctness guarantees, and quorum for fine-tuning the trade-offs. Here is how to decide which combination to use.
+
+### Decision Framework
+
+1. **Can one server handle your load?** Start simple. Single database, no replication. Add caching (Redis/Memcached) before anything else. Most applications never need more than this.
+2. **Are reads the bottleneck?** Add read replicas. Route reads to replicas, writes to master. This gives you 3-5x read capacity with minimal complexity.
+3. **Are writes the bottleneck?** Shard your data. Choose a sharding key that distributes writes evenly and aligns with your most common access patterns.
+4. **Do you need both?** Replicate each shard. Now you have N shards, each with M replicas. You get both read and write scaling, at the cost of significant operational complexity.
+5. **Is high availability critical?** Replicate across availability zones (or data centers). Accept eventual consistency for reads during partitions.
+
+### Real-World Patterns
+
+**Instagram** shards by user ID. Each user's data (profile, posts, followers) lives on one shard. This means viewing a user's profile requires hitting exactly one shard — fast and simple. When a shard gets too large, they split it by user ID range.
+
+**Twitter** uses a fan-out-on-write pattern. When a user tweets, the tweet is written to that user's followers' timelines immediately (fan-out on write). For users with millions of followers, they switch to fan-out-on-read — the tweet is stored once, and followers' timelines are assembled when they request their feed.
+
+**Uber** geo-shards by city or region. Ride data for New York lives in one cluster, San Francisco in another. Drivers and riders querying in the same city hit the same cluster. Cross-city queries (like viewing a driver's lifetime history across cities) require querying multiple clusters.
+
+<ReadReplicaDemo client:visible />
+
+## Self-Check
+
+Can you answer these without looking back?
+
+- [ ] What is the difference between replication and sharding?
+- [ ] Why is asynchronous replication faster but riskier than synchronous?
+- [ ] What is replication lag and when does it cause problems?
+- [ ] Name the three sharding strategies and one problem with each.
+- [ ] What does the CAP theorem state? Why is P always required in practice?
+- [ ] Give an example of a CP system and when you would choose it.
+- [ ] What is the difference between strong and eventual consistency?
+- [ ] If N=5, what values of W and R guarantee consistency? Give two examples.
+- [ ] When would you choose denormalization over normalization?
+- [ ] Why does Twitter use fan-out-on-write for most users but fan-out-on-read for celebrities?
