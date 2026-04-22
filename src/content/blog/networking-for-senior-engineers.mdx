@@ -1,0 +1,258 @@
+---
+title: "Networking for Senior Engineers: Everything You Actually Use"
+description: "DNS, TCP, HTTP, TLS, load balancing, caching, firewalls, middleware, and debugging slow APIs. The networking knowledge that separates seniors from juniors -- explained with real work examples and interactive demos."
+date: 2026-04-09
+tags: ["networking", "system-design", "backend", "middleware"]
+---
+
+import OsiModelDemo from '../../components/demos/OsiModelDemo'
+import TcpUdpCompareDemo from '../../components/demos/TcpUdpCompareDemo'
+import TcpHandshakeDemo from '../../components/demos/TcpHandshakeDemo'
+import HttpLifecycleDemo from '../../components/demos/HttpLifecycleDemo'
+import SslTlsDemo from '../../components/demos/SslTlsDemo'
+import DnsResolutionDemo from '../../components/demos/DnsResolutionDemo'
+import NatSimulationDemo from '../../components/demos/NatSimulationDemo'
+import PortExplorerDemo from '../../components/demos/PortExplorerDemo'
+import LoadBalancerDemo from '../../components/demos/LoadBalancerDemo'
+import CacheStrategyDemo from '../../components/demos/CacheStrategyDemo'
+import FirewallRulesDemo from '../../components/demos/FirewallRulesDemo'
+import MiddlewarePipelineDemo from '../../components/demos/MiddlewarePipelineDemo'
+
+## The Big Picture
+
+When a user clicks a link in your app, here's what actually happens:
+
+1. Browser resolves the domain name to an IP address (DNS)
+2. Establishes a TCP connection with a 3-way handshake
+3. Encrypts the connection with TLS
+4. Sends the HTTP request through your load balancer
+5. Your middleware pipeline runs (auth, rate limiting, logging)
+6. Your controller handles the request, reads from cache or database
+7. Response flows back through the same path
+
+Most developers only think about step 6. Seniors understand all 7 -- because when step 2 is slow, or step 4 is misconfigured, or step 5 has a bug, the app breaks and you need to know where to look.
+
+## The OSI Model
+
+The OSI model has 7 layers. Each layer adds headers to your data and handles one responsibility. You rarely think about it directly, but every networking problem maps to a specific layer.
+
+- **Layer 7 (Application)** -- This is where your code lives. HTTP, DNS, SSH.
+- **Layer 4 (Transport)** -- TCP and UDP. Ports live here.
+- **Layer 3 (Network)** -- IP addresses and routing. Routers work here.
+- **Layers 2 and 1** -- Ethernet, MAC addresses, cables. You almost never touch these.
+
+In practice, everyone uses the simplified **TCP/IP model** (4 layers instead of 7). Same idea, fewer boxes.
+
+<OsiModelDemo client:visible />
+
+**Real work example:** Your app can't connect to the database. You ping the IP and it responds. You telnet to port 5432 and it connects. The problem is at Layer 7 -- your ORM is sending wrong auth parameters. If you only knew about "networking is broken," you'd waste hours. Layer thinking narrows it down in minutes.
+
+## TCP vs UDP
+
+Two transport protocols. Pick one per use case.
+
+**TCP** guarantees delivery, ordering, and error correction. The cost: overhead (handshake, acknowledgments, retransmission). Used for everything where correctness matters.
+
+**UDP** sends packets and doesn't care if they arrive. No handshake, no ordering, no retries. Used when speed matters more than reliability.
+
+| Use Case | Protocol | Why |
+|----------|----------|-----|
+| REST APIs | TCP | You need every response intact |
+| Video streaming | UDP | A dropped frame is fine, lag is not |
+| Database connections | TCP | A missing row is not fine |
+| DNS queries | UDP | Fast lookup, retry if no response |
+| Online gaming | UDP | Old position updates are useless |
+| File uploads | TCP | Every byte must arrive correctly |
+
+<TcpUdpCompareDemo client:visible />
+
+**Real work example:** You're building a real-time feature. WebSockets use TCP, so if the connection drops, you get automatic reconnection and ordering. Server-Sent Events also use TCP. If you're building a game server, use UDP with your own reliability layer on top.
+
+## The TCP Handshake
+
+Every TCP connection starts with a 3-way handshake: **SYN** (client says "I want to connect"), **SYN-ACK** (server says "OK, I'm ready"), **ACK** (client says "Let's go"). After that, data flows. When done, a 4-way teardown closes it.
+
+This happens for every HTTP request before HTTP/2 (which multiplexes on one connection). For your API, each new connection costs ~1 round trip (usually 20-100ms depending on distance).
+
+<TcpHandshakeDemo client:visible />
+
+**Real work example:** Your API is slow from another country. The TCP handshake alone takes 150ms. Solution: enable HTTP/2 keep-alive (one connection, multiple requests), or use a CDN with edge servers closer to the user.
+
+## DNS: How Domains Become IPs
+
+DNS is the phonebook of the internet. `api.example.com` becomes `104.21.76.8`. The resolution chain goes: browser cache -> OS cache -> recursive resolver (like 1.1.1.1 or 8.8.8.8) -> root nameserver -> TLD nameserver -> authoritative nameserver.
+
+A DNS lookup typically takes 20-120ms. If it misses all caches, it can take 200ms+.
+
+<DnsResolutionDemo client:visible />
+
+**Real work example:** Your staging API resolves in 5ms (cached), but your production API takes 180ms. You dig into it and find DNS is hitting the authoritative nameserver every time because the TTL is set to 0. Fix: increase TTL to 300 (5 minutes) and add a local DNS resolver.
+
+## HTTP Deep Dive
+
+HTTP is stateless request/response. Every API call you write is one of these methods:
+
+- **GET** -- Read. Safe and idempotent. Same request always returns same result.
+- **POST** -- Create. Not idempotent. Two identical POSTs create two resources.
+- **PUT** -- Replace. Idempotent. Send it 10 times, result is the same as sending once.
+- **PATCH** -- Partial update. Not idempotent (depends on implementation).
+- **DELETE** -- Remove. Idempotent. Deleting something twice is the same as deleting once.
+
+Status codes you'll see daily: **200** (OK), **201** (Created), **204** (No Content), **301** (Permanent redirect), **400** (Bad request), **401** (Unauthenticated), **403** (Unauthorized), **404** (Not found), **429** (Rate limited), **500** (Server error), **502** (Bad gateway -- your reverse proxy can't reach the app), **503** (Service unavailable), **504** (Gateway timeout -- the app took too long).
+
+<HttpLifecycleDemo client:visible />
+
+**Real work example:** Your mobile app gets 400 errors on a specific endpoint. You check the request body and it looks correct. The issue is the Content-Type header -- the app sends `text/plain` but your API expects `application/json`. A 5-minute fix, but only if you know HTTP headers.
+
+## SSL/TLS: How HTTPS Actually Works
+
+TLS encrypts everything between client and server. TLS 1.3 (the current standard) completes the handshake in 1 round trip.
+
+The key insight: the server's private key never leaves the server. The client and server independently derive a shared secret using Diffie-Hellman key exchange. Even if someone captures all traffic, they can't decrypt it without that secret.
+
+What TLS prevents:
+- **Man-in-the-middle** -- attackers can't impersonate your server (certificate verification)
+- **Eavesdropping** -- captured packets are unreadable (AES-256 encryption)
+- **Tampering** -- modified packets are detected and rejected (authentication tags)
+
+<SslTlsDemo client:visible />
+
+**Real work example:** Your staging environment uses a self-signed certificate and your API client refuses to connect. You don't disable TLS (that's what juniors do). You add the CA certificate to the client's trust store. In production, you use Let's Encrypt with auto-renewal via Certbot.
+
+## NAT: Why Your Local Dev Doesn't Match Production
+
+Your laptop has IP `192.168.1.42` (private). The internet can't route to private IPs. Your router translates it to a public IP (like `203.0.113.5`) using NAT (Network Address Translation).
+
+This is why `localhost:3000` works on your machine but not on your phone -- your phone is on a different network, and there's no NAT forwarding set up.
+
+<NatSimulationDemo client:visible />
+
+**Real work example:** You're running a WebSocket server locally and it works fine. In production, connections drop after 30 seconds. The AWS load balancer has a 60-second idle timeout, and the NAT gateway has a 30-second TCP timeout. Fix: enable TCP keep-alive packets every 15 seconds.
+
+## Ports: Which Application Gets the Data
+
+An IP identifies a machine. A port identifies an application on that machine. When data arrives at `104.21.76.8:443`, port 443 tells the OS to hand it to the HTTPS server.
+
+Common ports you'll encounter: **22** (SSH), **80** (HTTP), **443** (HTTPS), **3000** (dev server), **3306** (MySQL), **5432** (PostgreSQL), **6379** (Redis), **8080** (alternative HTTP).
+
+Client ports (ephemeral ports) are random (49152-65535). That's why you see `52341 -> 443` in logs -- your browser opened a random port to talk to the server on port 443.
+
+<PortExplorerDemo client:visible />
+
+**Real work example:** Your app can't connect to PostgreSQL. You check the host, username, password -- all correct. The issue: your Docker container maps port 5432 internally, but you're trying to connect to 5432 on the host which has nothing running. Fix: map the container port with `docker run -p 5432:5432`.
+
+## Load Balancing
+
+One server can't handle all traffic. A load balancer distributes requests across multiple servers. You use one even with 2 servers.
+
+**Algorithms:**
+- **Round Robin** -- cycles through servers equally. Simple, works when servers are identical.
+- **Least Connections** -- sends to the server with fewest active requests. Better when requests take different times.
+- **IP Hash** -- same client always hits the same server. Useful for session stickiness (but use shared sessions instead).
+- **Weighted** -- stronger servers get more traffic. Used when servers have different specs.
+
+<LoadBalancerDemo client:visible />
+
+**Real work example:** Your API has 3 servers behind Nginx. Users report intermittent errors. You check the logs and find Server C is returning 500s because it ran out of memory. With least connections balancing, traffic still routed to it. Fix: add health checks so the load balancer removes unhealthy servers from the pool. In Nginx: `max_fails=3 fail_timeout=30s`.
+
+## Caching
+
+Caching is the most impactful performance optimization. Every layer can cache:
+
+1. **Browser cache** -- controlled by `Cache-Control` and `ETag` headers. Free, zero server cost.
+2. **CDN cache** -- Cloudflare, Fastly. Caches at edge locations worldwide. 5-20ms latency.
+3. **Application cache** -- Redis, Memcached. In-memory, sub-millisecond reads. You control the TTL.
+4. **Database query cache** -- some databases cache query results. Usually not enough -- use Redis instead.
+
+The cache hierarchy: browser -> CDN -> Redis -> database. Each miss falls through to the next layer.
+
+<CacheStrategyDemo client:visible />
+
+**Real work example:** Your `/api/products` endpoint hits the database every time and takes 200ms. You add Redis caching with a 5-minute TTL. Latency drops to 2ms. Cache invalidation: when a product is updated, you delete the cache key (`DEL products:all`) and the next request rebuilds it. Simple pattern: cache-aside.
+
+## CDN: Edge Caching
+
+A CDN (Content Delivery Network) puts your content on servers around the world. A user in Tokyo hits a CDN node in Tokyo, not your origin server in Virginia. Latency drops from 200ms to 20ms.
+
+CDNs cache static assets (JS, CSS, images) and can also cache API responses if you set the right headers. Cloudflare, Fastly, and AWS CloudFront are the big ones.
+
+**Real work example:** Your product images load from `images.example.com` hosted in Virginia. Users in Europe see 800ms load times. You put Cloudflare in front and set `Cache-Control: public, max-age=86400`. Images load from the nearest edge. Load time drops to 40ms.
+
+## Firewalls
+
+A firewall filters traffic based on rules: allow or deny, by port, protocol, and source IP. Every cloud provider has one (AWS Security Groups, GCP Firewall Rules).
+
+Default posture: deny everything, allow only what you need.
+
+| Rule | Port | Why |
+|------|------|-----|
+| Allow TCP 443 | 443 | HTTPS traffic (your app) |
+| Allow TCP 80 | 80 | HTTP (redirect to HTTPS) |
+| Deny TCP 22 from internet | 22 | SSH only from VPN/bastion |
+| Allow TCP 5432 from internal | 5432 | DB only reachable from app servers |
+| Deny TCP 3306 from internet | 3306 | MySQL never exposed publicly |
+
+<FirewallRulesDemo client:visible />
+
+**Real work example:** Your production database has port 5432 open to `0.0.0.0/0` (the entire internet). Someone brute-forces the password and dumps your users table. Fix: restrict the security group to only allow connections from your app server's IP. Never expose database ports to the internet.
+
+## Middleware: Where Networking Meets Your Code
+
+Middleware is code that runs before (and after) your request handler. It's the bridge between raw networking and your application logic.
+
+Every web framework has middleware. The order matters -- CORS runs before auth (because the preflight request has no auth headers), auth runs before your controller (because you need to know who the user is).
+
+Common middleware you'll write or configure:
+
+| Middleware | Purpose | Real Work Example |
+|-----------|---------|-------------------|
+| CORS | Allow cross-origin requests | Your React app on `app.com` calls API on `api.com` |
+| Rate Limiter | Prevent abuse | Limit to 100 req/min per IP, return 429 when exceeded |
+| Auth (JWT) | Identify the user | Extract token from header, set `current_user` |
+| Request Logger | Observability | Log method, path, status, response time for monitoring |
+| Strong Params | Input validation | Only allow `name` and `email` on user creation |
+| CSRF | Prevent cross-site forgery | Verify token on POST/PUT/DELETE requests |
+| Error Handler | Catch exceptions | Return 500 with error ID instead of stack traces |
+
+<MiddlewarePipelineDemo client:visible />
+
+**Real work example:** Your API returns 500 errors but you can't reproduce them locally. You add request logging middleware that logs the full request (headers, body, params) with a unique request ID. You correlate the request ID with your error tracker. Turns out a mobile client is sending `Content-Type: text/xml` and your JSON parser crashes. Add a middleware that validates Content-Type before it reaches the controller.
+
+## Debugging Slow APIs
+
+When your API is slow, check each layer in order:
+
+| Layer | Check | Tool |
+|-------|-------|------|
+| DNS | Is resolution slow? | `dig api.example.com`, check TTL |
+| TCP | Is the handshake slow? | `curl -w "%{time_connect}" -o /dev/null -s URL` |
+| TLS | Is the handshake slow? | `curl -w "%{time_appconnect}" -o /dev/null -s URL` |
+| Load Balancer | Is it healthy? | Check health endpoints, connection counts |
+| Middleware | Is something blocking? | Add timing logs around each middleware |
+| Cache | Are you hitting the DB? | Check Redis hit rate, cache TTLs |
+| Database | Is the query slow? | `EXPLAIN ANALYZE`, check indexes |
+| Network | Is bandwidth the issue? | Check response size, enable gzip |
+
+**The senior move:** Add a timing header to every response (`X-Response-Time: 142ms`) and log the breakdown (DNS: 5ms, TCP: 28ms, middleware: 12ms, DB: 89ms, render: 8ms). When someone says "the API is slow," you immediately know where.
+
+## Quick Reference
+
+**Latency numbers every senior should know:**
+
+| Operation | Typical Latency |
+|-----------|----------------|
+| DNS cache hit | \&lt;1ms |
+| DNS cache miss | 20-120ms |
+| TCP handshake (same region) | 10-30ms |
+| TCP handshake (cross-continent) | 100-200ms |
+| TLS handshake | 30-50ms |
+| Redis read | \&lt;1ms |
+| PostgreSQL query (indexed) | 1-10ms |
+| PostgreSQL query (no index) | 100-1000ms+ |
+| CDN cache hit | 5-20ms |
+| API response (cached) | 2-5ms |
+| API response (DB hit) | 50-500ms |
+
+**Idempotency cheat sheet:** GET and PUT are idempotent. POST is not. DELETE is idempotent. PATCH depends on implementation. If your payment API uses POST, add an idempotency key header so retrying a failed payment doesn't double-charge.
+
+**Timeout defaults you should set:** DNS: 5s, TCP connect: 10s, TLS: 10s, HTTP request: 30s (API), 300s (file upload). Always set timeouts. A connection without a timeout is a connection that hangs forever.

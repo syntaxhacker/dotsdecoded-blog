@@ -1,0 +1,762 @@
+---
+title: "Rails Testing: From Unit Tests to System Tests"
+description: "Testing in Rails keeps your app reliable as it grows. Learn TDD, RSpec, Capybara, factories, mocks, stubs, system tests, and how to test Rails APIs — with interactive demos."
+date: 2026-04-05
+tags: ["ruby", "rails", "testing", "tdd", "rspec"]
+---
+
+import TestPyramidDemo from '../../components/demos/TestPyramidDemo'
+import RSpecDemo from '../../components/demos/RSpecDemo'
+import CapybaraDemo from '../../components/demos/CapybaraDemo'
+import MockStubDemo from '../../components/demos/MockStubDemo'
+
+## Why Test?
+
+Imagine you are a trapeze artist performing 30 feet above the ground. Every move is precise, rehearsed, and dangerous. Now imagine doing that routine without a safety net. One slip and the show is over.
+
+Your Rails application is that trapeze act. Every code change is a new maneuver. Without tests, you are performing without a net. A single regression — a broken validation, a misconfigured route, a forgotten nil check — can bring down production. Tests are that safety net. They catch you when something goes wrong.
+
+Testing gives you three things:
+
+1. **Confidence** — Ship code knowing nothing is broken. Run your test suite, see all green, deploy.
+2. **Documentation** — Tests describe how your code is supposed to behave. A new developer can read the test suite and understand the application faster than reading the code itself.
+3. **Refactoring ability** — Want to restructure a controller? Extract a service object? Rename a model? Your tests will tell you immediately if you broke something.
+
+The cost of not testing is not "we will fix bugs later." It is "we will spend more time debugging in production than we would have spent writing tests." Every untested line of code is technical debt that compounds over time.
+
+## The Test Pyramid
+
+Before we dive into the details, you need to understand the shape of a healthy test suite. It is not a flat slab — it is a pyramid. Mike Cohn coined the term "test automation pyramid" and it applies directly to Rails:
+
+- **Unit tests** form the wide base — many tests, each fast, each testing one small piece
+- **Integration tests** form the middle layer — fewer tests, each testing how parts work together
+- **System tests** form the narrow top — the fewest tests, each testing the full application through a browser
+
+The pyramid is not a rigid rule. It is a guideline. You want lots of fast tests at the bottom and fewer slow tests at the top. If you invert the pyramid (many system tests, few unit tests), your suite will be slow and flaky. If you only have unit tests, you will miss integration bugs.
+
+<TestPyramidDemo client:visible />
+
+## Test-Driven Development
+
+Test-Driven Development (TDD) flips the traditional workflow on its head. Instead of writing code first and tests later, you write the test first, watch it fail, then write the minimum code to make it pass. This is the **Red-Green-Refactor** cycle:
+
+1. **Red** — Write a test that describes the behavior you want. Run it. It fails because the code does not exist yet.
+2. **Green** — Write the simplest code that makes the test pass. Do not over-engineer. Do not add features the test does not ask for.
+3. **Refactor** — Clean up the code. Rename variables, extract methods, improve structure. The tests protect you while you refactor.
+
+Think of it like drawing the blueprint before building the house. The blueprint (test) describes exactly what you want. Then you build to match the blueprint. If the blueprint says "three windows on the south wall," you do not add a fourth window just because you feel like it.
+
+Here is what TDD looks like for a Rails `User` model:
+
+```
+# Step 1: RED — write the test first
+test "user requires an email" do
+  user = User.new(password: "secret")
+  assert_not user.valid?
+end
+
+# Run the test. It fails. Good.
+
+# Step 2: GREEN — add the validation
+class User < ApplicationRecord
+  validates :email, presence: true
+end
+
+# Run the test. It passes. Good.
+
+# Step 3: REFACTOR — clean up, add more tests
+test "user requires a unique email" do
+  User.create!(email: "taken@example.com", password: "secret")
+  dup = User.new(email: "taken@example.com", password: "secret")
+  assert_not dup.valid?
+end
+
+# Add uniqueness validation. Repeat.
+```
+
+TDD changes how you design code. When you write the test first, you are forced to think about the interface before the implementation. "How do I want this method to be called?" "What arguments does it take?" "What does it return?" These questions get answered before a single line of production code exists. The result is simpler, more focused code because you only build what the tests demand.
+
+### When TDD Helps (and When It Does Not)
+
+TDD is most valuable for:
+- Business logic with clear rules (calculations, validations, state machines)
+- Public APIs that other code depends on
+- Complex algorithms where edge cases are easy to miss
+
+TDD is less useful for:
+- Exploratory prototyping where the design is still evolving
+- UI layout and styling (use visual review instead)
+- Simple CRUD operations where the framework does most of the work
+
+The goal is not 100% TDD for every line of code. The goal is to use TDD where it gives you the most value and skip it where it adds friction without benefit.
+
+## Unit, Functional, and Integration Tests
+
+Rails historically shipped with three distinct test types, each at a different level of the stack:
+
+### Unit Tests (Model Tests)
+
+Unit tests focus on a single piece of code in isolation. In Rails, this usually means testing a model. They are the fastest tests in your suite because they do not involve routing, controllers, or HTTP.
+
+What you test:
+- Validations (presence, uniqueness, format, length)
+- Callbacks (before_save, after_create)
+- Custom instance methods (formatting, calculations)
+- Class methods (scopes, finders)
+- Business logic
+
+```
+test "full name returns first and last combined" do
+  user = User.new(first_name: "Ada", last_name: "Lovelace")
+  assert_equal "Ada Lovelace", user.full_name
+end
+
+test "premium users get a 20% discount" do
+  order = Order.new(total: 100, user: users(:premium))
+  assert_equal 80, order.discounted_total
+end
+```
+
+### Functional Tests (Controller Tests)
+
+Functional tests exercise a single controller action. They verify that the controller processes the request correctly, sets the right instance variables, and renders the expected template or redirects to the expected path.
+
+What you test:
+- HTTP status codes (200, 302, 404, 422)
+- Assigns and instance variables
+- Redirects
+- Flash messages
+
+```
+test "should get index" do
+  get users_url
+  assert_response :success
+  assert assigns(:users).present?
+end
+
+test "should redirect when not logged in" do
+  get dashboard_url
+  assert_redirected_to new_session_url
+end
+```
+
+### Integration Tests
+
+Integration tests (also called request tests) exercise multiple pieces of your application together. They make an HTTP request and verify the full response, including routing, controller, model, and view layers.
+
+What you test:
+- Full request/response cycles
+- Multiple controllers working together
+- Authentication flows
+- API endpoints
+
+```
+test "user can sign up and see dashboard" do
+  post "/users", params: {
+    user: { email: "new@example.com", password: "secret" }
+  }
+  assert_response :created
+
+  get "/dashboard"
+  assert_response :success
+  assert_select "h1", "Welcome"
+end
+```
+
+### The Car Analogy
+
+Think of testing a car:
+
+- **Unit test** = testing the engine in isolation on a bench. Does it start? Does it produce the right horsepower? You do not need the rest of the car to test this.
+- **Functional test** = testing the steering wheel. Turn it left, verify the wheels turn left. The engine does not need to be running.
+- **Integration test** = test driving the car. Start the engine, steer, brake, accelerate. Everything works together as a system.
+
+Each level catches different bugs. An engine that produces the right horsepower on a bench might still fail when connected to the transmission. That is why you need all three levels.
+
+## RSpec: Expressive Testing
+
+Rails ships with Minitest by default. It works fine. But many Rails teams prefer **RSpec** because it reads like English. Compare the same test written both ways:
+
+```
+# Minitest
+class UserTest < ActiveSupport::TestCase
+  test "user is invalid without email" do
+    user = User.new(password: "secret")
+    assert_not user.valid?
+    assert_includes user.errors[:email], "can't be blank"
+  end
+end
+
+# RSpec
+RSpec.describe User, type: :model do
+  it "is invalid without email" do
+    user = User.new(password: "secret")
+    expect(user).not_to be_valid
+    expect(user.errors[:email]).to include("can't be blank")
+  end
+end
+```
+
+Both do the same thing. The RSpec version reads more like a sentence: "expect user not to be valid." This readability becomes valuable when your test suite grows to hundreds or thousands of tests.
+
+### The RSpec Structure
+
+RSpec organizes tests using a nested structure:
+
+- **`describe`** groups tests by the thing being tested (a class, a method, a feature)
+- **`context`** groups tests by a condition (when logged in, when the user is admin, when the record is invalid)
+- **`it`** defines a single test case (the actual expectation)
+- **`before`** sets up state before each test (create records, set variables)
+
+```
+RSpec.describe User, type: :model do
+  describe "validations" do
+    context "when email is missing" do
+      it "is invalid" do
+        user = User.new(password: "secret")
+        expect(user).not_to be_valid
+      end
+    end
+
+    context "when email is present" do
+      it "is valid" do
+        user = User.new(email: "test@example.com", password: "secret")
+        expect(user).to be_valid
+      end
+    end
+  end
+
+  describe "#full_name" do
+    it "combines first and last name" do
+      user = User.new(first_name: "Ada", last_name: "Lovelace")
+      expect(user.full_name).to eq("Ada Lovelace")
+    end
+  end
+end
+```
+
+### `let` and `subject`
+
+RSpec provides `let` for memoized helper methods and `subject` for the thing being tested. Both are lazy-evaluated — they run the first time they are referenced, then cache the result for the rest of the test:
+
+```
+RSpec.describe User, type: :model do
+  subject(:user) { User.new(email: "test@example.com", password: "secret") }
+
+  it "is valid" do
+    expect(user).to be_valid
+  end
+
+  it "has an email" do
+    expect(user.email).to eq("test@example.com")
+  end
+end
+```
+
+`subject(:user)` creates a variable `user` that is available in every `it` block. Each test gets a fresh instance because `let`/`subject` are re-evaluated per test.
+
+### Common Matchers
+
+RSpec comes with a rich set of matchers:
+
+| Matcher | What it checks |
+|---------|---------------|
+| `expect(x).to eq(y)` | Equality (==) |
+| `expect(x).to be_truthy` | Truthy value |
+| `expect(x).to be_nil` | nil |
+| `expect(x).to include(y)` | Collection includes y |
+| `expect(x).to raise_error(ErrorClass)` | Raises specific error |
+| `expect { ... }.to change { Model.count }.by(1)` | Count changes by N |
+| `expect(response).to have_http_status(200)` | HTTP status code |
+
+<RSpecDemo client:visible />
+
+## Capybara: Simulating the Browser
+
+Unit and integration tests are fast, but they do not interact with your application the way a real user does. A real user clicks buttons, fills in forms, navigates between pages, and sees rendered HTML. **Capybara** lets you simulate all of that in a test.
+
+Capybara is a Ruby gem that drives a browser (or a browser-like environment) from your test code. You write Ruby code that mimics user actions:
+
+```
+visit "/articles/new"
+fill_in "Title", with: "My First Post"
+fill_in "Body", with: "This is the content of my post."
+click_button "Create Article"
+
+expect(page).to have_text("Article was successfully created.")
+expect(page).to have_current_path(article_path(Article.last))
+```
+
+Each Capybara method maps to a real browser action:
+
+| Method | What it does |
+|--------|-------------|
+| `visit(path)` | Navigate to a URL |
+| `fill_in(label, with: value)` | Type into a text field |
+| `select(option, from: label)` | Choose from a dropdown |
+| `check(label)` | Check a checkbox |
+| `click_button(label)` | Click a button |
+| `click_link(text)` | Click a link |
+| `have_text(text)` | Assert text appears on the page |
+| `have_current_path(path)` | Assert the current URL |
+
+### Drivers
+
+Capybara supports different drivers, each with different tradeoffs:
+
+- **Rack::Test** — Fastest. No real browser. Simulates HTTP requests. Cannot test JavaScript.
+- **Selenium** — Drives a real browser (Chrome, Firefox). Supports JavaScript. Slower. Requires a browser binary.
+- **Playwright** — Modern alternative to Selenium. Faster, more reliable. Supports multiple browsers.
+
+For most applications, the default setup in Rails (Selenium with Chrome headless) works well. Use `Rack::Test` for simple tests that do not need JavaScript and Selenium for tests that need it.
+
+### Capybara Best Practices
+
+1. **Use meaningful selectors** — `fill_in "Email"` is better than `find("#user_email").set("...")` because it reads like English and survives markup changes.
+2. **Wait for async operations** — Capybara automatically waits for elements to appear (up to `Capybara.default_max_wait_time`, which defaults to 2 seconds). This handles AJAX requests gracefully.
+3. **Avoid `page.html`** — Do not assert on raw HTML. Use `have_text`, `have_selector`, and other semantic matchers.
+4. **Keep system tests thin** — Test the happy path and a few error cases. Do not test every validation through the browser (that is what model tests are for).
+
+<CapybaraDemo client:visible />
+
+## Fixtures and Factories
+
+Tests need data. You need users, articles, comments, orders — objects that exist in the database so your tests can operate on them. Rails provides two main approaches: **fixtures** and **factories**.
+
+### Fixtures
+
+Fixtures are YAML files that define static test data. Rails generates them automatically when you create a model:
+
+```yaml
+# test/fixtures/users.yml
+alice:
+  email: alice@example.com
+  password_digest: <%= BCrypt::Password.create("secret") %>
+
+bob:
+  email: bob@example.com
+  password_digest: <%= BCrypt::Password.create("secret") %>
+```
+
+In your tests, you access fixtures by name:
+
+```
+test "can find alice" do
+  alice = users(:alice)
+  assert_equal "alice@example.com", alice.email
+end
+```
+
+Fixtures are simple and fast. They are loaded once per test run and inserted into the database before each test using a transaction rollback. But they have drawbacks:
+
+- Changing a fixture affects every test that uses it
+- Relationships between fixtures are rigid
+- You cannot easily create variations ("alice but with admin role")
+- Large fixture files become hard to maintain
+
+### Factories (FactoryBot)
+
+**FactoryBot** (formerly FactoryGirl) solves these problems. A factory is a Ruby template that defines how to create an object:
+
+```
+# spec/factories/users.rb
+FactoryBot.define do
+  factory :user do
+    sequence(:email) { |n| "user#{n}@example.com" }
+    password { "password123" }
+    first_name { "Test" }
+    last_name { "User" }
+
+    trait :admin do
+      role { "admin" }
+    end
+
+    trait :premium do
+      subscribed { true }
+      subscription_end { 1.year.from_now }
+    end
+  end
+end
+```
+
+Using factories in tests:
+
+```
+it "creates a basic user" do
+  user = create(:user)
+  expect(user.email).to be_present
+end
+
+it "creates an admin user" do
+  admin = create(:user, :admin)
+  expect(admin.role).to eq("admin")
+end
+
+it "creates a premium user with custom email" do
+  user = create(:user, :premium, email: "premium@example.com")
+  expect(user.subscribed).to be true
+  expect(user.email).to eq("premium@example.com")
+end
+```
+
+### Traits
+
+Traits are the killer feature of factories. They let you define reusable variations. Instead of creating separate factories for `admin_user`, `premium_user`, `suspended_user`, you define traits on a single factory and combine them:
+
+```
+create(:user, :admin, :premium)
+create(:user, :suspended)
+create(:user, email: "custom@example.com")
+```
+
+### The Analogy
+
+- **Fixtures** are like mannequins in a clothing store. They are always in the same pose, wearing the same outfit. Good for display, bad if you need variety.
+- **Factories** are like 3D printers. You define a template, and each time you print, you can customize the output. Need a red shirt instead of blue? Need an extra pocket? No problem.
+
+Most modern Rails teams use FactoryBot. It is more flexible, more expressive, and scales better as your test suite grows.
+
+## Test Runners
+
+A test runner is the program that discovers, loads, and executes your tests. Rails supports two primary test frameworks, each with its own runner.
+
+### Minitest (Rails Default)
+
+Minitest is built into Ruby and ships with Rails. You run tests with:
+
+```bash
+# Run all tests
+bin/rails test
+
+# Run a specific file
+bin/rails test test/models/user_test.rb
+
+# Run a specific test by line number
+bin/rails test test/models/user_test.rb:15
+
+# Run tests matching a pattern
+bin/rails test test/models/*_test.rb
+
+# Run with verbose output
+bin/rails test --verbose
+
+# Run only failing tests
+bin/rails test --only-failures
+```
+
+Minitest is fast to start with because it requires no additional gems. The output is minimal — dots for passing tests, `F` for failures, `E` for errors.
+
+### RSpec
+
+RSpec requires adding `rspec-rails` to your Gemfile. Tests live in `spec/` instead of `test/`:
+
+```bash
+# Run all specs
+bundle exec rspec
+
+# Run a specific file
+bundle exec rspec spec/models/user_spec.rb
+
+# Run a specific test by line number
+bundle exec rspec spec/models/user_spec.rb:15
+
+# Run specs matching a pattern
+bundle exec rspec spec/models/
+
+# Run with documentation format (reads like English)
+bundle exec rspec --format documentation
+
+# Run only failing specs
+bundle exec rspec --only-failures
+
+# Run with fail-fast (stop on first failure)
+bundle exec rspec --fail-fast
+```
+
+### Useful Flags
+
+Both runners share common flags:
+
+| Flag | What it does |
+|------|-------------|
+| `--fail-fast` | Stop on first failure |
+| `--only-failures` | Re-run only previously failing tests |
+| `--seed <number>` | Set random seed for reproducible ordering |
+| `-j <count>` | Run tests in parallel (Minitest parallelize) |
+
+### Parallel Testing
+
+Rails 6+ supports parallel test execution with `parallelize`:
+
+```
+class ActiveSupport::TestCase
+  parallelize(workers: :number_of_processors)
+end
+```
+
+This splits your test files across multiple processes. Each process gets its own database schema, so tests do not interfere with each other. On an 8-core machine, your test suite runs roughly 8x faster (limited by the slowest file).
+
+### Watching for Changes
+
+Tools like `guard` and `zeus` can watch your files and run only the relevant tests when something changes. Rails 7 also added `bin/rails test` with file watching via `--watch`. This gives you near-instant feedback during development without running the entire suite.
+
+## Mocks and Stubs
+
+Sometimes the code you are testing depends on something external: an API call, an email service, a third-party payment gateway. You do not want your tests to actually charge a credit card every time they run. That is where **test doubles** come in — objects that stand in for real dependencies.
+
+### Stubs
+
+A stub replaces a method with a canned response. The method returns what you tell it to, regardless of what arguments you pass. Stubs are about **providing data**, not verifying behavior.
+
+```
+# Stub: replace the payment gateway with a fake
+allow(PaymentGateway).to receive(:charge)
+  .and_return({ id: "ch_abc", status: "succeeded" })
+
+# Now when we call charge, it returns our fake response
+result = PaymentGateway.charge(50_00, "tok_1234")
+expect(result[:status]).to eq("succeeded")
+```
+
+The stub does not care whether `charge` was called once, twice, or not at all. It just returns the canned response when asked.
+
+### Mocks
+
+A mock is a stub that also verifies the interaction. It checks that the method was called, with the right arguments, the right number of times. Mocks are about **verifying behavior**, not just providing data.
+
+```
+# Mock: verify that charge was called correctly
+expect(PaymentGateway).to receive(:charge)
+  .with(50_00, "tok_1234")
+  .and_return({ id: "ch_abc", status: "succeeded" })
+
+PaymentProcessor.process(order)
+# If charge was NOT called with those exact arguments, the test fails
+```
+
+The mock verifies three things:
+1. `charge` was called at all
+2. It was called with `50_00` and `"tok_1234"`
+3. It was called the expected number of times (default: exactly once)
+
+### When to Mock (and When Not To)
+
+**Do mock/stub when:**
+- The dependency is external (payment APIs, email services, third-party webhooks)
+- The dependency is slow (file system, network calls, database queries in unit tests)
+- You want to isolate the code under test from its collaborators
+
+**Do not mock when:**
+- The object you are mocking is simple and fast (like an ActiveRecord model in an integration test)
+- You are hiding real bugs by stubbing out the exact code that has the bug
+- Your tests become so coupled to the implementation that every refactor breaks them
+
+A good rule of thumb: mock at the boundary of your system (external APIs, services) and avoid mocking internal objects (models, controllers). If you mock everything, your tests pass but your application does not work.
+
+<MockStubDemo client:visible />
+
+## Testing Rails APIs
+
+Rails APIs are tested similarly to HTML controllers, but instead of asserting on rendered HTML, you assert on JSON responses.
+
+### Request Tests
+
+The most common approach for API testing is request tests:
+
+```
+# test/integration/api/v1/articles_test.rb
+require "test_helper"
+
+class Api::V1::ArticlesTest < ActionDispatch::IntegrationTest
+  test "returns a list of articles" do
+    Article.create!(title: "First", body: "Content")
+    Article.create!(title: "Second", body: "Content")
+
+    get "/api/v1/articles"
+    assert_response :success
+
+    json = JSON.parse(response.body)
+    assert_equal 2, json.size
+    assert_equal "First", json.first["title"]
+  end
+
+  test "creates an article with valid params" do
+    post "/api/v1/articles", params: {
+      article: { title: "New Post", body: "Body text" }
+    }, as: :json
+
+    assert_response :created
+    json = JSON.parse(response.body)
+    assert_equal "New Post", json["title"]
+    assert json["id"].present?
+  end
+
+  test "returns 422 with invalid params" do
+    post "/api/v1/articles", params: {
+      article: { title: "", body: "" }
+    }, as: :json
+
+    assert_response :unprocessable_entity
+    json = JSON.parse(response.body)
+    assert_includes json["errors"], "Title can't be blank"
+  end
+end
+```
+
+### Authentication
+
+API tests often need authentication. Use your test helpers to generate tokens:
+
+```
+test "returns 401 without auth token" do
+  get "/api/v1/profile"
+  assert_response :unauthorized
+end
+
+test "returns profile with valid token" do
+  user = users(:alice)
+  token = JwtService.encode(user_id: user.id)
+
+  get "/api/v1/profile", headers: {
+    "Authorization" => "Bearer #{token}"
+  }
+  assert_response :success
+  assert_equal user.email, JSON.parse(response.body)["email"]
+end
+```
+
+### Versioning
+
+If your API is versioned, test each version independently:
+
+```
+# Test v1
+get "/api/v1/articles"
+
+# Test v2 (may return different fields)
+get "/api/v2/articles"
+```
+
+Keep API tests focused on the contract: the shape of the request, the shape of the response, and the HTTP status codes. Your model tests handle business logic. Your API tests handle the interface.
+
+## System Tests
+
+System tests are the top of the test pyramid. They exercise your entire application stack — routing, controllers, models, views, JavaScript — through a real browser driven by Capybara. Rails 5.1+ ships with built-in system test support.
+
+### Writing a System Test
+
+System tests live in `test/system/` (Minitest) or `spec/system/` (RSpec):
+
+```
+# test/system/user_signs_up_test.rb
+require "application_system_test_case"
+
+class UserSignsUpTest < ApplicationSystemTestCase
+  driven_by :selenium, using: :headless_chrome
+
+  test "user can sign up" do
+    visit new_user_registration_path
+
+    fill_in "Email", with: "new@example.com"
+    fill_in "Password", with: "securepassword"
+    click_button "Sign Up"
+
+    assert_text "Welcome! You have signed up successfully."
+    assert_current_path root_path
+  end
+
+  test "sign up shows errors for invalid input" do
+    visit new_user_registration_path
+
+    fill_in "Email", with: "not-an-email"
+    fill_in "Password", with: "abc"
+    click_button "Sign Up"
+
+    assert_text "Email is invalid"
+    assert_text "Password is too short"
+  end
+end
+```
+
+### System Test Configuration
+
+Rails generates an `ApplicationSystemTestCase` that configures the browser driver:
+
+```
+class ApplicationSystemTestCase < ActionDispatch::SystemTesting::TestCase
+  driven_by :selenium, using: :headless_chrome, screen_size: [1400, 1400]
+end
+```
+
+Options for `driven_by`:
+- `:selenium` with `:headless_chrome` — Chrome in headless mode (default, good for CI)
+- `:selenium` with `:chrome` — Chrome with visible window (good for debugging)
+- `:rack_test` — No JavaScript support, but fastest
+
+### JavaScript Testing
+
+System tests with Selenium can test JavaScript behavior:
+
+```
+test "search filters articles in real-time" do
+  Article.create!(title: "Ruby Basics", body: "Learn Ruby")
+  Article.create!(title: "Python Basics", body: "Learn Python")
+
+  visit articles_path
+  fill_in "Search", with: "Ruby"
+
+  assert_text "Ruby Basics"
+  assert_no_text "Python Basics"
+end
+```
+
+This test fills in a search field and verifies that JavaScript filters the article list in real-time. No stubbing, no faking — a real browser running real JavaScript against your real application.
+
+### Screenshot on Failure
+
+Rails can automatically capture a screenshot when a system test fails, which is invaluable for debugging:
+
+```
+class ApplicationSystemTestCase < ActionDispatch::SystemTesting::TestCase
+  driven_by :selenium, using: :headless_chrome
+
+  def after_teardown
+    super
+    take_screenshot if failed?
+  end
+end
+```
+
+Failed tests save screenshots to `tmp/screenshots/` with the test name and a timestamp. Open the image and see exactly what the browser saw when the test failed.
+
+### System Test Best Practices
+
+1. **Test user-facing flows, not implementation details** — "User can sign up and see the dashboard" is a good system test. "Controller assigns @user variable" is not.
+2. **Keep them minimal** — System tests are slow. A suite of 200 system tests that take 10 minutes to run will discourage developers from running them. Aim for the critical paths.
+3. **Use meaningful waits** — Capybara auto-waits, but if you need to wait for something specific, use `have_text` or `have_selector` instead of `sleep`.
+4. **Clean up after yourself** — Each test gets a clean database state via transactions. Do not rely on test order.
+
+## Putting It All Together
+
+A healthy Rails test suite uses all the layers we discussed:
+
+- **Model tests** (unit) for validations, callbacks, business logic, and calculations
+- **Request/integration tests** for API endpoints, authentication flows, and cross-controller interactions
+- **System tests** for critical user flows that require JavaScript or browser interaction
+- **RSpec** for readable, expressive test descriptions
+- **FactoryBot** for flexible test data
+- **Mocks and stubs** for isolating external dependencies
+
+The test pyramid is your guide. Most of your tests should be fast unit tests at the base. A moderate number of integration tests in the middle. A few system tests at the top for the most important user flows.
+
+Run your full suite before every commit. Run the relevant subset while developing. Fix failures immediately — a failing test that you leave for later is a bug that ships to production.
+
+### Self-Check
+
+- Can you explain the difference between a stub and a mock?
+- When would you use a system test instead of a request test?
+- Why are factories more flexible than fixtures?
+- What does the Red-Green-Refactor cycle mean in TDD?
+- How do you run a single test case in RSpec? In Minitest?
+- Why should you avoid mocking internal objects?
+- What Capybara driver would you use for a test that needs JavaScript?

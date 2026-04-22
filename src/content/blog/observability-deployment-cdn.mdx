@@ -1,0 +1,329 @@
+---
+title: "Observability, Deployment & Edge: Shipping Code and Keeping It Running"
+description: "Logging, metrics, tracing, alerting, CI/CD pipelines, Docker, Kubernetes, blue-green and canary deployments, plus CDN and edge computing for global performance."
+date: 2026-04-22
+tags: ["system-design", "devops", "observability", "docker", "kubernetes", "cdn"]
+---
+
+import LogAggregationDemo from '../../components/demos/LogAggregationDemo'
+import MetricsTimelineDemo from '../../components/demos/MetricsTimelineDemo'
+import CiCdPipelineDemo from '../../components/demos/CiCdPipelineDemo'
+import DeployStrategyDemo from '../../components/demos/DeployStrategyDemo'
+import CdnRoutingDemo from '../../components/demos/CdnRoutingDemo'
+import EdgeVsOriginDemo from '../../components/demos/EdgeVsOriginDemo'
+
+## What Is Observability?
+
+Think of your car's dashboard. You have a speedometer (how fast you're going), a fuel gauge (how much resources remain), and a check engine light (something broke). If any of these were missing, you'd be driving blind -- you wouldn't know you're low on fuel until the car stops.
+
+That's what running a system without observability feels like. Your app works fine in development, but in production things break in ways you can't reproduce locally. Users report slowness, errors, or downtime, and you have no idea why because you can't see inside the running system.
+
+**Monitoring** tells you when something is broken (the check engine light is on). **Observability** lets you ask *why* it's broken -- you can inspect the system's internal state to find the root cause. Monitoring is a subset of observability.
+
+Observability has three pillars, each answering a different question:
+
+| Pillar | Question it answers | Example |
+|--------|-------------------|---------|
+| **Logs** | What happened, in detail? | "User usr_4821 failed login, invalid password, attempt 3" |
+| **Metrics** | How much? How fast? | Error rate is 12%, p99 latency is 850ms |
+| **Traces** | Where did the request go? | Request took 900ms: 50ms at API, 800ms at database |
+
+You need all three. Logs alone tell you what happened but not how often. Metrics tell you how often but not why. Traces tell you where the time went but not the full context. Together, they give you complete visibility.
+
+## Logging
+
+Every line of code that executes can produce a log. The question is: are those logs useful?
+
+**Unstructured logs** are free-form text: `"User 4821 logged in at 10:23"`. Easy to write, painful to search. When you need to find all failed logins from a specific IP, you're grepping through millions of lines.
+
+**Structured logs** are machine-readable: `{"user_id":"usr_4821","action":"login","status":"success","ip":"10.0.1.55","timestamp":"2026-04-22T10:23:00Z"}`. Same information, but now you can query by any field: show all logins from this IP, all failed actions for this user, all events between two timestamps. Structured logging is the standard in production systems.
+
+**Log levels** control verbosity:
+
+| Level | When to use | Example |
+|-------|------------|---------|
+| DEBUG | Development only, very detailed | "Cache key: users:42, TTL: 300s" |
+| INFO | Normal operations, business events | "Order #1234 created" |
+| WARN | Something unexpected but recoverable | "Retry attempt 2/3 for payment gateway" |
+| ERROR | Something broke, needs attention | "Database connection pool exhausted" |
+
+In production, you typically log at INFO and above. DEBUG is too noisy. ERROR logs should trigger investigation.
+
+**Centralized logging** means all services send their logs to one place. The ELK stack is the classic solution:
+
+1. **Logstash** collects logs from all your services (via filebeat/Fluentd agents)
+2. **Elasticsearch** stores and indexes them for fast search
+3. **Kibana** provides a dashboard to search, filter, and visualize logs
+
+Without centralized logging, you'd SSH into each server and grep log files. With 50 microservices running on 200 containers, that's impossible. Centralized logging lets you search all logs from one place.
+
+**Correlation IDs** are the key to tracing requests across services. When a request enters your system (API gateway, load balancer), generate a unique ID (`req-a1b2c3`) and attach it to every log line for that request. When it calls the Auth service, pass the ID along. When Auth calls the Database, pass it again. Now you can filter logs by correlation ID and see the entire journey of one request across all services.
+
+<LogAggregationDemo client:visible />
+
+**Real work example:** Your payment service returns 500 errors for 2% of requests. You check the centralized logs, filter by `service=payment` and `level=ERROR`, and find all failures have the same correlation IDs. You pick one ID, filter by it, and see: API received the request (10ms), called the payment gateway (800ms timeout), retried (800ms timeout), failed. The root cause: the payment gateway is slow for transactions above $1000. You add a longer timeout for large transactions. Fixed in 20 minutes instead of 2 hours of guessing.
+
+## Metrics
+
+Logs tell you what happened. Metrics tell you how much. A metric is a number measured over time: request rate, error rate, CPU usage, memory consumption, queue depth.
+
+**Types of metrics:**
+
+| Type | What it measures | Example |
+|------|-----------------|---------|
+| **Counter** | Monotonically increasing number | Total requests served: 1,243,891 |
+| **Gauge** | Point-in-time value (goes up and down) | Current CPU usage: 67% |
+| **Histogram** | Distribution of values | p50=45ms, p95=120ms, p99=850ms |
+
+Counters are for "how many" questions. Gauges are for "how much right now" questions. Histograms are for "how fast" questions -- you care about percentiles, not averages. The average latency is 50ms but p99 is 2000ms? You have a tail latency problem that the average hides.
+
+**The RED method** (Rate, Errors, Duration) is how you monitor request metrics:
+
+- **Rate** -- requests per second. A spike means more traffic (good) or a retry storm (bad).
+- **Errors** -- error rate as a percentage. 0.1% is normal. 5% means something broke.
+- **Duration** -- response time percentiles. p50 for typical, p99 for worst case.
+
+**The USE method** (Utilization, Saturation, Errors) is how you monitor resource metrics:
+
+- **Utilization** -- percentage of a resource in use. CPU at 85% means you're near capacity.
+- **Saturation** -- how much work is queued up. If the CPU is at 50% but there are 1000 threads waiting, you're saturated.
+- **Errors** -- hardware or kernel errors. Disk I/O errors, network drops, out-of-memory kills.
+
+**Prometheus** is the standard for metrics collection. It scrapes metrics from your services every 15 seconds, stores time series data, and supports a powerful query language (PromQL). **Grafana** sits on top of Prometheus and gives you dashboards: line charts, heat maps, tables. You set up dashboards for each service and share them with the team.
+
+<MetricsTimelineDemo client:visible />
+
+**Real work example:** Your Grafana dashboard shows p99 latency jumping from 100ms to 2s every night at 2 AM. You check the USE metrics: memory utilization climbs to 95%, saturation (swap usage) spikes, and you see OOM kill events in the kernel logs. Root cause: a nightly batch job loads all users into memory at once. Fix: paginate the batch job to process 1000 users at a time. Memory stays at 60%, latency stays flat.
+
+## Distributed Tracing
+
+When a single request travels through 5 microservices, each taking 50ms, the total is 250ms. But the user sees 3 seconds. Where did the other 2.75 seconds go?
+
+**Distributed tracing** answers this question. Think of it like tracking a package through the postal system. Each post office (service) scans the package (creates a span) with a timestamp, duration, and metadata. You can see exactly where the package spent time.
+
+A **trace** is the full journey of one request across all services. Each service's work is a **span**. Spans have parent-child relationships: the API span contains the Auth span and Database span as children.
+
+```
+[Trace: req-a1b2c3, total: 3200ms]
+  [Span: API Gateway, 50ms]
+    [Span: Auth Service, 1800ms]
+      [Span: Token Validation, 50ms]
+      [Span: Database Lookup, 1700ms]  <-- slow query
+    [Span: Order Service, 1200ms]
+      [Span: Create Order, 100ms]
+      [Span: Payment Gateway, 1000ms]  <-- slow external call
+    [Span: Notification Service, 150ms]
+```
+
+Without tracing, you'd know the request was slow. With tracing, you see it spent 1700ms in Auth's database lookup and 1000ms at the payment gateway. Two specific problems to fix instead of "the API is slow."
+
+**Context propagation** is how the trace ID travels between services. When the API calls Auth, it passes the trace ID in an HTTP header (`X-Trace-ID: req-a1b2c3`). Auth picks it up, creates child spans, and passes it to the Database. This happens automatically if you use OpenTelemetry (the standard instrumentation library).
+
+**Tools:** Jaeger, Zipkin, and AWS X-Ray are the main distributed tracing systems. They collect spans, visualize trace timelines, and help you find slow requests. OpenTelemetry is the vendor-neutral standard for instrumenting your code -- it works with all tracing backends.
+
+**Real work example:** Users report that the checkout page takes 8 seconds to load. You open Jaeger, sort traces by duration, and find the slowest traces all show the same pattern: Product Service calls the Inventory Service, which calls the Warehouse API (external), which takes 6 seconds. The Warehouse API has no caching. Fix: cache inventory counts in Redis with a 30-second TTL. Checkout loads in 1.2 seconds.
+
+## Alerting
+
+Metrics and logs are useless if nobody looks at them. **Alerting** is how you get notified when something needs attention.
+
+**Threshold-based alerts** fire when a metric crosses a fixed value: "alert me when error rate > 5% for 5 minutes." Simple, effective, but can produce false positives during expected traffic spikes.
+
+**Anomaly-based alerts** use statistical models to detect unusual patterns: "error rate is 3x higher than the same time last week." More sophisticated, fewer false positives, but harder to set up.
+
+**Alert fatigue** is the biggest problem in alerting. When teams get 100 alerts per day, they stop reading them. 98% get dismissed, and the 2% that matter get missed. The fix:
+
+1. **Alert on symptoms, not causes.** Alert on "users can't check out" (error rate on /api/checkout > 5%) not "CPU > 80%." High CPU might be fine if it's a batch job.
+2. **Set appropriate thresholds.** Don't alert on a single error. Alert on sustained problems (5 minutes of elevated errors).
+3. **Route alerts to the right team.** Database alerts go to the DBA on-call, not the frontend team.
+4. **Auto-close resolved alerts.** If the error rate drops below 1% after 10 minutes, close the alert automatically.
+
+**On-call rotations** distribute the responsibility. No one person is always on call. A typical rotation: weekly, with a primary and secondary. The primary gets paged first; if they don't respond in 5 minutes, the secondary gets paged.
+
+**Runbooks** are the instructions for responding to an alert. When the "high error rate" alert fires at 3 AM, the on-call engineer shouldn't be figuring out what to do. The runbook says: "1. Check Grafana dashboard X. 2. Look for recent deployments. 3. If deployment in last 30 min, rollback. 4. If no deployment, check external dependencies."
+
+**Incident management** has a lifecycle: detect (alert fires), triage (assess severity), mitigate (stop the bleeding), resolve (fix the root cause), and post-mortem (document what happened and prevent recurrence). The post-mortem is blameless -- you're fixing the system, not blaming people.
+
+## CI/CD Pipelines
+
+Think of a car assembly line. Each station does its part: welding, painting, installing the engine, quality checks. If the paint job fails, the car doesn't move to the next station. The same principle applies to software.
+
+**Continuous Integration (CI)** means every code change is automatically built and tested. You push a commit, and the pipeline runs: compile the code, run linters, run unit tests, run integration tests. If anything fails, the build is red and the team is notified. The goal: catch bugs before they reach production.
+
+**Continuous Deployment (CD)** means every passing build is automatically deployed. No manual "deploy" button. If all tests pass, the code goes to production (or staging, depending on your setup). The goal: ship fast and frequently.
+
+The alternative? Manual builds, manual testing, manual deploys. A developer commits code on Friday, it gets deployed on Thursday the following week, and nobody knows which of the 47 commits introduced the bug. CI/CD makes every commit independently deployable and testable.
+
+**Pipeline stages:**
+
+1. **Build** -- Compile code, install dependencies, bundle assets. Fails if there's a syntax error or missing dependency.
+2. **Lint** -- Check code style and catch common mistakes. ESLint, RuboCop, Pylint.
+3. **Test** -- Unit tests (fast, isolated), integration tests (test service interactions), E2E tests (test the full user flow).
+4. **Stage** -- Deploy to a staging environment that mirrors production. Run smoke tests and sanity checks.
+5. **Deploy** -- Push to production. Usually automated with safeguards (health checks, automatic rollback).
+
+<CiCdPipelineDemo client:visible />
+
+**Real work example:** Your team deploys once a week on Thursday afternoons. Each deployment is stressful because 5 developers merged 30 commits. When something breaks, nobody knows which commit caused it. You implement CI/CD: every commit is built and tested automatically. Deploys happen multiple times per day. When something breaks, it's one commit, and you know exactly which one because the pipeline shows the failing test.
+
+## Containers: Docker
+
+Think of shipping containers. Before standardized containers, loading cargo onto ships was chaos -- every crate was a different size, packed by hand. Standardized containers fit on any ship, any truck, any crane. The same revolution happened in software.
+
+**A container** packages your application with everything it needs to run: the code, runtime, libraries, system tools. It runs the same on your laptop, the test server, and production. "Works on my machine" becomes impossible because the container *is* your machine.
+
+**Container vs Virtual Machine:**
+
+| | VM | Container |
+|---|---|---|
+| **What it virtualizes** | Full operating system | Operating system kernel |
+| **Startup time** | Minutes | Seconds |
+| **Size** | Gigabytes | Megabytes |
+| **Isolation** | Full hardware isolation | Process-level isolation |
+| **Resource overhead** | High (runs full OS) | Low (shares kernel) |
+| **Use case** | Running different OSes | Running multiple apps on same OS |
+
+A VM runs its own kernel. A container shares the host's kernel but has its own filesystem, network, and process space. That's why containers are lighter and faster.
+
+**Dockerfile basics** -- a Dockerfile is a recipe for building a container image:
+
+```dockerfile
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json bun.lockb ./
+RUN bun install --production
+COPY . .
+RUN bun run build
+EXPOSE 3000
+CMD ["bun", "run", "start"]
+```
+
+Each line creates a **layer** (a cached snapshot). If only your code changes, Docker reuses the cached dependency layer and only rebuilds from `COPY . .` onward. This makes builds fast.
+
+**Image vs Container:**
+- **Image** is the blueprint. Read-only, versioned, stored in a registry (Docker Hub, ECR, GCR).
+- **Container** is a running instance of an image. You can run 100 containers from the same image.
+
+`docker build -t myapp:1.0 .` creates the image. `docker run -p 3000:3000 myapp:1.0` starts a container.
+
+**Why containers revolutionized deployment:** Before containers, you'd configure servers by hand, install dependencies, and pray the environments matched. With containers, the environment is part of the artifact. You test the exact same container you deploy. No more "it works in staging but not production."
+
+## Orchestration: Kubernetes
+
+If containers are shipping containers, Kubernetes is the port manager. It decides where each container goes, restarts them if they crash, scales them up when traffic increases, and rolls out updates without downtime.
+
+Running containers manually (`docker run`) works for one server. When you have 50 servers and 200 containers, you need orchestration.
+
+**Core concepts:**
+
+| Concept | What it does | Analogy |
+|---------|-------------|---------|
+| **Pod** | One or more containers running together | A shipping container |
+| **Service** | Stable network address for a set of pods | A phone number that routes to available agents |
+| **Deployment** | Manages replica count and rolling updates | "I want 3 copies of my app, always running" |
+| **Namespace** | Logical grouping of resources | Different departments in the same building |
+
+A **Deployment** says: "run 3 replicas of my web app." Kubernetes schedules those pods across your cluster, monitors their health, and restarts any that crash. If a node (server) dies, Kubernetes reschedules its pods onto healthy nodes.
+
+**Auto-scaling:** Horizontal Pod Autoscaler (HPA) watches CPU/memory usage and adds or removes replicas. At 70% CPU, scale from 3 to 5 replicas. At 30% CPU, scale back to 3. You set minimum and maximum bounds.
+
+**Self-healing:** If a pod crashes, Kubernetes restarts it. If a pod fails its health check 3 times, it's killed and recreated. If a node dies, all pods on that node are rescheduled. You don't write any of this logic -- Kubernetes handles it.
+
+**Rolling updates:** When you deploy a new version, Kubernetes gradually replaces old pods with new ones. It waits for each new pod to pass its health check before moving to the next. If a new pod fails, the update is paused and rolled back.
+
+**Real work example:** Your app runs 3 replicas. A memory leak causes pods to crash every 2 hours. Without Kubernetes, someone manually restarts them (at 3 AM). With Kubernetes, pods are restarted automatically within seconds, and the HPA adds a 4th replica to handle the reduced capacity. You still need to fix the memory leak, but users aren't affected.
+
+## Deployment Strategies
+
+When you push a new version to production, how do you do it without downtime? Different strategies make different trade-offs between risk, speed, and resource usage.
+
+**Rolling deployment** replaces instances one by one. Server 1 gets updated, passes health check, then Server 2, then Server 3. During the update, you have mixed versions (some users see v1, others see v2). This is the default in Kubernetes. Zero downtime, minimal extra resources, but the mixed-version window can cause issues if v2 has database schema changes.
+
+**Blue-Green deployment** maintains two identical environments. Blue is running v1, Green is running v2. You deploy v2 to Green, run tests against it, then switch traffic from Blue to Green in one cut. If something goes wrong, you switch back instantly. The downside: you need double the infrastructure.
+
+**Canary deployment** releases to a small percentage of users first. Send 5% of traffic to v2, monitor error rates and latency, then gradually increase to 25%, 50%, 100%. If the canary shows problems, you stop and rollback. This is the safest approach for high-risk changes. Cloudflare, Netflix, and Google all use canary deployments.
+
+**Feature flags** let you toggle features without deployment. Deploy code with the new feature behind a flag (`if (featureFlags.newCheckout) { ... }`). Enable the flag for internal users first, then 1% of real users, then everyone. If something breaks, flip the flag off. The code is already deployed -- you're just toggling behavior. This decouples deployment from release.
+
+<DeployStrategyDemo client:visible />
+
+**Real work example:** You're launching a new payment provider. You wrap the new code in a feature flag, deploy it with the flag off, and enable it for your internal team. One engineer finds that the new provider doesn't handle Amex cards. You fix it, enable for 1% of users, monitor for an hour, then roll out to 100%. If you had done a rolling deploy, all users would have hit the Amex bug at once.
+
+## CDN & Edge Computing
+
+Think of Amazon's warehouse strategy. Amazon doesn't ship every product from one warehouse in Seattle. They have fulfillment centers across the country so your package arrives in 1-2 days instead of 1-2 weeks. A CDN does the same thing for your website's content.
+
+**How it works:**
+
+1. You put a CDN (Cloudflare, Fastly, AWS CloudFront) in front of your origin server
+2. The CDN has "edge locations" around the world -- data centers in 200+ cities
+3. When a user in Tokyo requests your website, the request hits the Tokyo edge location
+4. If the edge has the content cached, it serves it directly (5-20ms)
+5. If not, it fetches from your origin (Virginia), caches it, and serves it to the user
+6. The next Tokyo user gets it from the cache
+
+Without CDN: a user in Tokyo waits 200-300ms for every request to your Virginia server. With CDN: 5-20ms for cached content.
+
+**Cache invalidation** is the hard part. When you update `style.css`, the edge locations still have the old version. You need to invalidate the cache (tell all edges to fetch the fresh version). Strategies:
+
+- **Time-based**: Set `Cache-Control: max-age=86400` (24 hours). Content is re-fetched after 24 hours. Simple but stale.
+- **Versioned URLs**: `style.v2.css` instead of `style.css`. New version = new URL = automatic cache miss. Best practice for static assets.
+- **Purge API**: `POST /purge` tells the CDN to delete specific URLs from cache. Immediate but manual.
+- **Stale-while-revalidate**: Serve stale content while fetching fresh content in the background. Users never wait.
+
+**Edge computing** goes beyond caching. Instead of just storing files at the edge, you run code at the edge. Cloudflare Workers, AWS Lambda@Edge, Vercel Edge Functions -- these let you execute JavaScript/TypeScript at edge locations worldwide.
+
+Use cases for edge computing:
+- **A/B testing** at the edge (decide which variant to show without hitting origin)
+- **Authentication** token validation at the edge (reject invalid requests before they reach origin)
+- **Geolocation routing** (redirect users to their nearest data center)
+- **Image transformation** at the edge (resize, compress, convert format on the fly)
+- **Personalization** using edge-stored data (show localized content without origin call)
+
+<CdnRoutingDemo client:visible />
+
+**Real work example:** Your product images are served from `images.yoursite.com` hosted in Virginia. Users in Asia see 800ms load times. You put Cloudflare in front, set `Cache-Control: public, max-age=86400`, and version your image URLs. Asian users now load images from the Tokyo edge in 15ms. You also deploy a Cloudflare Worker that resizes images on the fly: `/image/800x600/product.jpg`. No need to pre-generate every size.
+
+## Edge vs Origin
+
+Not everything belongs at the edge. Understanding what to cache and what to forward to the origin is the key to a fast, correct CDN setup.
+
+**Static content** (images, CSS, JavaScript, fonts, videos) rarely changes. Serve from edge with long cache times. This is the low-hanging fruit -- it's easy to set up and gives the biggest performance win. A typical web page loads 2-3 MB of static assets. Serving those from the edge instead of the origin saves hundreds of milliseconds per page load.
+
+**Dynamic content** (API responses, user-specific data, real-time data) changes per user or per request. This can't be cached at the edge -- it must go to the origin. But you can still optimize: use edge functions for lightweight processing, and keep the origin response times low with proper database indexing and caching.
+
+**Semi-dynamic content** sits in between. It changes, but not for every user. Examples: product recommendations (same for users in the same segment), localized pricing (same for all users in a country), feature flag values (same for the rollout percentage). Edge functions can handle this: store the data at the edge, update it periodically, and serve it without hitting the origin.
+
+| Content Type | Where to serve | Latency | Cacheable |
+|-------------|---------------|---------|-----------|
+| Static assets (images, CSS, JS) | Edge | 5-20ms | Yes, long TTL |
+| Semi-dynamic (recommendations, A/B) | Edge functions | 15-50ms | Yes, short TTL |
+| Dynamic per-user (profile, cart) | Origin | 100-500ms | No |
+| Dynamic real-time (stock prices, chat) | Origin/WebSocket | 50-200ms | No |
+
+<EdgeVsOriginDemo client:visible />
+
+**Real work example:** Your homepage loads 3 static assets (cached at edge, 10ms each), 2 semi-dynamic components (product recommendations and localized pricing via edge functions, 25ms each), and 1 dynamic component (user's shopping cart, 200ms from origin). Total: 10+10+10+25+25+200 = 280ms. Without CDN/edge: 200+200+200+200+200+200 = 1200ms. The edge cuts your load time by 77%.
+
+## Self-Check
+
+- Can you explain the difference between monitoring and observability?
+- What are the three pillars of observability, and what question does each answer?
+- Why is structured logging better than unstructured logging?
+- What is a correlation ID and how does it help debug issues?
+- What's the difference between a counter, gauge, and histogram?
+- What do RED and USE stand for, and when do you use each?
+- How does distributed tracing help debug latency issues across microservices?
+- Why is alert fatigue dangerous, and how do you prevent it?
+- What is the difference between CI and CD?
+- What are the stages in a CI/CD pipeline?
+- What is the difference between a Docker image and a container?
+- Why are containers better than VMs for application deployment?
+- What does Kubernetes do that Docker alone cannot?
+- Explain rolling, blue-green, and canary deployment strategies.
+- When would you use feature flags instead of a canary deployment?
+- How does a CDN reduce latency for global users?
+- What is cache invalidation and why is it challenging?
+- What is edge computing, and when would you use it instead of origin?
+- What types of content should be served from the edge vs the origin?
+- Can you design an alerting strategy that avoids alert fatigue?

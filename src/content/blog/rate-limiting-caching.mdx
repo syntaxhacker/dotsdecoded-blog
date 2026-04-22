@@ -1,0 +1,265 @@
+---
+title: "Rate Limiting & Caching: Protecting and Accelerating Your System"
+description: "Token bucket, leaky bucket, sliding window algorithms for rate limiting, plus cache-aside, write-through, LRU eviction, and distributed caching with Redis — the two levers every system needs."
+date: 2026-04-22
+tags: ["system-design", "rate-limiting", "caching", "redis", "performance"]
+---
+
+import TokenBucketDemo from '../../components/demos/TokenBucketDemo'
+import LeakyBucketDemo from '../../components/demos/LeakyBucketDemo'
+import WindowLimitDemo from '../../components/demos/WindowLimitDemo'
+import CachePolicyDemo from '../../components/demos/CachePolicyDemo'
+import LruEvictionDemo from '../../components/demos/LruEvictionDemo'
+import CacheLayerDemo from '../../components/demos/CacheLayerDemo'
+
+## Why Rate Limiting?
+
+Imagine a nightclub. The bouncer at the door doesn't let everyone rush in at once -- they control the flow so the bar doesn't get overwhelmed, the security team can keep track of people, and everyone inside has a good experience. Rate limiting does the same thing for your API.
+
+Without rate limiting, your system faces three problems:
+
+1. **DDoS attacks** -- an attacker sends millions of requests and takes your server offline. A single server handling 10,000 req/s when it's built for 100 req/s simply crashes.
+2. **Resource exhaustion** -- even legitimate users can overload your system. A bug in a mobile client retrying failed requests can generate 100x normal traffic.
+3. **Unfair usage** -- one user running a script that hammers your API deprives other users of access. Rate limiting ensures fair distribution.
+
+Rate limiting is applied at different scopes:
+
+| Scope | Example | Why |
+|-------|---------|-----|
+| Per user | 100 req/min per API key | Fair usage between users |
+| Per IP | 1000 req/min per IP address | Stop DDoS and shared-IP abuse |
+| Per endpoint | 10 writes/min on POST /orders | Protect expensive operations |
+| Per region | Different limits per geography | Handle traffic patterns |
+| Global | 50,000 req/s total | Protect the entire infrastructure |
+
+Every major API you use has rate limiting: GitHub (5000 req/hour authenticated), Stripe (100 writes/sec), Twitter (varies by tier), AWS (varies by service). They all do it because they have to.
+
+## Token Bucket Algorithm
+
+Think of a bucket sitting on your desk. Every second, a token drops into the bucket. When a request arrives, it takes one token out. If the bucket has tokens, the request proceeds. If the bucket is empty, the request gets rejected with a 429 status code.
+
+The beauty of this algorithm is **burst tolerance**. If your bucket holds 5 tokens and refills at 1 token/second, a user can fire 5 requests instantly (the burst), then 1 request per second after that. This is the algorithm used by AWS API Gateway and many cloud rate limiters.
+
+Two parameters control the behavior:
+
+- **Bucket size (capacity)** -- how many tokens fit in the bucket. This is your burst capacity. A larger bucket allows bigger bursts but less sustained protection.
+- **Refill rate** -- how many tokens are added per second. This is your steady-state rate limit. Higher refill rate = more permissive.
+
+<TokenBucketDemo client:visible />
+
+**Real work example:** Your payment API needs to allow a burst of 3 retries (in case of network failures) but limit sustained traffic to 10 req/min. Set bucket size to 3, refill rate to 1 token every 6 seconds. The user gets instant retries, but sustained hammering gets throttled.
+
+## Leaky Bucket Algorithm
+
+Now imagine a bucket with a hole in the bottom. You can pour water in at any rate -- fast bursts, slow drips, it doesn't matter. The bucket leaks water out at a fixed rate. If the bucket fills up, any more water you pour in overflows (gets rejected).
+
+The key difference from the token bucket: **the leaky bucket smooths output**. Requests don't go through at the speed they arrive -- they go through at the leak rate. This is essentially a queue with a fixed processing rate.
+
+Think of it like a toll booth: cars arrive in clumps, but they leave one at a time at a steady pace. If the queue of waiting cars gets too long, new cars are turned away.
+
+<LeakyBucketDemo client:visible />
+
+**Real work example:** You're sending transactional emails through a provider that limits you to 10 emails/second. Your application might generate 50 emails in a burst (e.g., a batch notification). The leaky bucket queues them and sends them at exactly 10/second. No emails are lost (as long as the queue doesn't overflow), and you never exceed the provider's limit.
+
+## Fixed Window & Sliding Window
+
+The simplest rate limiting approach: count requests in a time window. "No more than 100 requests per minute." When the minute ends, reset the counter.
+
+The problem with fixed windows is the **boundary burst exploit**. If your limit is 100 req/min, a client can send 100 requests at 0:59 and another 100 at 1:00. That's 200 requests in 2 seconds, but each window individually shows only 100. The counter reset at the boundary creates a loophole.
+
+The sliding window fixes this by tracking requests in a **rolling time period**. Instead of "100 requests since the start of this minute," it's "100 requests in the last 60 seconds from now." This eliminates the boundary exploit because the window doesn't have hard reset points.
+
+Two sliding window implementations:
+
+| Approach | How | Trade-off |
+|----------|-----|-----------|
+| Sliding window log | Store timestamp of every request in a sorted set | Exact but O(n) memory and computation |
+| Sliding window counter | Hybrid: weighted average of current and previous fixed window counters | Approximate but O(1) memory |
+
+<WindowLimitDemo client:visible />
+
+**Real work example:** Your API has a limit of 100 req/min per user. With a fixed window, a bot sends 99 requests at 11:59:59 and 99 more at 12:00:01. That's 198 requests in 2 seconds, each window shows under 100. With a sliding window, the second request batch is rejected because 99 requests from the last 60 seconds are already counted.
+
+## Rate Limiting in Practice
+
+When your API returns a 429 (Too Many Requests), the response headers tell the client what's happening:
+
+```
+HTTP/1.1 429 Too Many Requests
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 0
+Retry-After: 42
+```
+
+- `X-RateLimit-Limit` -- the maximum requests allowed in the window
+- `X-RateLimit-Remaining` -- how many are left (the client uses this to slow down before getting rejected)
+- `Retry-After` -- seconds until the client can try again
+
+**Distributed rate limiting** is harder. If you have 3 servers behind a load balancer, each server counts requests independently. A client hitting server A gets 100 req/min, then hitting server B gets another 100. The fix: use Redis as a centralized counter with Lua scripts for atomic increment-and-check.
+
+```
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+if current > tonumber(ARGV[2]) then
+    return 0
+else
+    return current
+end
+```
+
+**What to do when the limit is hit:**
+
+| Strategy | Behavior | Best For |
+|----------|----------|----------|
+| Reject | Return 429 immediately | Most APIs, simplest |
+| Throttle | Queue the request, process when slot available | Background jobs, email sending |
+| Queue | Add to a message queue for later processing | Non-urgent work, analytics events |
+
+**Algorithm comparison:**
+
+| Algorithm | Burst Allowed | Output Rate | Memory | Best For |
+|-----------|--------------|-------------|--------|----------|
+| Token Bucket | Yes (up to capacity) | Variable (burst then steady) | O(1) | General-purpose APIs |
+| Leaky Bucket | Yes (up to queue size) | Fixed (steady leak rate) | O(1) | Traffic shaping, message queues |
+| Fixed Window | Yes (double at boundary) | Variable | O(1) | Simple cases where exactness doesn't matter |
+| Sliding Window | Limited (no boundary exploit) | Variable | O(n) or O(1) | APIs where fairness matters |
+
+## Why Caching?
+
+Imagine you're working at your desk and someone asks you the same question 50 times in a row. The first time, you walk to the filing cabinet, find the document, bring it back, and read the answer. The other 49 times? You write the answer on a sticky note and keep it on your desk. Now you just read the sticky note.
+
+Caching is the sticky note. Instead of doing expensive work every time (database query, API call, computation), you store the result and reuse it.
+
+The fundamental trade-off: **stale data vs faster responses**. A cache is always slightly behind the source of truth. The question is: how much staleness is acceptable, and how much speed do you gain?
+
+| Acceptable Staleness | Use Case | Cache TTL |
+|---------------------|----------|-----------|
+| Seconds | User profile, product details | 60-300s |
+| Minutes | Blog posts, analytics dashboards | 300-3600s |
+| Hours | Product catalog, search results | 3600-86400s |
+| Days | Static assets, CDN content | 86400s+ |
+
+Caches live at every layer of the stack:
+
+- **Browser cache** -- stores HTTP responses locally. Controlled by `Cache-Control` headers. Zero server cost.
+- **CDN cache** -- edge servers worldwide. Cloudflare, Fastly, AWS CloudFront. 5-20ms latency.
+- **API server cache** -- Redis or Memcached running alongside your app. Sub-millisecond reads.
+- **Database cache** -- PostgreSQL query cache, buffer pool. Automatic but limited.
+
+## Cache Patterns
+
+There are five common patterns for how data flows between your application, cache, and database. Each has different trade-offs for consistency, latency, and complexity.
+
+**Cache-aside (lazy loading):** The application checks the cache first. If it's a hit, return the cached data. If it's a miss, fetch from the database, store the result in cache, then return it. The application manages the cache entirely.
+
+**Write-through:** On every write, update both the cache and the database simultaneously. Reads always come from the cache (which is always consistent). Slower writes (two operations), but zero staleness.
+
+**Write-back (write-behind):** Write to the cache immediately and mark it as dirty. The database is updated asynchronously later (or in batches). Extremely fast writes, but risk of data loss if the server crashes before the flush.
+
+**Write-around:** Write directly to the database, bypassing the cache. The cache is populated only on the next read (cache-aside on read). Good for write-heavy workloads where written data isn't immediately read.
+
+**Refresh-ahead:** Proactively refresh cache entries before they expire. If a key is accessed frequently and its TTL is almost up, a background job fetches the fresh data. Users never see a cache miss for popular keys.
+
+<CachePolicyDemo client:visible />
+
+**Pattern comparison:**
+
+| Pattern | Read Latency | Write Latency | Consistency | Complexity | Best For |
+|---------|-------------|---------------|-------------|------------|----------|
+| Cache-aside | Miss = slow, Hit = fast | Normal (app manages) | Eventual | Low | Read-heavy workloads |
+| Write-through | Always fast | Slow (2 writes) | Strong | Medium | Data that must be current |
+| Write-back | Always fast | Very fast (1 write) | Weak | High | Write-heavy, tolerates staleness |
+| Write-around | Miss = slow, Hit = fast | Normal (1 write) | Eventual | Low | Write-heavy, read-after-write rare |
+| Refresh-ahead | Always fast | Normal | Near-strong | High | Hot keys with high traffic |
+
+**Real work example:** An e-commerce product page is read 10,000x for every 1 write. Use cache-aside: read from Redis (1ms), on miss fetch from PostgreSQL (50ms), store in Redis with 5-minute TTL. When a product is updated, invalidate the cache key (`DEL product:42`). The next read rebuilds it. This pattern handles 99.99% of traffic from cache.
+
+## Cache Eviction Policies
+
+Your cache has limited memory. When it fills up, something has to go. The eviction policy decides what.
+
+**LRU (Least Recently Used)** -- evict the item that hasn't been accessed for the longest time. This is the most popular policy because it matches real user behavior: if someone hasn't looked at something in a while, they probably won't look at it again soon. Redis uses a variant of LRU.
+
+**LFU (Least Frequently Used)** -- evict the item with the lowest access count. This is better than LRU for stable access patterns where a few items are always popular. The problem: an item accessed once a week ago and an item accessed once a year ago have the same frequency (1), so LFU needs a time decay mechanism.
+
+**FIFO (First In First Out)** -- evict the oldest item regardless of how often it's accessed. Simple to implement but can evict popular items that were cached early. Rarely used as the primary policy.
+
+**TTL (Time To Live)** -- evict based on expiration time. Every cached item gets a TTL when it's set. When the TTL expires, the item is automatically removed. This is often combined with LRU as a secondary policy.
+
+<LruEvictionDemo client:visible />
+
+**Real work example:** Your Redis instance has 1GB of memory and you're caching user sessions (10KB each, 30min TTL) and product data (50KB each, 5min TTL). With LRU eviction, if Redis fills up, the least recently accessed items are evicted first. This is usually fine -- inactive sessions and stale product data are the first to go.
+
+## Distributed Caching
+
+Local caching (an in-memory hash map on each server) works for single-server apps. But when you have 10 servers behind a load balancer, each server has its own cache. A request hits server A, caches the result, then the next request hits server B -- which doesn't have it. You need a shared cache.
+
+**Redis** is the go-to distributed cache. It's a single-threaded in-memory data store that supports strings, hashes, lists, sets, and sorted sets. It also supports pub/sub, streams, and Lua scripting. Persistence options: RDB snapshots (point-in-time) and AOF (append-only file, every write logged).
+
+**Memcached** is simpler: a pure key-value store with no persistence, no built-in clustering, and no data types beyond strings. It's faster for simple get/set but less versatile.
+
+| Feature | Redis | Memcached |
+|---------|-------|-----------|
+| Data types | Strings, hashes, lists, sets, sorted sets | Strings only |
+| Persistence | RDB + AOF | None (pure cache) |
+| Clustering | Built-in (Redis Cluster, Sentinel) | Client-side sharding |
+| Max memory | Limited by system RAM | Same |
+| Latency | \&lt;1ms (single-threaded) | \&lt;1ms (multi-threaded) |
+| Best for | General caching, queues, leaderboards | Simple key-value caching |
+
+**Cache invalidation** is the hard part. Phil Karlton's famous quote: "There are only two hard things in Computer Science: cache invalidation and naming things."
+
+Common invalidation strategies:
+
+- **Time-based (TTL)** -- let data expire naturally. Simple but data is stale until TTL runs out.
+- **Event-based** -- when data changes in the DB, publish an event that invalidates the cache. Immediate consistency but adds complexity (message queue, event handlers).
+- **Version-based** -- add a version number to cache keys (`product:42:v3`). When data changes, increment the version. Old cache entries naturally become orphaned.
+- **Write-through** -- cache is always consistent because writes update both. No invalidation needed, but slower writes.
+
+**Common pitfalls:**
+
+**Thundering herd** -- cache expires, 1000 simultaneous requests all miss and hit the database at once. Fix: use a "lock" key. The first request sets a short-TTL lock (`SET product:42:lock 1 EX 5 NX`). Other requests see the lock and return stale data (or wait) instead of hitting the DB.
+
+**Cache stampede** -- similar to thundering herd but caused by a hot key that keeps getting evicted. Fix: use refresh-ahead to proactively update hot keys before they expire.
+
+## Caching Layers
+
+A real system doesn't have one cache. It has multiple layers, each faster than the last but with less capacity and more specificity.
+
+**Browser cache** is the first line of defense. The browser stores HTTP responses locally using `Cache-Control` and `ETag` headers. This is free -- zero server cost, zero infrastructure. It only works for GET requests and is specific to one user on one device.
+
+**CDN cache** sits at the network edge, close to the user geographically. Cloudflare has 300+ locations worldwide. A user in Tokyo hits a CDN node in Tokyo instead of your origin server in Virginia. CDNs cache static assets (JS, CSS, images) and can cache API responses if configured. TTL: hours to days.
+
+**API server cache (Redis)** runs alongside your application. It caches query results, computed data, session data -- anything that's expensive to compute or fetch. TTL: seconds to minutes. This is where most of your caching logic lives.
+
+**Database** is the source of truth. It has its own internal caches (buffer pool, query cache in some databases) but these are automatic and not something you configure directly. TTL: always fresh.
+
+<CacheLayerDemo client:visible />
+
+**Real work example:** A user loads your product page. The browser checks its local cache (0ms). If it's there (Cache-Control hasn't expired), the page loads instantly. If not, the request goes to the CDN (10-30ms). If the CDN has it (a previous user loaded it), it's returned from the edge. If not, it hits your API server, which checks Redis (\&lt;1ms). If Redis has it, returned immediately. If not, it queries PostgreSQL (50-200ms). Each miss falls through to the next layer. The first request is slow; every subsequent request is fast.
+
+## Self-Check
+
+Can you explain these concepts without looking back?
+
+| Question | Answer |
+|----------|--------|
+| Which algorithm allows burst traffic? | Token bucket (up to bucket capacity) |
+| Which algorithm smooths output to a fixed rate? | Leaky bucket |
+| What's the fixed window boundary exploit? | Double-burst at window reset (100 at 0:59 + 100 at 1:00) |
+| Which cache pattern gives strongest consistency? | Write-through (always writes to both) |
+| Which cache pattern has fastest writes? | Write-back (writes to cache only, flushes async) |
+| What does LRU stand for? | Least Recently Used |
+| What's the thundering herd problem? | Cache expires, many requests hit DB simultaneously |
+| Why use Redis over Memcached? | Data types, persistence, clustering |
+| What HTTP status code means rate limited? | 429 Too Many Requests |
+| What header tells the client when to retry? | Retry-After |
+
+**Scenario questions:**
+
+1. You're building an API that needs to allow short bursts but limit sustained traffic to 100 req/min. Which rate limiting algorithm? -- Token bucket with capacity 10, refill rate ~1.7/s
+2. Your product catalog is read 1000x more than it's written. Which cache pattern? -- Cache-aside with TTL-based invalidation
+3. Users report intermittent slow API responses after deployments. What's happening? -- Cache was invalidated during deploy, all requests hitting DB until cache warms up. Fix: use staggered deploys or pre-warm the cache
+4. You need to cache user sessions across 5 servers. What do you use? -- Redis (shared distributed cache)

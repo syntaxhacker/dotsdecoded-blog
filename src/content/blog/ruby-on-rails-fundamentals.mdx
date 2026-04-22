@@ -1,0 +1,408 @@
+---
+title: "Ruby on Rails Fundamentals: From Zero to Your First App"
+description: "What is Rails, why do developers love it, and how does it actually work? Learn MVC, gems, routing, CRUD, and the convention-over-configuration philosophy that makes Rails productive — with interactive demos."
+date: 2026-04-05
+tags: ["ruby", "rails", "web-development", "fundamentals", "mvc"]
+---
+
+import MvcFlowDemo from '../../components/demos/MvcFlowDemo'
+import GemManagerDemo from '../../components/demos/GemManagerDemo'
+import ConventionConfigDemo from '../../components/demos/ConventionConfigDemo'
+import RouteMapperDemo from '../../components/demos/RouteMapperDemo'
+import LayoutYieldDemo from '../../components/demos/LayoutYieldDemo'
+import CrudDemo from '../../components/demos/CrudDemo'
+
+## What Is Ruby on Rails?
+
+Imagine you want to build a house. You have two options: buy raw lumber, nails, and concrete and figure out the plumbing yourself, or move into a pre-furnished apartment where the layout, wiring, and plumbing are already done. Ruby on Rails is the pre-furnished apartment of web development.
+
+Rails is a **web application framework** written in the Ruby programming language. It was created in 2004 by David Heinemeier Hansson (often called DHH) and extracted from Basecamp, a project management tool. The goal was simple: make web development faster by removing the decisions that every project needs but nobody wants to make differently each time.
+
+Instead of deciding how to structure your folders, how to name your database tables, or how to connect URLs to code, Rails provides sensible defaults for all of it. You focus on what makes your app unique. The framework handles the rest.
+
+Rails powers some of the most trafficked sites on the internet. GitHub, Shopify, Airbnb, Stripe, Basecamp, and GitHub all run on Rails (or ran on Rails for most of their history). These companies chose Rails because it lets small teams move fast without sacrificing maintainability.
+
+## The Language Beneath: Ruby
+
+Before we dig into Rails, we need to understand the language it is built on. Ruby was created in 1995 by Yukihiro Matsumoto (Matz) with a specific design philosophy: it should make programmers happy. Ruby prioritizes readability and expressiveness over raw speed.
+
+Here is what Ruby looks like:
+
+```ruby
+# Variables don't need type declarations
+name = "Rails"
+version = 7.1
+
+# Everything is an object
+5.times { puts "Hello" }
+
+# Arrays and hashes are first-class citizens
+articles = ["Rails Basics", "Active Record", "Routing"]
+author = { name: "Alice", email: "alice@example.com" }
+
+# Blocks (anonymous functions passed to methods)
+articles.each do |title|
+  puts "Reading: #{title}"
+end
+
+# Classes are simple and elegant
+class Article
+  attr_accessor :title, :body
+
+  def initialize(title, body)
+    @title = title
+    @body = body
+  end
+
+  def summary
+    "#{@title}: #{@body[0..50]}..."
+  end
+end
+```
+
+Ruby's syntax is clean and close to plain English. Compare the same loop in three languages:
+
+| Language | Loop syntax |
+|----------|------------|
+| Ruby | `3.times { puts "hi" }` |
+| JavaScript | `for (let i = 0; i < 3; i++) { console.log("hi") }` |
+| Java | `for (int i = 0; i < 3; i++) { System.out.println("hi"); }` |
+
+This expressiveness is what makes Rails possible. The framework relies heavily on Ruby's ability to define methods dynamically, create domain-specific languages (DSLs), and write code that reads like configuration.
+
+## The MVC Architecture
+
+Think of a restaurant. You walk in and sit down. The **host** greets you and directs you to a table — that is the **Router**, matching your arrival to the right place. The **waiter** takes your order, relays it to the kitchen, and brings the food back — that is the **Controller**, orchestrating the flow. The **kitchen** prepares the food using ingredients stored in the pantry — that is the **Model**, handling data and business logic. The **plate** the food is served on — beautifully arranged and garnished — that is the **View**, the presentation layer.
+
+Rails enforces this pattern called **Model-View-Controller (MVC)**. Every request follows this cycle:
+
+1. The browser sends an HTTP request (e.g., `GET /articles`)
+2. The **Router** matches the URL to a controller action
+3. The **Controller** asks the **Model** for data
+4. The **Model** queries the database and returns records
+5. The **Controller** passes the data to the **View**
+6. The **View** renders HTML and sends it back as the response
+
+Let's watch this flow in action:
+
+<MvcFlowDemo client:visible />
+
+Each component has a clear responsibility. The model never touches HTML. The view never talks to the database. The controller coordinates between them. This separation means you can change your database schema without rewriting your views, or redesign your UI without touching your business logic.
+
+## Gems: Rails' Plugin Ecosystem
+
+Think of gems as an app store for your Rails application. Just like you install apps on your phone to add functionality — a camera app, a maps app, a fitness tracker — you install gems in Rails to add features like authentication, background jobs, or payment processing.
+
+A **gem** is a self-contained Ruby library packaged for distribution. The Ruby community maintains over 180,000 gems on RubyGems.org, covering virtually every need: database drivers, testing frameworks, API clients, deployment tools, and more.
+
+### The Gemfile
+
+Every Rails application has a `Gemfile` at its root — a manifest that declares which gems your app needs and in which environment. Here is a simplified example:
+
+```ruby
+source "https://rubygems.org"
+
+gem "rails", "~> 7.1"
+gem "pg"            # PostgreSQL database adapter
+gem "puma"          # Application server
+gem "devise"        # User authentication
+gem "bootstrap"     # CSS framework
+
+group :development, :test do
+  gem "rspec-rails"  # Testing framework
+  gem "pry"          # Better debugging console
+end
+```
+
+When you run `bundle install`, Bundler (Ruby's dependency manager) reads the Gemfile, resolves all gem versions (including their dependencies), installs them, and generates a `Gemfile.lock` that records the exact versions used. This lock file ensures every developer and every deployment server uses the same gem versions — no surprises.
+
+### Installing a Gem
+
+Adding a new gem to your project is a two-step process:
+
+```bash
+# 1. Add the gem to your Gemfile
+echo 'gem "devise"' >> Gemfile
+
+# 2. Install it
+bundle install
+```
+
+Bundler downloads the gem and all its dependencies, and the lock file is updated. If two gems require different versions of the same dependency, Bundler resolves the conflict automatically.
+
+Try toggling gems in the demo below to see what each one adds to a project:
+
+<GemManagerDemo client:visible />
+
+## Generating Your First Rails App
+
+Let's create a Rails application from scratch. With one command, Rails generates an entire project skeleton — folders, configuration files, a default database, and a test suite. Open your terminal and run:
+
+```bash
+rails new blog
+```
+
+That single command produces this directory structure:
+
+```
+blog/
+  app/
+    assets/        # Stylesheets, JavaScript, images
+    channels/      # Action Cable (WebSockets)
+    controllers/   # Controller classes
+    helpers/       # View helper modules
+    jobs/          # Background job classes
+    mailers/       # Email classes
+    models/        # Active Record models
+    views/         # ERB templates (HTML with Ruby)
+  config/
+    routes.rb      # URL routing rules
+    database.yml   # Database connection config
+    environments/  # Per-environment settings
+  db/
+    migrate/       # Database migration files
+    seeds.rb       # Sample data
+  Gemfile          # Gem declarations
+  Rakefile         # Task runner config
+  README.md        # Project documentation
+```
+
+The `app/` directory is where you spend 95% of your time. Each subfolder maps directly to the MVC pattern: `models/` for data, `controllers/` for request handling, `views/` for templates. The `config/` folder holds settings, and `db/migrate/` tracks database schema changes over time.
+
+To start the development server:
+
+```bash
+cd blog
+rails server
+```
+
+Open `http://localhost:3000` in your browser and you will see the default Rails welcome page. You are ready to build.
+
+## Convention Over Configuration
+
+Think of ordering at a restaurant with a set menu versus custom ordering every ingredient. At the set-menu restaurant, you say "I'll have the pasta" and the chef knows to use garlic, olive oil, and parmesan because that is how pasta is always prepared there. At the custom place, you must specify every ingredient, every cooking method, every seasoning.
+
+Rails is the set-menu restaurant. It establishes **conventions** — agreed-upon defaults that work for most applications — so you write less configuration. Here are the key naming conventions:
+
+| What | Convention | Example |
+|------|-----------|---------|
+| Model name | Singular, CamelCase | `Article` |
+| Database table | Plural, snake_case | `articles` |
+| Controller | Plural + "Controller" | `ArticlesController` |
+| Foreign key | Singular + `_id` | `article_id` |
+| Views folder | Plural, snake_case | `app/views/articles/` |
+| Migration file | Timestamp prefix | `20260405120000_create_articles.rb` |
+
+When you create an `Article` model, Rails automatically knows to look for an `articles` table. When you define `ArticlesController`, Rails expects views in `app/views/articles/`. When you add `belongs_to :author` to a model, Rails looks for an `author_id` foreign key column. None of this requires configuration — it just works.
+
+Compare what you write in Rails versus what you would need in a less opinionated framework:
+
+<ConventionConfigDemo client:visible />
+
+These conventions eliminate entire categories of decisions. You never argue about folder structure in a Rails team because the framework already decided. You never configure table name mappings because the pluralization rules handle it. This is why Rails teams can onboard new developers so quickly — every Rails app is structured the same way.
+
+## Routing: Connecting URLs to Code
+
+Every web application needs to map URLs to the code that handles them. In Rails, this mapping lives in `config/routes.rb`. Think of the router as a receptionist at an office building. Someone walks in and says "I need accounting." The receptionist knows exactly which floor, which department, and which person to send them to.
+
+A basic route looks like this:
+
+```ruby
+# config/routes.rb
+Rails.application.routes.draw do
+  get "/articles", to: "articles#index"
+  get "/articles/:id", to: "articles#show"
+end
+```
+
+The first line says: when a `GET` request arrives at `/articles`, invoke the `index` action on `ArticlesController`. The second says: when a `GET` request arrives at `/articles/42` (or any ID), invoke the `show` action and make the ID available as `params[:id]`.
+
+### RESTful Routing
+
+Rails strongly encourages **RESTful routing** — mapping HTTP verbs and URL patterns to CRUD operations. Instead of defining seven separate routes manually, you use `resources`:
+
+```ruby
+Rails.application.routes.draw do
+  resources :articles
+end
+```
+
+That single line generates all seven standard routes:
+
+| HTTP Verb | Path | Controller#Action | Purpose |
+|-----------|------|--------------------|---------|
+| GET | /articles | articles#index | List all articles |
+| GET | /articles/new | articles#new | Show creation form |
+| POST | /articles | articles#create | Save new article |
+| GET | /articles/:id | articles#show | Display one article |
+| GET | /articles/:id/edit | articles#edit | Show edit form |
+| PATCH | /articles/:id | articles#update | Update the article |
+| DELETE | /articles/:id | articles#destroy | Delete the article |
+
+Try matching different URLs to routes in the interactive demo:
+
+<RouteMapperDemo client:visible />
+
+### Nested Resources
+
+When models have relationships, routes nest to reflect them. If articles have comments:
+
+```ruby
+resources :articles do
+  resources :comments
+end
+```
+
+This generates URLs like `/articles/1/comments` and `/articles/1/comments/3`, where the article ID is automatically available as `params[:article_id]`. The nesting mirrors the data relationships, making the API intuitive.
+
+## Layouts and Yield
+
+Every page on a website shares common elements: a header with navigation, a footer with copyright info, a `<head>` section with stylesheets. Duplicating these in every view template would be a maintenance nightmare. Rails solves this with **layouts** — wrapper templates that surround every page.
+
+Think of a layout as a picture frame. The frame is the same regardless of what picture sits inside it. You swap the picture (the page content) while keeping the frame (the header, footer, and HTML structure) consistent.
+
+Here is what a default layout looks like:
+
+```erb
+<!DOCTYPE html>
+<html>
+  <head>
+    <title><%= yield :page_title %></title>
+    <%= stylesheet_link_tag "application" %>
+    <%= csrf_meta_tags %>
+  </head>
+  <body>
+    <header>
+      <h1>My Blog</h1>
+      <nav><%= link_to "Home", root_path %></nav>
+    </header>
+
+    <main>
+      <%= yield %>
+    </main>
+
+    <footer>
+      &copy; 2026 My Blog
+    </footer>
+  </body>
+</html>
+```
+
+The magic word here is **`yield`**. When Rails renders a page, it encounters `yield` and inserts the page-specific template content at that point. The main `<%= yield %>` in `<main>` receives the page's HTML. Named yields like `yield :page_title` receive content explicitly provided by the page.
+
+A page template provides content to the layout using `content_for`:
+
+```erb
+<% content_for :page_title do %>
+  Article: Getting Started with Rails
+<% end %>
+
+<h1>Getting Started with Rails</h1>
+<p>Rails makes web development fun again.</p>
+
+<% content_for :sidebar do %>
+  <h3>Related Articles</h3>
+  <ul>
+    <li>Active Record Basics</li>
+    <li>Routing Guide</li>
+  </ul>
+<% end %>
+```
+
+The layout can conditionally render the sidebar: `<% if content_for? :sidebar %><%= yield :sidebar %><% end %>`. Pages that do not provide sidebar content simply do not get one — no configuration needed.
+
+Explore how layouts work by clicking between pages in the demo:
+
+<LayoutYieldDemo client:visible />
+
+## CRUD: The Four Pillars of Data
+
+Every application that stores data performs the same four operations, collectively known as **CRUD**: **Create**, **Read**, **Update**, **Delete**. These are not Rails-specific — they are the fundamental actions you can perform on any data store. Whether you are managing blog articles, user accounts, or shopping cart items, it always comes down to CRUD.
+
+Rails maps CRUD directly to RESTful controller actions and SQL operations:
+
+| CRUD | Controller Action | SQL | HTTP |
+|------|------------------|-----|------|
+| Create | `create` | `INSERT` | POST |
+| Read | `index` / `show` | `SELECT` | GET |
+| Update | `update` | `UPDATE` | PATCH |
+| Delete | `destroy` | `DELETE` | DELETE |
+
+### Create
+
+When a user submits a form to create a new article, the request hits the `create` action:
+
+```ruby
+def create
+  @article = Article.new(article_params)
+  if @article.save
+    redirect_to @article, notice: "Article was successfully created."
+  else
+    render :new, status: :unprocessable_entity
+  end
+end
+```
+
+`Article.new` creates a new model object in memory. `@article.save` validates the data and inserts a row into the `articles` table. The `article_params` method uses **strong parameters** to whitelist which form fields are allowed — a security feature that prevents users from submitting malicious data.
+
+### Read
+
+Reading data is the most common operation. The `index` action fetches all records; the `show` action fetches one:
+
+```ruby
+def index
+  @articles = Article.all
+end
+
+def show
+  @article = Article.find(params[:id])
+end
+```
+
+`Article.all` generates `SELECT * FROM articles`. `Article.find(1)` generates `SELECT * FROM articles WHERE id = 1` and raises an exception if no record is found.
+
+### Update
+
+Updating follows the same pattern as creating — receive form data, find the record, apply changes:
+
+```ruby
+def update
+  @article = Article.find(params[:id])
+  if @article.update(article_params)
+    redirect_to @article, notice: "Article was successfully updated."
+  else
+    render :edit, status: :unprocessable_entity
+  end
+end
+```
+
+### Delete
+
+Destroying a record is the simplest operation:
+
+```ruby
+def destroy
+  @article = Article.find(params[:id])
+  @article.destroy
+  redirect_to articles_url, notice: "Article was successfully destroyed."
+end
+```
+
+Try each CRUD operation in the interactive demo below. Watch the controller action and SQL that Rails generates for each:
+
+<CrudDemo client:visible />
+
+## Self-Check
+
+Let's verify what we have covered. You should be able to answer each of these:
+
+- [ ] What problem does Rails solve compared to building a web app from scratch?
+- [ ] What role does each part of MVC play, and why does the separation matter?
+- [ ] What is a gem, and what does `bundle install` do?
+- [ ] What does `rails new blog` generate, and which folder matters most?
+- [ ] How does "convention over configuration" reduce decisions in a Rails project?
+- [ ] What does `resources :articles` generate in `routes.rb`?
+- [ ] How does `yield` work in a layout, and what is `content_for`?
+- [ ] Which SQL verb maps to each CRUD operation and HTTP verb?
+
+If you can answer all eight, you have a solid foundation in Rails fundamentals. From here, the path forward is building — create a small app, experiment with each concept, and let the conventions guide you. Rails rewards curiosity.

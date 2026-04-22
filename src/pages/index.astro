@@ -27,6 +27,33 @@ const edges = Array.from(edgeMap.entries()).map(([key, weight]) => {
   const [source, target] = key.split('::')
   return { source, target, weight }
 })
+
+function pickGroupTag(postTags: string[]): string {
+  if (postTags.length === 0) return 'other'
+  let best = postTags[0]
+  let bestCount = tagMap.get(postTags[0]) || 0
+  for (let i = 1; i < postTags.length; i++) {
+    const c = tagMap.get(postTags[i]) || 0
+    if (c > bestCount || (c === bestCount && postTags[i] < best)) {
+      best = postTags[i]
+      bestCount = c
+    }
+  }
+  return best
+}
+
+function slugToTitle(slug: string): string {
+  return slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+const groupMap = new Map<string, typeof posts>()
+for (const post of posts) {
+  const group = pickGroupTag(post.data.tags)
+  if (!groupMap.has(group)) groupMap.set(group, [])
+  groupMap.get(group)!.push(post)
+}
+const groups = Array.from(groupMap.entries())
+  .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
 ---
 
 <BaseLayout title="DotsDecoded" description="Deep dives into systems, tools, and the code that powers them.">
@@ -35,7 +62,11 @@ const edges = Array.from(edgeMap.entries()).map(([key, weight]) => {
       <div class="home-header">
         <div style="display:flex; justify-content:space-between; align-items:center;">
           <h1 data-testid="site-title">Dots_Decoded</h1>
-          <button class="theme-toggle" data-testid="theme-toggle" onclick="window.__toggleTheme()">theme</button>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <button class="view-toggle active" id="btn-list" data-view="list" title="List view">&#9776;</button>
+            <button class="view-toggle" id="btn-tree" data-view="tree" title="Tree view">&#8962;</button>
+            <button class="theme-toggle" data-testid="theme-toggle" onclick="window.__toggleTheme()">theme</button>
+          </div>
         </div>
         <p class="subtitle" data-testid="subtitle">deep dives into systems, tools & code</p>
       </div>
@@ -67,6 +98,36 @@ const edges = Array.from(edgeMap.entries()).map(([key, weight]) => {
           </a>
         ))}
       </div>
+      <div class="tree-view" id="tree-view">
+        <div class="tree-root">
+          <div class="tree-folder-root">dotsdecoded/</div>
+          {groups.map(([group, groupPosts], gi) => {
+            const isLast = gi === groups.length - 1
+            const prefix = isLast ? '  ' : '\u2502 '
+            return (
+              <div class="tree-group" data-group={group}>
+                <div class="tree-folder" data-folder={group}>
+                  <span class="tree-prefix">{isLast ? '\u2514\u2500\u2500 ' : '\u251C\u2500\u2500 '}</span>
+                  <span class="tree-icon">&#9658;</span>
+                  <span class="tree-name">{group}/</span>
+                  <span class="tree-count">{groupPosts.length}</span>
+                </div>
+                <div class="tree-children">
+                  {groupPosts.map((post, pi) => {
+                    const postLast = pi === groupPosts.length - 1
+                    return (
+                      <a href={`/blog/${post.id}`} class="tree-file" data-title={post.data.title.toLowerCase()} data-tags={post.data.tags.join(' ').toLowerCase()}>
+                        <span class="tree-prefix">{prefix}{postLast ? '\u2514\u2500\u2500 ' : '\u251C\u2500\u2500 '}</span>
+                        <span class="tree-file-name">{slugToTitle(post.id)}</span>
+                      </a>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
     </div>
     <div class="home-right" data-testid="tag-graph-wrapper">
       <TagGraphDemo client:visible tags={tags} edges={edges} />
@@ -74,91 +135,219 @@ const edges = Array.from(edgeMap.entries()).map(([key, weight]) => {
   </div>
 
   <script is:inline>
-    document.addEventListener('DOMContentLoaded', async () => {
-      const input = document.getElementById('search-input')
-      const list = document.getElementById('blog-list')
+    function viewSet(view) {
+      var list = document.getElementById('blog-list')
+      var tree = document.getElementById('tree-view')
+      var btnList = document.getElementById('btn-list')
+      var btnTree = document.getElementById('btn-tree')
+      if (!list || !tree || !btnList || !btnTree) return
+      if (view === 'tree') {
+        list.style.display = 'none'
+        tree.style.display = 'block'
+        btnList.classList.remove('active')
+        btnTree.classList.add('active')
+      } else {
+        list.style.display = ''
+        tree.style.display = 'none'
+        btnList.classList.add('active')
+        btnTree.classList.remove('active')
+      }
+    }
+
+    function initApp() {
+      document.getElementById('btn-list').addEventListener('click', function() { viewSet('list') })
+      document.getElementById('btn-tree').addEventListener('click', function() { viewSet('tree') })
+
+      var folders = document.querySelectorAll('.tree-folder')
+      folders.forEach(function(folder) {
+        folder.addEventListener('click', function(e) {
+          e.preventDefault()
+          e.stopPropagation()
+          var group = folder.parentElement
+          var children = group.querySelector('.tree-children')
+          var icon = folder.querySelector('.tree-icon')
+          if (children.style.display === 'none') {
+            children.style.display = 'block'
+            icon.textContent = '\u25BE'
+          } else {
+            children.style.display = 'none'
+            icon.textContent = '\u25B8'
+          }
+        })
+      })
+
+      var input = document.getElementById('search-input')
+      var list = document.getElementById('blog-list')
       if (!input || !list) return
 
-      const cards = Array.from(list.querySelectorAll('.blog-card'))
+      var cards = Array.from(list.querySelectorAll('.blog-card'))
+      var treeFiles = Array.from(document.querySelectorAll('.tree-file'))
+      var treeGroups = Array.from(document.querySelectorAll('.tree-group'))
 
-      cards.forEach(card => {
-        card.addEventListener('mouseenter', () => {
-          const tags = (card.getAttribute('data-tags') || '').split(' ').filter(Boolean)
-          window.dispatchEvent(new CustomEvent('posthover', { detail: { tags } }))
+      cards.forEach(function(card) {
+        card.addEventListener('mouseenter', function() {
+          var tags = (card.getAttribute('data-tags') || '').split(' ').filter(Boolean)
+          window.dispatchEvent(new CustomEvent('posthover', { detail: { tags: tags } }))
         })
-        card.addEventListener('mouseleave', () => {
+        card.addEventListener('mouseleave', function() {
           window.dispatchEvent(new CustomEvent('posthover', { detail: { tags: null } }))
         })
       })
 
-      let pagefind = null
-      let debounce = null
+      treeFiles.forEach(function(file) {
+        file.addEventListener('mouseenter', function() {
+          var tags = (file.getAttribute('data-tags') || '').split(' ').filter(Boolean)
+          window.dispatchEvent(new CustomEvent('posthover', { detail: { tags: tags } }))
+        })
+        file.addEventListener('mouseleave', function() {
+          window.dispatchEvent(new CustomEvent('posthover', { detail: { tags: null } }))
+        })
+      })
+
+      var pagefind = null
+      var debounce = null
 
       try {
         if (window.pagefind) {
           pagefind = window.pagefind
         } else {
-          pagefind = await import('/pagefind/pagefind.js')
-          await pagefind.init()
+          import('/pagefind/pagefind.js').then(function(pf) {
+            pagefind = pf
+            pagefind.init()
+          })
         }
       } catch (e) {}
 
-      input.addEventListener('input', (e) => {
-        const q = e.target.value.trim()
+      input.addEventListener('input', function(e) {
+        var q = e.target.value.trim()
+        var ql = q.toLowerCase()
 
-        const ql = q.toLowerCase()
-        cards.forEach((card) => {
-          const title = card.getAttribute('data-title') || ''
-          const tags = card.getAttribute('data-tags') || ''
-          const match = !ql || title.includes(ql) || tags.includes(ql)
+        cards.forEach(function(card) {
+          var title = card.getAttribute('data-title') || ''
+          var tags = card.getAttribute('data-tags') || ''
+          var match = !ql || title.includes(ql) || tags.includes(ql)
           card.style.display = match ? '' : 'none'
+        })
+
+        treeFiles.forEach(function(file) {
+          var title = file.getAttribute('data-title') || ''
+          var tags = file.getAttribute('data-tags') || ''
+          var match = !ql || title.includes(ql) || tags.includes(ql)
+          file.style.display = match ? '' : 'none'
+        })
+
+        treeGroups.forEach(function(group) {
+          var visibleFiles = group.querySelectorAll('.tree-file[style=""], .tree-file:not([style])')
+          var allFiles = group.querySelectorAll('.tree-file')
+          var folder = group.querySelector('.tree-folder')
+          var children = group.querySelector('.tree-children')
+          var hasVisible = false
+          allFiles.forEach(function(f) { if (f.style.display !== 'none') hasVisible = true })
+          folder.style.display = hasVisible || !ql ? '' : 'none'
+          if (ql && hasVisible) {
+            children.style.display = 'block'
+            var icon = folder.querySelector('.tree-icon')
+            if (icon) icon.textContent = '\u25BE'
+          }
         })
 
         clearTimeout(debounce)
         if (!q || !pagefind) return
 
-        debounce = setTimeout(async () => {
-          try {
-            const results = await pagefind.search(q)
+        debounce = setTimeout(function() {
+          if (!pagefind) return
+          pagefind.search(q).then(function(results) {
             if (results.results.length === 0) return
-            const urls = new Set(results.results.map(r => r.url))
+            var urls = new Set(results.results.map(function(r) { return r.url }))
 
-            cards.forEach((card) => {
-              const href = card.getAttribute('href') || ''
-              const match = urls.has(href)
+            cards.forEach(function(card) {
+              var href = card.getAttribute('href') || ''
+              var match = urls.has(href)
               card.style.display = match ? '' : 'none'
             })
-          } catch (e) {}
+
+            treeFiles.forEach(function(file) {
+              var href = file.getAttribute('href') || ''
+              var match = urls.has(href)
+              file.style.display = match ? '' : 'none'
+            })
+
+            treeGroups.forEach(function(group) {
+              var allFiles = group.querySelectorAll('.tree-file')
+              var hasVisible = false
+              allFiles.forEach(function(f) { if (f.style.display !== 'none') hasVisible = true })
+              var folder = group.querySelector('.tree-folder')
+              folder.style.display = hasVisible ? '' : 'none'
+              if (hasVisible) {
+                var children = group.querySelector('.tree-children')
+                children.style.display = 'block'
+                var icon = folder.querySelector('.tree-icon')
+                if (icon) icon.textContent = '\u25BE'
+              }
+            })
+          }).catch(function() {})
         }, 300)
       })
 
-      window.addEventListener('taghover', (e) => {
-        const tag = e.detail?.tag
+      window.addEventListener('taghover', function(e) {
+        var tag = e.detail && e.detail.tag
         if (typeof tag === 'string') {
-          const tl = tag.toLowerCase()
-          cards.forEach((card) => {
-            const tags = card.getAttribute('data-tags') || ''
+          var tl = tag.toLowerCase()
+          cards.forEach(function(card) {
+            var tags = card.getAttribute('data-tags') || ''
             if (tags.includes(tl)) {
               card.classList.remove('card-dim')
             } else {
               card.classList.add('card-dim')
             }
           })
+          treeFiles.forEach(function(file) {
+            var tags = file.getAttribute('data-tags') || ''
+            if (tags.includes(tl)) {
+              file.style.opacity = ''
+            } else {
+              file.style.opacity = '0.3'
+            }
+          })
         } else {
-          cards.forEach((card) => card.classList.remove('card-dim'))
+          cards.forEach(function(card) { card.classList.remove('card-dim') })
+          treeFiles.forEach(function(file) { file.style.opacity = '' })
         }
       })
 
-      window.addEventListener('tagfilter', (e) => {
-        const tag = e.detail?.tag
+      window.addEventListener('tagfilter', function(e) {
+        var tag = e.detail && e.detail.tag
         if (!tag) return
         input.value = tag
-        const tl = tag.toLowerCase()
-        cards.forEach((card) => {
-          const tags = card.getAttribute('data-tags') || ''
+        var tl = tag.toLowerCase()
+        cards.forEach(function(card) {
+          var tags = card.getAttribute('data-tags') || ''
           card.style.display = tags.includes(tl) ? '' : 'none'
         })
+        treeFiles.forEach(function(file) {
+          var tags = file.getAttribute('data-tags') || ''
+          file.style.display = tags.includes(tl) ? '' : 'none'
+        })
+        treeGroups.forEach(function(group) {
+          var allFiles = group.querySelectorAll('.tree-file')
+          var hasVisible = false
+          allFiles.forEach(function(f) { if (f.style.display !== 'none') hasVisible = true })
+          var folder = group.querySelector('.tree-folder')
+          folder.style.display = hasVisible ? '' : 'none'
+          if (hasVisible) {
+            var children = group.querySelector('.tree-children')
+            children.style.display = 'block'
+            var icon = folder.querySelector('.tree-icon')
+            if (icon) icon.textContent = '\u25BE'
+          }
+        })
       })
-    })
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initApp)
+    } else {
+      initApp()
+    }
   </script>
 </BaseLayout>
