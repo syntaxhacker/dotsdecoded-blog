@@ -54,6 +54,10 @@ for (const post of posts) {
 }
 const groups = Array.from(groupMap.entries())
   .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+
+const filteredTags = tags.filter(t => t.count >= 2)
+const filteredNames = new Set(filteredTags.map(t => t.name))
+const filteredEdges = edges.filter(e => filteredNames.has(e.source) && filteredNames.has(e.target))
 ---
 
 <BaseLayout title="DotsDecoded" description="Deep dives into systems, tools, and the code that powers them.">
@@ -130,7 +134,7 @@ const groups = Array.from(groupMap.entries())
       </div>
     </div>
     <div class="home-right" data-testid="tag-graph-wrapper">
-      <TagGraphDemo client:visible tags={tags} edges={edges} />
+      <TagGraphDemo client:visible tags={filteredTags} edges={filteredEdges} />
     </div>
   </div>
 
