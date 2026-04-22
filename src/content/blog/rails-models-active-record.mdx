@@ -1,0 +1,609 @@
+---
+title: "Rails Models & Active Record: Your Database, Object-Oriented"
+description: "Active Record turns database rows into Ruby objects. Learn migrations, validations, associations, callbacks, queries, the N+1 problem, transactions, and polymorphic associations — with interactive demos."
+date: 2026-04-05
+tags: ["ruby", "rails", "active-record", "database", "orm"]
+---
+
+import MigrationDemo from '../../components/demos/MigrationDemo'
+import ValidationDemo from '../../components/demos/ValidationDemo'
+import AssociationDemo from '../../components/demos/AssociationDemo'
+import ActiveRecordQueryDemo from '../../components/demos/ActiveRecordQueryDemo'
+import N1QueryDemo from '../../components/demos/N1QueryDemo'
+import TransactionDemo from '../../components/demos/TransactionDemo'
+
+## What Is Active Record?
+
+Imagine you hired a personal assistant who is fluently bilingual. On one side, they speak perfect SQL — they can chat with PostgreSQL, MySQL, or SQLite all day long. On the other side, they speak perfect Ruby — they can hand you clean, intuitive objects that fit naturally into your application code.
+
+That assistant is **Active Record**. It is the "O" in Rails' ORM (Object-Relational Mapper). Its job is simple: bridge the gap between the relational database world and the object-oriented programming world so you never have to write raw SQL again.
+
+Here is how the translation works:
+
+| Database World | Ruby World |
+|----------------|------------|
+| Table (`users`) | Class (`User`) |
+| Row (`id: 1, name: "Alice"`) | Object (`User.find(1)`) |
+| Column (`name VARCHAR`) | Attribute (`user.name`) |
+| Query (`SELECT * FROM users WHERE id = 1`) | Method call (`User.find(1)`) |
+| Insert (`INSERT INTO users ...`) | Method call (`User.create(name: "Alice")`) |
+
+Active Record is not just a Rails thing — it is a design pattern originally described by Martin Fowler in 2002. But Rails' implementation is by far the most popular, and it is baked directly into the framework. Every model in a Rails application inherits from `ApplicationRecord`, which inherits from `ActiveRecord::Base`, giving it all of this power for free.
+
+When you write `User.find(1)`, Active Record constructs a SQL query, sends it to the database, receives the result, and wraps it in a Ruby object. You get back an instance of `User` with every column accessible as a method. The database row and the Ruby object are the same thing — that is the core idea of the Active Record pattern.
+
+## Creating Models
+
+Creating a model in Rails is a single command:
+
+```bash
+rails generate model User name:string email:string age:integer
+```
+
+This generates several files, but the two that matter are:
+
+1. **The migration file** — `db/migrate/YYYYMMDDHHMMSS_create_users.rb` — defines how to create the `users` table
+2. **The model file** — `app/models/user.rb` — the Ruby class
+
+The generated model file is almost empty:
+
+```ruby
+class User < ApplicationRecord
+end
+```
+
+That is it. By inheriting from `ApplicationRecord`, this class already knows:
+- Its table name is `users` (plural of the class name)
+- Its attributes are whatever columns exist in the `users` table
+- How to find, create, update, and delete records
+
+This is **convention over configuration** in action. Rails assumes the class name `User` maps to the table `users`. The class `BlogPost` maps to `blog_posts`. The class `Person` maps to `people` (Rails handles irregular plurals). You never have to specify the table name explicitly unless you choose to break the convention.
+
+```ruby
+# These all work immediately, zero configuration:
+user = User.create(name: "Alice", email: "alice@example.com")
+user.name   # => "Alice"
+user.email  # => "alice@example.com"
+user.id     # => 1
+
+User.find(1)           # SELECT * FROM users WHERE id = 1
+User.find_by(email: "alice@example.com")  # SELECT * FROM users WHERE email = 'alice@example.com'
+User.all               # SELECT * FROM users
+```
+
+## Migrations: Evolving Your Schema
+
+Think of migrations as **git commits for your database**. Every time you want to change the structure of your database — add a table, remove a column, rename something — you create a migration file. Each migration is timestamped, so they run in the exact order they were created. And just like git, you can roll back to a previous version.
+
+Without migrations, developers would manually run SQL scripts against their databases, share those scripts via email, and hope everyone ran them in the right order. Migrations solve all of that. They provide a single, version-controlled source of truth for your database schema.
+
+A migration file has two methods: `up` (or `change`) and `down`. The `change` method is preferred because Rails can automatically figure out the reverse:
+
+```ruby
+class AddAgeToUsers < ActiveRecord::Migration[7.1]
+  def change
+    add_column :users, :age, :integer, default: 0
+    add_column :users, :bio, :text
+  end
+end
+```
+
+When you run `rails db:migrate`, Rails:
+1. Checks which migrations have already been applied (stored in a `schema_migrations` table)
+2. Runs any pending migrations in timestamp order
+3. Updates `db/schema.rb` to reflect the current state
+
+Common migration commands:
+
+| Command | What it does |
+|---------|-------------|
+| `rails db:migrate` | Run all pending migrations |
+| `rails db:rollback` | Undo the last migration |
+| `rails db:rollback STEP=3` | Undo the last 3 migrations |
+| `rails db:drop db:create db:migrate` | Start completely fresh |
+| `rails db:seed` | Run `db/seeds.rb` to populate sample data |
+
+The `schema.rb` file is the snapshot of your entire database structure at any given moment. It is auto-generated — you should never edit it by hand. When a new developer clones your project, they run `rails db:setup` and Rails uses `schema.rb` to recreate the exact same database structure.
+
+<MigrationDemo client:visible />
+
+## Validations: Guarding Your Data
+
+Imagine you are a bouncer at a club. Before anyone gets in, you check their ID, their age, whether they are on the list. Validations are the bouncer for your database. They ensure that only clean, correct, complete data gets saved.
+
+Why validate at the model level instead of just in the form? Because forms are not the only way data enters your application. You might have an API endpoint, a background job, a console command, or a test that creates records. If validations only live in the UI, all those other paths are unprotected.
+
+```ruby
+class User < ApplicationRecord
+  validates :name, presence: true, length: { minimum: 2, maximum: 50 }
+  validates :email, presence: true, uniqueness: true,
+            format: { with: URI::MailTo::EMAIL_REGEXP }
+  validates :age, numericality: { only_integer: true,
+            greater_than_or_equal_to: 0, less_than_or_equal_to: 150 },
+            allow_nil: true
+
+  validate :name_must_not_contain_numbers
+
+  private
+
+  def name_must_not_contain_numbers
+    if name =~ /\d/
+      errors.add(:name, "cannot contain numbers")
+    end
+  end
+end
+```
+
+When validations fail, the `save` method returns `false` (it does not raise an exception). You can check the `errors` object to see what went wrong:
+
+```ruby
+user = User.new(name: "A", email: "not-an-email", age: -5)
+user.save  # => false
+
+user.errors.full_messages
+# => ["Name is too short (minimum is 2 characters)",
+#     "Email is invalid",
+#     "Age must be greater than or equal to 0"]
+```
+
+Common validation helpers:
+
+| Validation | Purpose | Example |
+|-----------|---------|---------|
+| `presence: true` | Must not be blank | `validates :name, presence: true` |
+| `uniqueness: true` | Must be unique in the table | `validates :email, uniqueness: true` |
+| `length: { ... }` | String length constraints | `length: { minimum: 8, maximum: 50 }` |
+| `format: { with: /.../ }` | Must match a regex | `format: { with: /\A\d{3}-\d{4}\z/ }` |
+| `numericality: true` | Must be a number | `numericality: { greater_than: 0 }` |
+| `inclusion: { in: [...] }` | Must be in a list | `inclusion: { in: %w[active inactive] }` |
+| `confirmation: true` | Must match a second field | `validates :password, confirmation: true` |
+
+<ValidationDemo client:visible />
+
+## Associations: Connecting Your Models
+
+Real applications have related data. A blog has posts, posts have comments, comments belong to users, posts can have tags. Associations let you declare these relationships in your models, and Active Record gives you methods to navigate between them.
+
+Think of associations like family relationships. If you know Alice, you can ask about her children (her posts). If you know a post, you can ask about its parent (its author). The foreign key column is the link that makes it all work.
+
+Here are the main association types:
+
+**`belongs_to`** — This model has a foreign key pointing to another model.
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :post
+  belongs_to :author, class_name: "User"
+end
+```
+
+Each comment has a `post_id` column in its database table. When you call `comment.post`, Active Record fetches the related `Post` record.
+
+**`has_many`** — The other model has a foreign key pointing to this one.
+
+```ruby
+class User < ApplicationRecord
+  has_many :posts
+end
+
+class Post < ApplicationRecord
+  has_many :comments
+end
+```
+
+A user can have many posts. A post can have many comments. The foreign key lives on the "many" side.
+
+**`has_one`** — Like `has_many`, but only one related record exists.
+
+```ruby
+class User < ApplicationRecord
+  has_one :profile
+end
+```
+
+**`has_many :through`** — The most powerful association. It lets you reach models through an intermediate join table.
+
+```ruby
+class Post < ApplicationRecord
+  has_many :taggings
+  has_many :tags, through: :taggings
+end
+```
+
+This says: "A post has many taggings, and through those taggings, it has many tags." No need to manually write JOIN queries.
+
+**`has_and_belongs_to_many`** — A simpler many-to-many without a separate model for the join table. Less common in modern Rails because it does not support extra columns on the join table.
+
+```ruby
+class Post < ApplicationRecord
+  has_and_belongs_to_many :tags
+end
+```
+
+The foreign key is always on the `belongs_to` side. When you write `belongs_to :post`, Active Record looks for a `post_id` column on the current model's table.
+
+<AssociationDemo client:visible />
+
+### The `dependent` Option
+
+What happens when you delete a user who has 50 posts? By default, nothing — the posts become orphans with a `user_id` pointing to a non-existent record. You can control this with the `dependent` option:
+
+```ruby
+class User < ApplicationRecord
+  has_many :posts, dependent: :destroy    # Also destroy each post
+  has_many :comments, dependent: :nullify  # Set user_id to NULL on each comment
+  has_many :likes, dependent: :delete_all  # Delete all in one SQL query (no callbacks)
+end
+```
+
+## Callbacks: Hooks Into the Lifecycle
+
+Callbacks are like a **checklist before leaving the house**. Keys? Wallet? Phone? Coat? Each item on the list is a small task that runs automatically at a specific moment. In Active Record, callbacks are methods that run automatically before or after certain lifecycle events.
+
+```ruby
+class User < ApplicationRecord
+  before_save :normalize_email
+  before_create :set_default_role
+  after_create :send_welcome_email
+  before_destroy :check_if_admin
+
+  private
+
+  def normalize_email
+    self.email = email.downcase.strip
+  end
+
+  def set_default_role
+    self.role ||= "member"
+  end
+
+  def send_welcome_email
+    UserMailer.welcome(self).deliver_later
+  end
+
+  def check_if_admin
+    throw(:abort) if role == "admin"
+  end
+end
+```
+
+The full list of available callbacks:
+
+| Timing | Callback | When it fires |
+|--------|----------|---------------|
+| Before | `before_validation` | Before validations run |
+| After | `after_validation` | After validations run |
+| Before | `before_save` | Before save (create or update) |
+| After | `after_save` | After save (create or update) |
+| Before | `before_create` | Before a new record is inserted |
+| After | `after_create` | After a new record is inserted |
+| Before | `before_update` | Before an existing record is updated |
+| After | `after_update` | After an existing record is updated |
+| Before | `before_destroy` | Before a record is deleted |
+| After | `after_destroy` | After a record is deleted |
+
+The callback chain is strict. If any `before_*` callback throws `:abort`, the entire operation is cancelled. This is how the `check_if_admin` method prevents deleting admin users — it throws `:abort`, and the destroy never happens.
+
+### When to Use Callbacks vs. Service Objects
+
+Callbacks are convenient, but they can become a trap. As your application grows, you might end up with 15 callbacks on a single model, each triggering side effects that are hard to test and debug. A common guideline:
+
+- Use callbacks for **data integrity** tasks that should always happen (like normalizing an email address or generating a slug)
+- Use **service objects** or **controller callbacks** for business logic that involves external effects (like sending emails, processing payments, or notifying other systems)
+
+The reason is separation of concerns. Your model should not know about email delivery or payment processing. Those belong in dedicated service objects that you call explicitly from your controllers.
+
+```ruby
+# Instead of this (callback coupling):
+class User < ApplicationRecord
+  after_create :send_welcome_email
+  after_create :create_default_settings
+  after_create :notify_slack
+end
+
+# Prefer this (explicit service object):
+class Users::RegistrationService
+  def call(user)
+    user.save!
+    UserMailer.welcome(user).deliver_later
+    UserSetting.create!(user: user)
+    SlackNotifier.notify("New user: #{user.name}")
+  end
+end
+```
+
+## Querying with Active Record
+
+The query interface is where Active Record truly shines. Instead of writing raw SQL strings, you chain Ruby methods together to build complex queries. Each method returns an `ActiveRecord::Relation` — a lazy-evaluated query that is not sent to the database until you actually need the results (when you iterate, call `to_a`, or use methods like `first`, `last`, `count`).
+
+Think of it like building a complex search on Amazon. You start with "all products", then add a category filter, then sort by price, then limit to 10 results. Each step narrows the results further.
+
+```ruby
+# The basic methods
+User.all                                    # SELECT * FROM users
+User.find(1)                                # SELECT * FROM users WHERE id = 1 (raises if not found)
+User.find_by(email: "alice@example.com")    # SELECT * FROM users WHERE email = '...' (returns nil if not found)
+User.first                                  # SELECT * FROM users ORDER BY id ASC LIMIT 1
+User.take(5)                                # SELECT * FROM users LIMIT 5
+User.count                                  # SELECT COUNT(*) FROM users
+```
+
+### Chaining Methods
+
+Every query method returns a relation, so you can chain them:
+
+```ruby
+User.where(role: "author")
+    .where("age >= ?", 18)
+    .order("posts_count DESC")
+    .limit(10)
+    .select("id, name, posts_count")
+```
+
+This generates a single SQL query:
+
+```sql
+SELECT id, name, posts_count
+FROM users
+WHERE role = 'author' AND age >= 18
+ORDER BY posts_count DESC
+LIMIT 10
+```
+
+### Common Query Methods
+
+| Method | SQL Equivalent | Example |
+|--------|---------------|---------|
+| `where` | `WHERE` clause | `User.where(active: true)` |
+| `order` | `ORDER BY` | `User.order("created_at DESC")` |
+| `limit` | `LIMIT` | `User.limit(10)` |
+| `offset` | `OFFSET` | `User.offset(20)` |
+| `select` | Column selection | `User.select("id, name")` |
+| `joins` | `INNER JOIN` | `User.joins(:posts)` |
+| `left_joins` | `LEFT OUTER JOIN` | `User.left_joins(:posts)` |
+| `group` | `GROUP BY` | `User.group(:role)` |
+| `having` | `HAVING` | `User.group(:role).having("COUNT(*) > 5")` |
+| `distinct` | `DISTINCT` | `User.distinct` |
+| `includes` | Eager loading | `User.includes(:posts)` |
+| `pluck` | Get specific values | `User.pluck(:name)` |
+
+### Conditions
+
+```ruby
+# Hash syntax (simple equality)
+User.where(role: "admin", active: true)
+
+# String syntax (for complex conditions)
+User.where("age >= ? AND name LIKE ?", 18, "%Alice%")
+
+# Array syntax (safe from SQL injection)
+User.where("created_at BETWEEN ? AND ?", 1.year.ago, Date.today)
+
+# Named parameters
+User.where("name ILIKE :search", search: "%alice%")
+```
+
+The `?` placeholder is critical for security. Never interpolate user input directly into SQL strings — that opens the door to SQL injection attacks. Always use parameterized queries.
+
+<ActiveRecordQueryDemo client:visible />
+
+## The N+1 Query Problem
+
+Imagine you go to the grocery store. On Monday, you drive there to buy milk. On Tuesday, you drive there again to buy bread. On Wednesday, you drive there for eggs. Ten trips for ten items. Ridiculous, right? You would make a list and go once.
+
+That is the N+1 query problem. It happens when you load a collection of records, then loop through them and access associations one by one:
+
+```ruby
+# 1 query to load all posts
+posts = Post.all
+
+# N queries — one for each post's author
+posts.each do |post|
+  puts post.author.name
+end
+```
+
+If you have 100 posts, this fires **101 queries**: 1 to load the posts, and 100 to load each author individually. On a page that displays 500 posts with comments and tags, the query count explodes into the thousands. The page that should take 50ms now takes 5 seconds.
+
+### The Fix: Eager Loading
+
+Rails gives you three ways to solve this:
+
+```ruby
+# includes — the most common, uses 2 queries (one for posts, one for authors)
+Post.includes(:author).each { |p| puts p.author.name }
+
+# preload — like includes but always uses separate queries
+Post.preload(:author).each { |p| puts p.author.name }
+
+# eager_load — forces a single query with LEFT OUTER JOIN
+Post.eager_load(:author).each { |p| puts p.author.name }
+```
+
+With `includes`, Rails loads all the posts in one query, then loads all the referenced authors in a second query using `WHERE author_id IN (...)`. When you access `post.author` in the loop, it is already in memory — no additional query fires.
+
+### Nested Includes
+
+You can eager load multiple levels deep:
+
+```ruby
+Post.includes(:author, comments: [:author, :likes])
+```
+
+This loads posts, their authors, their comments, each comment's author, and each comment's likes — all in a small handful of queries instead of potentially hundreds.
+
+### How to Detect N+1 Problems
+
+The simplest way is to look at your development log. If you see the same query repeated dozens of times with different IDs, that is an N+1. You can also use the `bullet` gem, which detects N+1 queries automatically and logs warnings:
+
+```ruby
+# In your Gemfile (development only)
+group :development do
+  gem "bullet"
+end
+```
+
+The bullet gem will alert you in your browser and in the console whenever it detects an N+1 query, telling you exactly which line of code caused it and suggesting the fix.
+
+<N1QueryDemo client:visible />
+
+## Transactions: All or Nothing
+
+Imagine you are transferring $200 from Alice's bank account to Bob's. The system deducts $200 from Alice, but then crashes before adding it to Bob. Alice is $200 poorer and Bob never received the money. The money has vanished into thin air.
+
+A **transaction** prevents this. It groups multiple database operations into a single atomic unit. Either every operation succeeds, or none of them do. If anything goes wrong partway through, everything is rolled back to the original state.
+
+```ruby
+ActiveRecord::Base.transaction do
+  alice.update!(balance: alice.balance - 200)
+  bob.update!(balance: bob.balance + 200)
+end
+```
+
+If `bob.update!` fails (maybe Bob's account is frozen, or a network error occurs), the entire transaction is rolled back. Alice's balance goes back to what it was before. No partial changes survive.
+
+Transactions provide the **A** (Atomicity) and **C** (Consistency) from the ACID properties:
+
+| Property | Meaning |
+|----------|---------|
+| **Atomicity** | All operations succeed or none do |
+| **Consistency** | The database moves from one valid state to another |
+| **Isolation** | Concurrent transactions do not interfere with each other |
+| **Durability** | Once committed, changes survive crashes and power loss |
+
+### Common Transaction Patterns
+
+```ruby
+# Explicit transaction block
+ActiveRecord::Base.transaction do
+  order = Order.create!(user: user, total: 100)
+  order.items.create!(product: product, quantity: 1, price: 100)
+  user.update!(points: user.points + 10)
+end
+
+# Transaction on a specific record
+user.transaction do
+  user.posts.create!(title: "First post")
+  user.profile.update!(bio: "Hello world")
+end
+
+# With rescue for custom error handling
+ActiveRecord::Base.transaction do
+  order.process!
+rescue ActiveRecord::RecordInvalid => e
+  Rails.logger.error("Order failed: #{e.message}")
+  raise
+end
+```
+
+### The `!` Methods
+
+Notice the `update!` and `create!` methods (with the bang). These raise exceptions on failure instead of returning `false`. Inside a transaction, you want exceptions because they trigger the automatic rollback. If you use `update` (without the bang), it silently returns `false`, the transaction continues, and you end up with partial data.
+
+```ruby
+# BAD — silently fails, transaction does not rollback
+ActiveRecord::Base.transaction do
+  user.update(name: "Alice")  # returns false, continues
+  post.update(title: "Hello")  # also fails, continues
+end
+# Both failed but transaction committed "successfully"
+
+# GOOD — raises exception, transaction rolls back
+ActiveRecord::Base.transaction do
+  user.update!(name: "Alice")
+  post.update!(title: "Hello")
+end
+```
+
+<TransactionDemo client:visible />
+
+## Polymorphic Associations
+
+Sometimes a model can belong to more than one type of other model. A **comment** could belong to a `Post` or a `Photo` or a `Video`. Without polymorphic associations, you would need three separate foreign keys (`post_id`, `photo_id`, `video_id`) on the comments table, plus conditional logic to figure out which one to use.
+
+Polymorphic associations solve this with two columns instead of many: a `*_type` column (a string naming the model) and a `*_id` column (the record's ID). Together, they form a flexible pointer to any associated record.
+
+Think of it like a "commentable" interface. A Post, a Photo, and a Video are all "commentable" — they can all have comments attached. The comment does not need to know or care what type of thing it belongs to, only that it belongs to something commentable.
+
+```ruby
+class Comment < ApplicationRecord
+  belongs_to :commentable, polymorphic: true
+end
+
+class Post < ApplicationRecord
+  has_many :comments, as: :commentable
+end
+
+class Photo < ApplicationRecord
+  has_many :comments, as: :commentable
+end
+```
+
+The `comments` table has these columns:
+
+```ruby
+class CreateComments < ActiveRecord::Migration[7.1]
+  def change
+    create_table :comments do |t|
+      t.text :body
+      t.references :commentable, polymorphic: true, null: false
+      t.timestamps
+    end
+  end
+end
+```
+
+This creates two columns: `commentable_id` (integer) and `commentable_type` (string). A comment on post #5 would have `commentable_id: 5` and `commentable_type: "Post"`. A comment on photo #12 would have `commentable_id: 12` and `commentable_type: "Photo"`.
+
+Using it is seamless:
+
+```ruby
+post = Post.first
+post.comments.create(body: "Great article!")
+post.comments  # => all comments on this post
+
+photo = Photo.first
+photo.comments  # => all comments on this photo
+
+comment = Comment.first
+comment.commentable  # => the Post or Photo this comment belongs to
+```
+
+### Another Example: Likable Content
+
+Polymorphic associations are not limited to comments. Any time you have "something that can be [actioned]" across multiple model types, they are a natural fit:
+
+```ruby
+class Like < ApplicationRecord
+  belongs_to :user
+  belongs_to :likeable, polymorphic: true
+end
+
+class Post < ApplicationRecord
+  has_many :likes, as: :likeable
+end
+
+class Comment < ApplicationRecord
+  has_many :likes, as: :likeable
+end
+```
+
+### Trade-offs
+
+Polymorphic associations trade query simplicity for schema flexibility. The downside is that foreign keys are not enforced at the database level (the database sees a generic integer and string, not a reference to a specific table). This means you cannot use database-level cascading deletes or guarantees. Additionally, querying all comments across all types requires querying the `commentable_type` column, which can be slower than a direct foreign key.
+
+For most applications, the trade-off is worth it. But if you need strict referential integrity at the database level, consider using separate tables or a dedicated join model instead.
+
+## Self-Check
+
+Before moving on, make sure you can answer these:
+
+- What does Active Record do, and what pattern does it implement?
+- How does Rails know which table a model maps to?
+- What is a migration, and how do you roll one back?
+- Why validate at the model level instead of only in the UI?
+- What is the difference between `has_many` and `belongs_to`? Where does the foreign key live?
+- When should you avoid callbacks in favor of service objects?
+- What is the N+1 problem, and what method solves it?
+- What happens inside a transaction when one operation fails?
+- What two database columns make a polymorphic association work?

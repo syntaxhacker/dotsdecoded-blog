@@ -1,0 +1,206 @@
+---
+title: "Security & Microservices: Building Systems That Are Safe and Scalable"
+description: "JWT, OAuth 2.0, RBAC, ABAC, TLS encryption, secrets management — plus monolith to microservices migration, service discovery, inter-service communication, and circuit breakers."
+date: 2026-04-22
+tags: ["system-design", "security", "microservices", "authentication", "authorization"]
+---
+
+import JwtFlowDemo from '../../components/demos/JwtFlowDemo'
+import OauthFlowDemo from '../../components/demos/OauthFlowDemo'
+import RbacDemo from '../../components/demos/RbacDemo'
+import MonolithVsMicroDemo from '../../components/demos/MonolithVsMicroDemo'
+import ServiceDiscoveryDemo from '../../components/demos/ServiceDiscoveryDemo'
+import InterServiceCommDemo from '../../components/demos/InterServiceCommDemo'
+import CircuitBreakerDemo from '../../components/demos/CircuitBreakerDemo'
+
+## Authentication vs Authorization
+
+Imagine you walk into a concert venue. At the front door, security checks your ID to confirm you are who you say you are. That's authentication. Then, they look at your ticket to see which section you're allowed in — VIP, floor, or balcony. That's authorization.
+
+**Authentication** answers: who are you? It's the process of verifying identity. Your username/password, your fingerprint, your face scan — all authentication mechanisms.
+
+**Authorization** answers: what can you do? It's the process of checking permissions. You're logged in as Jane, but can she delete users? Can she access the billing page?
+
+Both matter because they solve different problems. Authentication without authorization means anyone who logs in can do anything. Authorization without authentication means you're granting permissions to strangers. Every secure system needs both.
+
+In practice, authentication produces an identity (a user object, a session, a token). Authorization uses that identity to make access decisions. The flow is always: authenticate first, then authorize.
+
+## Authentication Methods
+
+There are three major approaches to authentication, each with different tradeoffs.
+
+**Session-based authentication** is the oldest approach. The server creates a session (stored in memory, database, or Redis) and sends the session ID to the client as a cookie. On every request, the browser sends the cookie, and the server looks up the session. Simple, but the server must store session state — a problem when you have multiple servers behind a load balancer unless you use shared storage like Redis.
+
+**Token-based authentication (JWT)** flips the model. Instead of storing session state on the server, the server creates a self-contained token (a JSON Web Token) and sends it to the client. The token contains the user's identity and is cryptographically signed. On every request, the client sends the token, and the server verifies the signature — no database lookup needed. This makes stateless authentication possible, which is essential for microservices.
+
+**OAuth 2.0** is not an authentication protocol — it's a delegated authorization protocol. You use it when you want your app to access a user's data in another service without asking for their password. "Login with Google" uses OAuth 2.0 under the hood.
+
+<JwtFlowDemo client:visible />
+
+## OAuth 2.0 Deep Dive
+
+OAuth 2.0 has four roles:
+
+- **Resource Owner** — the user who owns the data (you)
+- **Client** — the application requesting access (the app you're building)
+- **Authorization Server** — the service that authenticates the user and issues tokens (Google, GitHub, etc.)
+- **Resource Server** — the API that holds the protected data (Google's userinfo API)
+
+The **Authorization Code flow** is the most common and most secure flow. The client redirects the user to the authorization server, the user logs in and grants consent, the authorization server redirects back with an authorization code, and the client exchanges the code for tokens on its backend. The code is exchanged server-to-server, so the client secret is never exposed to the browser.
+
+The **Implicit flow** was designed for single-page applications (browser-only, no backend). The authorization server directly returns tokens in the URL fragment. This flow is now deprecated because tokens exposed in the URL are vulnerable to interception. Use Authorization Code with PKCE instead.
+
+The **Client Credentials flow** is for server-to-server communication. No user involved. The client authenticates with its own credentials (client_id + client_secret) and gets an access token to call APIs directly. Used by cron jobs, background workers, and microservices calling each other.
+
+<OauthFlowDemo client:visible />
+
+## Authorization Models
+
+Once you know who the user is, you need to decide what they can do. Two models dominate:
+
+**RBAC (Role-Based Access Control)** groups permissions into roles. You assign roles to users, and users inherit all permissions of their role. Admin, Editor, Viewer — each role has a fixed set of permissions. Simple to implement, simple to audit, and works well for most applications.
+
+**ABAC (Attribute-Based Access Control)** evaluates policies based on attributes: user attributes (department, location, clearance level), resource attributes (owner, classification, department), and environment attributes (time of day, IP address, device). Instead of "admins can delete posts," the policy is "users in the engineering department can delete posts owned by them during business hours." More flexible, but more complex to implement and audit.
+
+| Aspect | RBAC | ABAC |
+|--------|------|------|
+| Granularity | Role-level | Attribute-level |
+| Complexity | Low | High |
+| Flexibility | Fixed roles | Dynamic policies |
+| Best for | Simple org structures | Multi-tenant, regulated |
+| Audit trail | Easy (role assignment) | Complex (policy evaluation) |
+
+Start with RBAC. Add ABAC only when you have requirements that roles can't express — like "only the document owner can edit it" or "users in the EU can't access data stored in the US."
+
+<RbacDemo client:visible />
+
+## Encryption & TLS
+
+Encryption protects data in two states: **at rest** (stored on disk) and **in transit** (traveling over the network). You need both. Encrypting at rest without encrypting in transit means an attacker on the network can read your data in transit. Encrypting in transit without encrypting at rest means anyone who steals your database can read everything.
+
+**Symmetric encryption** uses one key for both encryption and decryption. Fast, used for encrypting large amounts of data. AES-256 is the standard. The challenge: how do you share the key securely?
+
+**Asymmetric encryption** uses a key pair: a public key (shared openly) and a private key (kept secret). Encrypt with the public key, decrypt with the private key. Slower, used for key exchange and digital signatures. RSA and ECDSA are common algorithms.
+
+**TLS** (Transport Layer Security) uses both. The TLS handshake uses asymmetric encryption to securely exchange a symmetric key. Then both sides use that symmetric key for fast encrypted communication. This is how HTTPS works — your browser and the server negotiate a shared secret, then all traffic is encrypted with AES.
+
+The TLS 1.3 handshake (the current standard) completes in 1 round trip. The server sends its certificate (signed by a Certificate Authority), the client verifies it, and both sides derive a shared secret using Diffie-Hellman key exchange. The server's private key never leaves the server.
+
+**Certificate Authorities** (CAs) are trusted organizations that sign certificates. Your browser trusts certificates signed by CAs like Let's Encrypt, DigiCert, and GlobalSign. When you visit `https://example.com`, your browser checks that the certificate is valid, not expired, and signed by a trusted CA. If any check fails, you see the "Your connection is not private" warning.
+
+**API security best practices:** Always use HTTPS (never HTTP). Validate TLS certificates properly (don't disable verification). Use certificate pinning for mobile apps. Set secure cookie flags (Secure, HttpOnly, SameSite). Use short-lived certificates with automatic rotation.
+
+## Secrets Management
+
+Every application needs secrets: database passwords, API keys, encryption keys, OAuth client secrets. How you store and manage them determines whether a single breach exposes your entire system.
+
+**Never hardcode secrets in source code.** This is the most common security mistake. Secrets in code end up in Git history, CI logs, and deployed artifacts. Even if you remove them later, they're still in the commit history. Anyone with repository access has your secrets.
+
+**Environment variables** are the minimum viable approach. Set secrets as environment variables on the server, not in code. Better than hardcoding, but still has problems: they're visible in process listings, crash dumps, and container inspect output. They're also hard to rotate — you need to restart the process.
+
+**Secret managers** (HashiCorp Vault, AWS Secrets Manager, Azure Key Vault) solve these problems. Secrets are stored encrypted at rest, accessed via API calls with fine-grained access control, and can be rotated automatically. Vault can even generate dynamic secrets (short-lived database credentials that auto-expire).
+
+**Secret rotation** is the practice of regularly replacing secrets with new ones. If a secret is leaked, rotation limits the window of exposure. Most secret managers support automatic rotation on a schedule. The application fetches the current secret from the manager on startup (or caches it briefly), so rotation is seamless.
+
+**Principle of least privilege:** every service should only have access to the secrets it needs, nothing more. The payment service needs the payment gateway API key, not the database root password. The auth service needs the JWT signing key, not the S3 access key. Audit access regularly and revoke permissions that are no longer needed.
+
+## Monolith vs Microservices
+
+Think of a department store. Everything is under one roof: clothing, electronics, food, pharmacy. One entrance, one checkout system, one manager. That's a monolith. Simple to navigate, simple to manage, but if the pharmacy closes for renovation, customers complain that "the whole store is under construction."
+
+Now think of a shopping mall. Each store is independent: different owners, different hours, different checkouts. The food court is separate from the shoe store. If the pharmacy closes, the rest of the mall operates normally. That's microservices. More flexible, but now you need a directory (service discovery), pathways between stores (inter-service communication), and security guards at every entrance (per-service auth).
+
+**Monolith advantages:** Simple to develop, test, and deploy. One codebase, one database, one deployment pipeline. No network latency between features. Easy to debug — you can step through the entire request in one process.
+
+**Monolith disadvantages:** As the codebase grows, everything is coupled. A change in the billing module requires redeploying the entire application. Scaling means scaling the whole thing — you can't scale just the search feature. One bad memory leak crashes everything.
+
+**Microservices advantages:** Independent deployment — update the payment service without touching anything else. Independent scaling — run 10 instances of the API gateway and 2 of the billing service. Technology diversity — use Go for performance-critical services, Python for ML services. Failure isolation — if the notification service crashes, orders still process.
+
+**Microservices disadvantages:** Distributed system complexity. Network latency between services. Data consistency is hard (no single database transaction). Debugging requires distributed tracing. Operations overhead: monitoring, logging, and deployment for every service.
+
+**When to break a monolith:** Don't start with microservices. Start with a well-structured monolith. Break it apart when you have clear boundaries (bounded contexts), teams that own different parts independently, and specific scaling needs that the monolith can't meet.
+
+<MonolithVsMicroDemo client:visible />
+
+## Service Discovery
+
+In a monolith, components call each other through function calls. In microservices, they call each other over the network. But how does the Order Service know the IP address of the Payment Service? In a monolith, it's a function import. In microservices, it's a network address that can change at any time (containers restart, auto-scaling adds/removes instances).
+
+**Service discovery** solves this problem. Services register themselves with a central registry when they start, and deregister when they stop. The registry maintains a list of healthy service instances and their addresses.
+
+**Client-side discovery:** The client (the calling service) queries the registry to get a list of available instances, then picks one (usually round-robin or random). The client does the load balancing. Netflix Eureka uses this pattern. The client needs registry-awareness built in.
+
+**Server-side discovery:** The client sends requests to a load balancer, and the load balancer queries the registry to find available instances. The client doesn't know about the registry at all. Nginx, HAProxy, and AWS ALB work this way. Simpler for the client, but adds a load balancer as a dependency.
+
+**Service registries:** Consul (HashiCorp), Eureka (Netflix OSS), etcd (CoreOS, used by Kubernetes), and ZooKeeper (Apache). Each has different consistency models, health checking approaches, and integration ecosystems. Kubernetes has service discovery built in — services get DNS names and stable virtual IPs.
+
+<ServiceDiscoveryDemo client:visible />
+
+## Inter-Service Communication
+
+Services need to talk to each other. Two fundamental patterns: synchronous and asynchronous.
+
+**Synchronous communication** is like a phone call. Service A calls Service B and waits for a response. REST (HTTP/JSON) and gRPC (HTTP/2, Protocol Buffers) are the common protocols. Simple mental model — you send a request, you get a response. But Service A is blocked while waiting. If Service B is slow, Service A is slow. If Service B is down, Service A fails.
+
+**Asynchronous communication** is like sending a text message. Service A publishes a message to a queue, and continues working. Service B picks up the message whenever it's ready. Message brokers (RabbitMQ, Apache Kafka, AWS SQS) handle the queue. Service A doesn't wait — it's decoupled from Service B's availability and response time.
+
+| Aspect | Synchronous | Asynchronous |
+|--------|-------------|-------------|
+| Coupling | Tight (caller depends on callee) | Loose (fire and forget) |
+| Latency | Immediate response | Eventual processing |
+| Failure handling | Caller must handle errors | Message retries automatically |
+| Debugging | Easy (request/response chain) | Hard (distributed events) |
+| Data consistency | Strong (transactional) | Eventual |
+| Best for | Queries, real-time operations | Commands, notifications, events |
+
+**API contracts** define how services communicate. A contract specifies the endpoints, request/response formats, error codes, and versioning. Breaking a contract (changing a field name, removing an endpoint) breaks all consumers. Version your APIs (v1, v2) and use backward-compatible changes when possible. For gRPC, Protocol Buffers have built-in versioning rules.
+
+<InterServiceCommDemo client:visible />
+
+## Circuit Breaker Pattern
+
+Imagine an electrical circuit breaker in your house. When too much current flows (a short circuit), the breaker trips and stops the flow. This prevents wires from overheating and starting a fire. The circuit breaker in software does the same thing — when a downstream service starts failing, the circuit breaker stops sending requests to it, preventing cascade failures.
+
+The circuit breaker has three states:
+
+**Closed (normal):** All requests pass through to the downstream service. The circuit breaker counts failures. If the failure count exceeds a threshold within a time window, it trips to Open.
+
+**Open (blocking):** All requests are immediately rejected (no network call made). A fallback response is returned instead. This protects the downstream service from being overwhelmed with requests while it's struggling, and prevents the caller from wasting time waiting for timeouts. After a timeout period, the circuit transitions to Half-Open.
+
+**Half-Open (testing):** A limited number of test requests are allowed through. If they succeed, the circuit closes (service recovered). If they fail, the circuit reopens (service still down). This is the recovery probe.
+
+**Fallback strategies** are what happen when the circuit is open. Common fallbacks: return cached data, return a default value, queue the request for later, or return a graceful error message. The key insight: a fast "service unavailable" response is better than a slow timeout that brings down the entire system.
+
+In a microservices architecture, circuit breakers should be on every inter-service call. Without them, one slow service can cause a chain reaction: Service A waits for Service B, threads pile up, Service A becomes slow, Service C waiting for Service A also piles up, and soon the entire system is unresponsive. This is called a cascading failure, and circuit breakers are the primary defense.
+
+<CircuitBreakerDemo client:visible />
+
+## Service Mesh
+
+A service mesh is an infrastructure layer that handles all service-to-service communication. Instead of each service implementing its own load balancing, encryption, and observability, the service mesh provides these features transparently.
+
+The **sidecar proxy pattern** is how most service meshes work. Every service instance has a proxy (like Envoy) deployed alongside it. All network traffic flows through the proxy. The service code doesn't know about the mesh — it sends requests to localhost, and the proxy handles routing, encryption, retries, and circuit breaking.
+
+**Key features of a service mesh:**
+- **mTLS (mutual TLS):** Automatic encryption between all services. You don't configure TLS per service — the mesh handles it.
+- **Load balancing:** Intelligent routing based on latency, error rates, and traffic weight (useful for canary deployments).
+- **Circuit breaking:** Built-in circuit breakers with configurable thresholds.
+- **Observability:** Distributed tracing, metrics, and access logs for every inter-service call.
+- **Traffic management:** Canary deployments, A/B testing, traffic splitting, fault injection for chaos testing.
+
+**Istio** and **Linkerd** are the two major service mesh implementations. Istio is more feature-rich but more complex. Linkerd is lighter and simpler. Kubernetes has both as optional add-ons. In practice, adopt a service mesh when you have enough microservices (typically 10+) that managing inter-service communication manually becomes a burden. For smaller systems, a well-configured load balancer with circuit breakers in application code is usually sufficient.
+
+## Self-Check
+
+Can you answer these without looking back?
+
+- What is the difference between authentication and authorization?
+- Why does the Authorization Code flow exchange the code on the backend instead of the browser?
+- When would you choose ABAC over RBAC?
+- Why should you never hardcode secrets in source code?
+- What is the key advantage of microservices over monoliths when one service fails?
+- How does client-side service discovery differ from server-side discovery?
+- Why might you choose asynchronous communication over synchronous?
+- What happens when a circuit breaker is in the Open state?
+- What is the sidecar proxy pattern in a service mesh?
+- Why does the TLS handshake use asymmetric encryption instead of symmetric?

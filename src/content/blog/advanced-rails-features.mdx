@@ -1,0 +1,878 @@
+---
+title: "Advanced Rails Features: Real-Time, Jobs, APIs, and More"
+description: "Go beyond the basics with ActionCable for real-time features, Active Job for background processing, I18n for multilingual apps, Rails API mode, Rack middleware, file uploads, and Rails Engines — with interactive demos."
+date: 2026-04-05
+tags: ["ruby", "rails", "advanced", "actioncable", "api"]
+---
+
+import I18nDemo from '../../components/demos/I18nDemo'
+import ActionCableDemo from '../../components/demos/ActionCableDemo'
+import ActiveJobDemo from '../../components/demos/ActiveJobDemo'
+import MultiTenancyDemo from '../../components/demos/MultiTenancyDemo'
+import RackMiddlewareDemo from '../../components/demos/RackMiddlewareDemo'
+import RailsApiDemo from '../../components/demos/RailsApiDemo'
+
+## What This Covers
+
+You have learned the fundamentals of Rails: models, controllers, views, routing, migrations. But real-world applications demand more. Users expect real-time updates when someone else sends a message. Emails need to send in the background without blocking the request. Apps serve global audiences in multiple languages. Mobile clients consume JSON APIs, not HTML pages.
+
+This post covers the advanced features that turn a basic Rails app into a production-grade system: internationalization, real-time communication via WebSockets, background job processing, multi-tenant architecture, PDF generation, file uploads, the Rack middleware stack, production monitoring, API-only mode, and Rails Engines for modularity.
+
+## Internationalization (I18n)
+
+Imagine you built a web app that only displays text in English. A Spanish-speaking user signs up and sees "Welcome!" but has no idea what the dashboard labels mean. Your app is functionally correct but practically useless for them. Internationalization (I18n) solves this by extracting every piece of user-facing text into translation files and swapping them based on the user's preferred language.
+
+Think of it like a movie with subtitles. The underlying content (the movie) stays the same, but the text overlay (the subtitles) changes depending on which language the viewer selected. Rails I18n works the same way: your logic stays constant, and only the text strings change.
+
+### The I18n Gem
+
+Rails includes the `i18n` gem by default. It provides a single method -- `I18n.translate` (shorthand: `I18n.t` or just `t`) -- that looks up a key in locale files and returns the translated string. The current locale determines which translation file is consulted.
+
+Locale files live in `config/locales/` as YAML files. Rails loads all of them at boot and builds a lookup table keyed by locale and translation key:
+
+```yaml
+# config/locales/en.yml
+en:
+  hello: "Hello, World!"
+  greeting: "Hello, %{name}! Welcome to %{app}."
+  items_count:
+    one: "You have %{count} item."
+    other: "You have %{count} items."
+
+# config/locales/es.yml
+es:
+  hello: "Hola, Mundo!"
+  greeting: "Hola, %{name}! Bienvenido a %{app}."
+  items_count:
+    one: "Tienes %{count} elemento."
+    other: "Tienes %{count} elementos."
+```
+
+### Using t() in Views and Controllers
+
+In any view or controller, call `t` with the key:
+
+```ruby
+# In a view
+<%= t("hello") %>          # => "Hello, World!" (when locale is :en)
+<%= t("hello") %>          # => "Hola, Mundo!" (when locale is :es)
+
+# With interpolation
+<%= t("greeting", name: "Alice", app: "DotsDecoded") %>
+# => "Hello, Alice! Welcome to DotsDecoded."
+
+# With pluralization (Rails infers :one and :other from count)
+<%= t("items_count", count: 1) %>  # => "You have 1 item."
+<%= t("items_count", count: 5) %>  # => "You have 5 items."
+```
+
+### Setting the Locale
+
+The locale is typically set in a `before_action` based on a URL parameter, a subdomain, the user's browser `Accept-Language` header, or a stored preference:
+
+```ruby
+# app/controllers/application_controller.rb
+class ApplicationController < ActionController::Base
+  before_action :set_locale
+
+  private
+
+  def set_locale
+    I18n.locale = params[:locale] || session[:locale] ||
+                  extract_locale_from_accept_language_header || I18n.default_locale
+    session[:locale] = I18n.locale
+  end
+
+  def extract_locale_from_accept_language_header
+    request.accept_language.present? ? request.accept_language.scan(/^[a-z]{2}/).first.to_sym : nil
+  end
+end
+```
+
+### Organizing Large Translation Files
+
+When your app grows, a single YAML file per locale becomes unwieldy. Rails supports nested keys, and you can split translations across multiple files:
+
+```yaml
+# config/locales/en/posts.yml
+en:
+  posts:
+    index:
+      title: "All Posts"
+      empty: "No posts yet."
+    show:
+      published: "Published on %{date}"
+      by: "By %{author}"
+    form:
+      submit: "Create Post"
+      title_placeholder: "Enter a title..."
+```
+
+Access nested keys with dot notation: `t("posts.index.title")`.
+
+<I18nDemo client:visible />
+
+## ActionCable: Real-Time WebSockets
+
+HTTP is a request-response protocol. The client asks, the server answers, and the connection closes. This works fine for most things, but some features need the server to push data to the client *without* the client asking first. Think of a group chat: when Alice sends a message, Bob and Carol need to see it immediately, without refreshing the page.
+
+Think of WebSockets like a telephone line. With HTTP, you are sending letters back and forth -- you write a letter, wait for a reply, write another letter. With WebSockets, you pick up the phone and keep the line open. Either person can speak at any time, and the other person hears it instantly. ActionCable is Rails' built-in system for managing these WebSocket connections.
+
+### The ActionCable Architecture
+
+ActionCable has four layers:
+
+1. **Connection** -- one per WebSocket connection. Authenticates the user and manages the connection lifecycle. Lives at `app/channels/application_cable/connection.rb`.
+
+2. **Channel** -- a logical grouping of subscribers, like a chat room. When a client subscribes to a channel, they start receiving broadcasts. Defined in `app/channels/`.
+
+3. **Subscription** -- the client-side JavaScript that opens the WebSocket, subscribes to channels, and handles incoming messages.
+
+4. **Broadcasting** -- the server-side mechanism that pushes messages to all subscribers of a channel. Uses a pub/sub adapter (Redis in production, Async in development).
+
+```ruby
+# app/channels/chat_channel.rb
+class ChatChannel < ApplicationCable::Channel
+  def subscribed
+    stream_from "chat_#{params[:room]}"
+  end
+
+  def unsubscribed
+    # cleanup when client disconnects
+  end
+
+  def speak(data)
+    ActionCable.server.broadcast(
+      "chat_#{params[:room]}",
+      message: data['message'],
+      user: current_user.name
+    )
+  end
+end
+```
+
+The client-side subscription (using the built-in ActionCable JS client):
+
+```javascript
+// app/javascript/channels/chat_channel.js
+import consumer from "./consumer"
+
+consumer.subscriptions.create(
+  { channel: "ChatChannel", room: "general" },
+  {
+    received(data) {
+      const chatMessages = document.getElementById("chat-messages")
+      chatMessages.insertAdjacentHTML("beforeend",
+        `<p><strong>${data.user}:</strong> ${data.message}</p>`
+      )
+    },
+
+    speak(message) {
+      this.perform("speak", { message })
+    }
+  }
+)
+```
+
+### When to Use ActionCable
+
+ActionCable shines for features that need server-pushed updates: chat systems, live notifications, collaborative editing, real-time dashboards, sports scores, stock tickers. For simple polling (check for updates every 30 seconds), a periodic AJAX call is simpler and more appropriate.
+
+### Production Considerations
+
+In production, ActionCable needs a pub/sub adapter. Redis is the standard choice -- it handles the broadcasting across multiple server processes. Each Rails process subscribes to the Redis channel, and when one process broadcasts a message, all processes receive it and forward it to their connected WebSocket clients.
+
+```ruby
+# config/cable.yml
+production:
+  adapter: redis
+  url: redis://localhost:6379/1
+
+development:
+  adapter: async
+
+test:
+  adapter: test
+```
+
+<ActionCableDemo client:visible />
+
+## Active Job
+
+Some tasks take too long to complete within a single HTTP request. Sending an email might take 2 seconds. Processing a video upload might take 5 minutes. Generating a PDF report for 10,000 records might take 30 seconds. If you do these synchronously, the user stares at a loading spinner the entire time, and your server worker is blocked from handling other requests.
+
+Think of it like a restaurant kitchen. The waiter (the web request) takes your order and gives it to the kitchen (the background job). Instead of standing at your table for 20 minutes waiting for the food, the waiter goes back to seating other customers. When the food is ready, the kitchen plates it and the waiter brings it out. Active Job is the ticket system that manages this process.
+
+### Job Classes
+
+Every job is a Ruby class that inherits from `ApplicationJob`. It has one required method: `perform`. Whatever arguments you pass to `perform_later` get serialized and passed to `perform` when the job runs.
+
+```ruby
+# app/jobs/send_welcome_email_job.rb
+class SendWelcomeEmailJob < ApplicationJob
+  queue_as :mailers
+
+  def perform(user_id)
+    user = User.find(user_id)
+    UserMailer.welcome(user).deliver_now
+  end
+end
+
+# Enqueue from anywhere
+SendWelcomeEmailJob.perform_later(user.id)
+```
+
+### Job Adapters
+
+Active Job is an abstraction layer. It defines the interface (enqueue, perform, retry), and adapters implement the backend that actually stores and processes the queue:
+
+| Adapter     | Backend          | Concurrency | Best For                     |
+|-------------|------------------|-------------|------------------------------|
+| Sidekiq     | Redis            | Multi-thread | High throughput, retries     |
+| Resque      | Redis            | Multi-process | Simple, battle-tested       |
+| DelayedJob  | Database         | Single-process | No extra infrastructure    |
+| GoodJob     | Database (PG)    | Multi-thread | Rails 7+, Postgres native  |
+| Solid Queue | Database (SQL)   | Multi-thread | Rails 8 built-in default    |
+
+```ruby
+# config/application.rb
+config.active_job.queue_adapter = :sidekiq
+```
+
+### Retries, Callbacks, and Priorities
+
+Active Job provides a rich set of tools for handling failure:
+
+```ruby
+class ProcessPaymentJob < ApplicationJob
+  queue_as :critical
+  retry_on StandardError, wait: :exponentially_longer, attempts: 5
+
+  # Run before the job executes
+  before_enqueue :log_enqueue
+  after_perform :log_success
+  rescue_from(Timeout::Error) { |job| job.retry_job }
+
+  def perform(order_id)
+    order = Order.find(order_id)
+    PaymentGateway.charge(order)
+  end
+
+  private
+
+  def log_enqueue
+    Rails.logger.info "Enqueuing job for order #{arguments.first}"
+  end
+
+  def log_success
+    Rails.logger.info "Job completed successfully"
+  end
+end
+```
+
+### Integration with ActionMailer
+
+Rails automatically wraps mailer calls in jobs. When you call `deliver_later`, Rails creates a `ActionMailer::MailDeliveryJob` and enqueues it:
+
+```ruby
+# This automatically uses Active Job
+UserMailer.welcome(user).deliver_later
+
+# Equivalent to:
+ActionMailer::MailDeliveryJob.perform_later(
+  "UserMailer", "welcome", "deliver_now",
+  args: [user]
+)
+```
+
+<ActiveJobDemo client:visible />
+
+## Multi-Tenancy
+
+Multi-tenancy means a single application instance serves multiple customers (tenants), each with their own isolated data. Think of an apartment building: the structure (the app) is shared, but each apartment (each tenant's data) is separate. The residents never see each other's belongings.
+
+This pattern is everywhere. Shopify serves millions of stores from one codebase. GitHub serves millions of repositories. Salesforce serves thousands of enterprise customers. Each customer sees only their own data, even though they all share the same application.
+
+### Three Architectures
+
+There are three main approaches to multi-tenancy, each with different trade-offs:
+
+**1. Database-per-Tenant**
+
+Each tenant gets a completely separate database. Maximum isolation, but highest infrastructure cost. Migrating 100 databases when you update the schema is painful.
+
+**2. Schema-per-Tenant**
+
+One database, but each tenant gets their own PostgreSQL schema. PostgreSQL schemas act like namespaces within a database. You switch schemas with `SET search_path TO tenant_name`. Good balance of isolation and cost.
+
+**3. Shared-Schema**
+
+All tenants share one database and one schema. Data is separated by a `tenant_id` column on every table. Cheapest and easiest to set up, but requires discipline -- forgetting to add `WHERE tenant_id = X` to a query leaks data across tenants.
+
+### Scoping Queries
+
+The shared-schema approach requires a scoping mechanism to ensure every query is filtered by tenant:
+
+```ruby
+class ApplicationRecord < ActiveRecord::Base
+  self.abstract_class = true
+
+  belongs_to :tenant
+
+  # Global default scope
+  default_scope { where(tenant_id: Current.tenant&.id) }
+end
+
+# Current tenant set via a controller concern
+module SetTenant
+  extend ActiveSupport::Concern
+
+  included do
+    before_action :set_current_tenant
+  end
+
+  private
+
+  def set_current_tenant
+    Current.tenant = current_user.tenant
+  end
+end
+```
+
+### Apartment Gem
+
+The `apartment` gem automates multi-tenancy for database-per-tenant and schema-per-tenant architectures:
+
+```ruby
+# config/initializers/apartment.rb
+Apartment.configure do |config|
+  config.excluded_models = ["Tenant"]  # global models
+  config.tenant_names = -> { Tenant.pluck(:subdomain) }
+  config.database_schema_file = "db/schema.rb"
+end
+
+# Switch tenant in a controller
+Apartment::Tenant.switch!("acme_corp")
+# All queries now run in the acme_corp schema/database
+```
+
+### When to Choose Which
+
+| Factor              | Database-per-Tenant | Schema-per-Tenant | Shared-Schema |
+|---------------------|---------------------|-------------------|---------------|
+| Data isolation      | Highest             | High              | Lowest        |
+| Infrastructure cost | Highest             | Medium            | Lowest        |
+| Migration complexity| Highest             | Medium            | Lowest        |
+| Max tenants         | ~100                | ~1,000            | ~10,000+      |
+| Customization       | Full                | Partial           | Limited       |
+
+<MultiTenancyDemo client:visible />
+
+## PDF Generation
+
+Rails applications often need to generate PDF documents: invoices, reports, receipts, contracts. There are two main approaches in the Rails ecosystem.
+
+### Prawn (Pure Ruby)
+
+Prawn is a pure-Ruby PDF generation library. It draws directly to a PDF canvas, giving you pixel-level control over layout, fonts, and graphics. No HTML rendering engine is involved.
+
+```ruby
+# Gemfile
+gem "prawn"
+
+# app/pdfs/invoice_pdf.rb
+class InvoicePdf < Prawn::Document
+  def initialize(invoice)
+    super()
+    @invoice = invoice
+    header
+    body
+    footer
+  end
+
+  def header
+    text "Invoice ##{@invoice.id}", size: 24, style: :bold
+    text "Date: #{@invoice.created_at.strftime("%B %d, %Y")}"
+    move_down 20
+  end
+
+  def body
+    table([["Item", "Qty", "Price"]] +
+      @invoice.items.map { |i| [i.name, i.quantity, i.price] }) do
+      row(0).font_style = :bold
+      columns(1..2).align = :right
+    end
+    move_down 20
+    text "Total: $#{@invoice.total}", size: 16, style: :bold
+  end
+end
+
+# In a controller
+def show
+  pdf = InvoicePdf.new(@invoice)
+  send_data pdf.render, filename: "invoice_#{@invoice.id}.pdf",
+                          type: "application/pdf",
+                          disposition: "inline"
+end
+```
+
+### Wicked PDF (HTML to PDF)
+
+Wicked PDF uses a headless browser (wkhtmltopdf) to convert HTML templates into PDFs. The advantage is that you can reuse your existing view templates and CSS styling.
+
+```ruby
+# Gemfile
+gem "wicked_pdf"
+
+# config/initializers/wicked_pdf.rb
+WickedPdf.config = {
+  exe_path: "/usr/local/bin/wkhtmltopdf"
+}
+
+# In a controller
+def show
+  respond_to do |format|
+    format.html
+    format.pdf do
+      render pdf: "invoice_#{@invoice.id}",
+             template: "invoices/show.html.erb",
+             layout: "pdf.html.erb",
+             locals: { invoice: @invoice }
+    end
+  end
+end
+```
+
+### Choosing Between Them
+
+Use **Prawn** when you need precise control over layout, tables, and graphics, and when the PDF structure is complex but consistent. Use **Wicked PDF** when you want to reuse existing HTML/CSS templates, when the PDF needs to look exactly like a web page, or when you are prototyping quickly.
+
+## File Uploads
+
+Handling file uploads is a universal web application requirement. Profile pictures, document attachments, CSV imports, image galleries -- they all need a way to accept files from the user, store them somewhere, and serve them back.
+
+### Active Storage
+
+Rails 5.2 introduced Active Storage as the built-in solution. It provides a `has_one_attached` / `has_many_attached` interface on models, abstracting away the storage backend.
+
+```ruby
+# Setup (Rails 6+)
+rails active_storage:install
+# Creates: active_storage_blobs, active_storage_attachments tables
+
+# Model
+class User < ApplicationRecord
+  has_one_attached :avatar
+  has_many_attached :documents
+end
+
+# Controller
+def update
+  current_user.avatar.attach(params[:avatar])
+end
+
+# View (form)
+<%= form.file_field :avatar %>
+
+# View (display)
+<%= image_tag current_user.avatar.variant(resize_to_limit: [200, 200]) %>
+```
+
+Active Storage supports three storage backends: local disk (development), Amazon S3 (production standard), and Google Cloud Storage. Configure in `config/storage.yml`:
+
+```yaml
+# config/storage.yml
+amazon:
+  service: S3
+  access_key_id: <%= Rails.application.credentials.dig(:aws, :access_key_id) %>
+  secret_access_key: <%= Rails.application.credentials.dig(:aws, :secret_access_key) %>
+  region: us-east-1
+  bucket: myapp-uploads
+
+local:
+  service: Disk
+  root: <%= Rails.root.join("storage") %>
+```
+
+### Image Variants
+
+Active Storage can generate on-the-fly image variants using the `variant` method and the `image_processing` gem (which uses libvips or MiniMagick under the hood):
+
+```ruby
+# Predefined variants
+user.avatar.variant(resize_to_limit: [100, 100])        # thumbnail
+user.avatar.variant(resize_to_fill: [800, 400])          # banner
+user.avatar.variant(resize_and_pad: [300, 300, background: "#fff"])  # padded
+
+# Chained transformations
+user.avatar.variant(
+  resize_to_limit: [1000, 1000],
+  crop: [0, 0, 800, 800],
+  format: :webp,
+  quality: 80
+)
+```
+
+### Direct Uploads
+
+For large files, you can bypass the Rails server entirely. Active Storage's direct upload feature uploads files directly from the browser to S3 (or GCS), then sends the signed URL to Rails:
+
+```erb
+<%= form.file_field :video, direct_upload: true %>
+```
+
+### Alternatives to Active Storage
+
+| Library      | Key Feature                          | Use Case                        |
+|--------------|--------------------------------------|---------------------------------|
+| Active Storage | Built-in, variant support          | Most Rails apps                 |
+| Shrine       | Plugin-based, metadata-driven       | Complex upload workflows        |
+| CarrierWave  | Mature, uploader classes            | Legacy apps, simple uploads     |
+| Dragonfly    | Image processing focus              | Image-heavy apps                |
+
+## Rack: The Web Server Interface
+
+Every web request in Ruby passes through Rack. It is the fundamental interface between web servers (Puma, Unicorn, Passenger) and Ruby frameworks (Rails, Sinatra, Hanami). If you understand Rack, you understand how Rails receives requests, processes them, and returns responses.
+
+Think of Rack like an assembly line in a factory. A raw material (the HTTP request) enters the line. Each station on the line (a piece of middleware) inspects the material, modifies it, adds a label, or discards it. By the time the material reaches the end of the line (your Rails app), it has been prepped, logged, secured, and routed. Then the response travels back through the stations in reverse, getting headers added and timing recorded.
+
+### The Rack Protocol
+
+A Rack application is any Ruby object that responds to `call`, accepting an environment hash and returning a three-element array:
+
+```ruby
+# The simplest possible Rack app
+class HelloWorld
+  def call(env)
+    [200, { "Content-Type" => "text/plain" }, ["Hello, World!"]]
+  end
+end
+
+# Rack::Builder for mounting
+use Rack::CommonLogger
+use Rack::Runtime
+run HelloWorld.new
+```
+
+The three return values are:
+1. **Status** -- an integer HTTP status code (200, 404, 500, etc.)
+2. **Headers** -- a hash of HTTP response headers
+3. **Body** -- an enumerable (usually an array of strings) that produces the response body
+
+### Rails as a Rack App
+
+Rails itself is a Rack application. When Puma receives an HTTP request, it creates a Rack environment hash and passes it to Rails. Rails runs the request through its middleware stack, routes it to a controller action, and returns a Rack-compatible response.
+
+You can see the full middleware stack by running `rails middleware` in your console:
+
+```
+use Rack::Sendfile
+use ActionDispatch::HostAuthorization
+use Rack::Runtime
+use Rack::MethodOverride
+use ActionDispatch::RequestId
+use ActionDispatch::RemoteIp
+use Sprockets::Rails::QuietAssets
+use Rails::Rack::Logger
+use ActionDispatch::ShowExceptions
+use ActionDispatch::DebugExceptions
+use ActionDispatch::ActionControllerExceptions
+use ActionDispatch::Reloader
+use ActionDispatch::Callbacks
+use ActiveRecord::Migration::CheckPending
+use ActionDispatch::Cookies
+use ActionDispatch::Session::CookieStore
+use ActionDispatch::Flash
+use ActionDispatch::ContentSecurityPolicy::Middleware
+use Rack::Head
+use Rack::ConditionalGet
+use Rack::ETag
+use Rack::TempfileReaper
+run MyApp::Application.routes
+```
+
+### Writing Custom Middleware
+
+You can add your own middleware to the stack:
+
+```ruby
+# lib/middleware/request_logger.rb
+class RequestLogger
+  def initialize(app)
+    @app = app
+  end
+
+  def call(env)
+    start_time = Time.current
+    status, headers, body = @app.call(env)
+    duration = (Time.current - start_time) * 1000
+
+    Rails.logger.info(
+      "[#{env['REQUEST_METHOD']}] #{env['PATH_INFO']} " \
+      "=> #{status} (#{duration.round(1)}ms)"
+    )
+
+    [status, headers, body]
+  end
+end
+
+# config/application.rb
+config.middleware.use RequestLogger
+```
+
+<RackMiddlewareDemo client:visible />
+
+## Production Monitoring
+
+Deploying a Rails app is only half the battle. Once it is running, you need to know what it is doing: is it fast? Is it crashing? Are users encountering errors? Production monitoring answers these questions through three pillars: **logs**, **metrics**, and **traces**.
+
+Think of it like monitoring a patient in a hospital. Logs are the patient's diary -- detailed records of everything that happened. Metrics are the vital signs -- heart rate, blood pressure, temperature -- measured at regular intervals. Traces are the medical imaging -- an X-ray showing exactly how a request traveled through the system from start to finish.
+
+### Logging
+
+Rails logs every request by default. The development log includes request details, parameters, SQL queries, and rendered views. In production, logs are typically sent to an external service for aggregation and search:
+
+```ruby
+# config/environments/production.rb
+config.log_level = :info
+config.log_tags = [:request_id]
+
+# Structured logging (Rails 7+)
+config.log_formatter = ActiveSupport::Logger::Formatter.new
+```
+
+Use the `ActiveSupport::TaggedLogging` to add context to every log line, making it easy to filter by request, user, or tenant:
+
+```ruby
+Rails.logger.tagged("user_#{current_user.id}", "tenant_#{Current.tenant.id}") do
+  Rails.logger.info "Processing order"
+  # All logs here include the user and tenant tags
+end
+```
+
+### Error Tracking
+
+When errors occur in production, you need to know about them immediately. Error tracking services capture exceptions, group similar errors together, and provide full stack traces with request context:
+
+```ruby
+# Gemfile
+gem "sentry-ruby"
+gem "sentry-rails"
+
+# config/initializers/sentry.rb
+Sentry.init do |config|
+  config.dsn = Rails.application.credentials.sentry_dsn
+  config.breadcrumbs_logger = [:active_support_logger]
+  config.environment = Rails.env
+end
+```
+
+Popular error tracking services: **Sentry** (open-source, most popular), **Rollbar** (similar to Sentry), **Honeybadger** (Ruby-focused, simpler setup), **Bugsnag** (good mobile SDKs).
+
+### Application Performance Monitoring (APM)
+
+APM tools instrument your application code to measure response times, database query performance, memory usage, and more. They help you find slow endpoints, N+1 queries, and memory leaks:
+
+| Tool       | Strength                              |
+|------------|---------------------------------------|
+| New Relic  | Full-stack APM, oldest in the market  |
+| Datadog    | Infrastructure + APM + logs combined  |
+| Scout APM  | Ruby-focused, low overhead            |
+| Skylight   | Built by Tilde (Rails core team)      |
+| AppSignal  | European-hosted, Ruby-first           |
+
+### Health Checks
+
+A health check endpoint lets load balancers and monitoring services know your app is alive:
+
+```ruby
+# config/routes.rb
+Rails.application.routes.draw do
+  get "up" => "rails/health#show", as: :rails_health_check
+end
+
+# Returns 200 OK when the app and database are reachable
+# Returns 503 Service Unavailable when something is wrong
+```
+
+Rails 7.1+ includes a built-in health check controller that verifies database connectivity. In earlier versions, add a simple controller that checks critical dependencies.
+
+### The Three Pillars Summary
+
+| Pillar  | What it captures           | Tools                     |
+|---------|----------------------------|---------------------------|
+| Logs    | Event details over time    | Lograge, Timber, ELK      |
+| Metrics | Numeric measurements       | Prometheus, Datadog, New Relic |
+| Traces  | Request lifecycle path     | OpenTelemetry, Jaeger     |
+
+## Rails API Mode
+
+Not every Rails app serves HTML. Mobile apps, single-page applications (React, Vue, Angular), and third-party integrations all consume JSON APIs. For these use cases, Rails includes API mode, which strips out everything unnecessary for serving HTML and leaves a lean stack optimized for JSON responses.
+
+Think of it like ordering a car. The full Rails app is a fully loaded sedan -- leather seats, sunroof, premium sound system, navigation. Rails API mode is the same car model but with just the essentials -- engine, transmission, steering. You still get the reliable framework, but without the overhead you do not need.
+
+### Creating an API-Only App
+
+```bash
+rails new my_api --api
+```
+
+This generates a minimal Rails app without:
+- Views (no `app/views/` directory)
+- Helpers (no `app/helpers/`)
+- Asset pipeline (no Sprockets or Importmap)
+- Cookies, sessions, and flash
+- CSRF protection (APIs use token auth instead)
+- View rendering dependencies
+
+### What Remains
+
+The full power of Rails is still available:
+- **ActiveRecord** -- models, migrations, validations, associations
+- **ActionController** -- strong parameters, filters, rendering JSON
+- **ActiveSupport** -- time zones, concerns, callbacks
+- **Routing** -- nested resources, namespaces, constraints
+- **Active Job** -- background processing
+- **ActionCable** -- WebSockets (if needed)
+
+### JSON Serialization
+
+API mode needs a way to serialize models to JSON. Three popular options:
+
+**Jbuilder** (ships with Rails) -- uses Ruby templates to build JSON:
+
+```ruby
+# app/views/api/v1/posts/index.json.jbuilder
+json.array! @posts do |post|
+  json.id post.id
+  json.title post.title
+  json.author post.author.name
+  json.url post_url(post, format: :json)
+end
+```
+
+**Fast_JSONAPI** -- uses serializer objects:
+
+```ruby
+class PostSerializer
+  include JSONAPI::Serializer
+  attributes :title, :body, :created_at
+  belongs_to :author
+end
+
+render json: PostSerializer.new(@posts)
+```
+
+**Blueprinter** -- simple, fast, with field-level control:
+
+```ruby
+class PostBlueprint < Blueprinter::Base
+  identifier :id
+  fields :title, :body, :created_at
+  association :author, blueprint: UserBlueprint
+end
+
+render json: PostBlueprint.render(@posts)
+```
+
+### API Versioning
+
+APIs evolve over time. Versioning lets you introduce breaking changes without breaking existing clients:
+
+```ruby
+# config/routes.rb
+namespace :api do
+  namespace :v1 do
+    resources :posts, only: [:index, :show]
+  end
+
+  namespace :v2 do
+    resources :posts do
+      post :publish
+    end
+  end
+end
+```
+
+Common versioning strategies: URL-based (`/api/v1/posts`), header-based (`Accept: application/vnd.myapp.v1+json`), or subdomain-based (`v1.api.example.com`).
+
+<RailsApiDemo client:visible />
+
+## Rails Engines
+
+A Rails Engine is a miniature Rails application that lives inside your main application. It has its own models, controllers, views, routes, and even its own migrations. You mount it into your host app, and it behaves like a self-contained module.
+
+Think of it like a plugin system for a music production app. The host app provides the core infrastructure (tracks, timeline, audio engine). Plugins (engines) add specific features: a synthesizer plugin, a drum machine plugin, a vocal effects plugin. Each plugin is independently developed, tested, and versioned, but they all plug into the same host application seamlessly.
+
+### Mountable vs Isolated Engines
+
+**Mountable engines** are the most common type. They are namespaced within the host app:
+
+```bash
+rails plugin new blog_engine --mountable
+```
+
+This creates a full engine with:
+- Isolated namespace (`BlogEngine`)
+- Own `app/` directory with models, controllers, views
+- Own `config/routes.rb`
+- Own `db/migrate/` directory
+- Own test suite
+
+**Isolated engines** take isolation further. They have their own `ApplicationRecord`, their own middleware stack, and their own initializer configuration. They share nothing with the host app unless explicitly configured.
+
+### Mounting an Engine
+
+```ruby
+# Gemfile
+gem "blog_engine", path: "engines/blog_engine"
+
+# config/routes.rb
+Rails.application.routes.draw do
+  mount BlogEngine::Engine, at: "/blog"
+end
+```
+
+All routes defined in the engine are now available under `/blog`. If the engine defines `resources :posts`, they become accessible at `/blog/posts`.
+
+### Sharing Code Between Engine and Host
+
+Engines can share models, concerns, and configurations with the host app:
+
+```ruby
+# engines/blog_engine/app/models/blog_engine/application_record.rb
+module BlogEngine
+  class ApplicationRecord < ActiveRecord::Base
+    self.abstract_class = true
+  end
+end
+
+# engines/blog_engine/app/models/blog_engine/post.rb
+module BlogEngine
+  class Post < ApplicationRecord
+    belongs_to :author, class_name: "User"
+    has_many :comments, dependent: :destroy
+  end
+end
+```
+
+### When to Build an Engine
+
+Build an engine when:
+- A feature is complex enough to warrant its own test suite and directory structure
+- You want to reuse the feature across multiple applications
+- Multiple teams need to work on different features independently
+- The feature has its own models, views, and controllers that form a coherent unit
+
+Popular examples of engines in the wild: **Devise** (authentication), **Spree Commerce** (e-commerce), **Forem** (forum platform), **ActiveAdmin** (admin dashboard), **Discourse** (built as an engine that becomes the entire app).
+
+## Self-Check
+
+- [ ] Can you explain why `t("greeting", name: "Alice")` works, and what YAML key it looks up?
+- [ ] What is the difference between a WebSocket connection and an HTTP request? When would you use each?
+- [ ] What happens when an Active Job fails? How does retry_on work?
+- [ ] What are the three multi-tenancy architectures, and what trade-off does each make?
+- [ ] How does Rack middleware process a request? What does the `call` method return?
+- [ ] What does Rails API mode remove compared to a full Rails app?
+- [ ] What is a Rails Engine, and why would you build one instead of adding code directly to the main app?
+- [ ] Can you name the three pillars of observability and give an example tool for each?

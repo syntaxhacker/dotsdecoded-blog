@@ -1,0 +1,396 @@
+---
+title: "Design Instagram & YouTube: Media at Massive Scale"
+description: "Full system design interview walkthrough for media platforms: requirements, capacity estimation, media storage pipeline, news feed generation, search, and the fan-out problem."
+date: 2026-04-22
+tags: ["system-design", "interview", "instagram", "youtube", "media", "design-problem"]
+---
+
+import CapacityCalcDemo from '../../components/demos/InstaCapacityCalcDemo'
+import MediaApiDemo from '../../components/demos/MediaApiDemo'
+import SchemaDesignDemo from '../../components/demos/InstaSchemaDesignDemo'
+import MediaPipelineDemo from '../../components/demos/MediaPipelineDemo'
+import FanOutDemo from '../../components/demos/FanOutDemo'
+import NewsFeedDemo from '../../components/demos/NewsFeedDemo'
+import SearchIndexDemo from '../../components/demos/SearchIndexDemo'
+
+Designing Instagram or YouTube in a system design interview means solving one of the hardest problems in distributed systems: handling massive amounts of user-generated media while keeping feeds fast, storage cheap, and discovery accurate. This walkthrough covers every layer of the problem, from requirements to scaling trade-offs, with interactive demos at each step.
+
+## Understanding the Problem
+
+Instagram is a photo gallery for the entire world. YouTube is a TV station where everyone is both the broadcaster and the audience. What makes them unique is not the complexity of any single feature -- it is the combination of extreme scale across four dimensions simultaneously: storage, bandwidth, computation, and social graph.
+
+Think about what happens when you open Instagram. In under a second, your phone downloads and displays a scrollable feed of high-resolution images from hundreds of people you follow. Behind that one-second experience, dozens of systems coordinated: your feed was pre-computed, images were pulled from a nearby CDN edge, your social graph was queried to determine whose posts to show, and a recommendation algorithm decided the ordering. Each of those systems must handle millions of requests per second.
+
+The key challenges break down into four areas:
+
+- **Storage** -- billions of photos and videos, growing by terabytes per day, that must persist for years
+- **Delivery** -- serving those files to billions of users with low latency, which means CDN distribution
+- **Feed generation** -- deciding what each user sees and pre-computing it before they open the app
+- **Discovery** -- helping users find new content through search, recommendations, and trending
+
+## Requirements Gathering
+
+Every system design interview starts with requirements. For a media platform, we need to distinguish between what the system must do (functional) and how well it must do it (non-functional).
+
+### Functional Requirements
+
+1. **Upload media** -- users can upload photos and videos with captions
+2. **View feed** -- each user sees a personalized timeline of posts from people they follow
+3. **Social interactions** -- like, comment, follow/unfollow other users
+4. **Search** -- find posts, users, and hashtags by text
+5. **User profiles** -- view a user's uploaded media and follower/following counts
+6. **Stories and Reels** -- ephemeral and short-form content (bonus scope)
+7. **Media processing** -- resize, compress, transcode uploaded content automatically
+
+### Non-Functional Requirements
+
+1. **High availability** -- 99.99% uptime (52 minutes of downtime per year)
+2. **Low latency** -- feed loads in under 300ms, media begins streaming in under 500ms
+3. **Storage efficiency** -- store petabytes of media cost-effectively
+4. **Scalability** -- support 1B+ users with linear horizontal scaling
+5. **CDN delivery** -- media served from edge locations, not origin servers
+
+### Scale Assumptions
+
+| Metric | Instagram | YouTube |
+|--------|-----------|---------|
+| Total users | 1B+ | 2B+ |
+| Daily active users | 500M | 1B |
+| Daily uploads | 100M photos | 500 hours/min |
+| Daily views | 500M+ | 5B+ |
+| Avg file size | 2 MB (photo) | 50 MB (video) |
+
+### Out of Scope
+
+Payments, ads system, content moderation (mentioned in trade-offs), messaging, live streaming.
+
+## Capacity Estimation
+
+Capacity estimation is where you show you can do back-of-the-napkin math. The goal is not precision -- it is showing you understand the orders of magnitude. The numbers below are rough estimates based on public data. The exact values matter less than the method: multiply users by actions by size, then convert to useful units.
+
+### Instagram Estimates
+
+- **Storage**: 100M photos/day x 2 MB = 200 GB/day = 73 TB/year
+- **Bandwidth**: 500M views/day x 2 MB = 1 PB/day (after CDN caching, origin serves ~10% = 100 TB/day)
+- **Read QPS**: 500M DAU / 86,400 seconds x 3 (peak multiplier) = ~17,000 QPS average, ~50,000 peak
+- **Write QPS**: 100M uploads / 86,400 seconds = ~1,200 QPS
+
+### YouTube Estimates
+
+- **Storage**: 500 hours/min = 720,000 hours/day x 1 GB/hour = 720 TB/day = 263 PB/year
+- **Bandwidth**: 5B views/day x 50 MB avg = 250 PB/day
+- **Read QPS**: 1B DAU / 86,400 x 3 = ~35,000 QPS average, ~100,000 peak
+- **Write QPS**: 43,200 uploads/day / 86,400 = ~0.5 QPS (but each upload is large and triggers transcoding)
+
+<CapacityCalcDemo client:visible />
+
+## API Design
+
+Clean API design shows the interviewer you think about the interface before the implementation. Each endpoint should have a clear purpose, well-defined request/response format, and consider edge cases like pagination, rate limiting, and authentication.
+
+### Key Endpoints
+
+- `POST /api/media/upload` -- Upload media (multipart or presigned URL flow)
+- `GET /api/feed` -- Paginated feed using cursor-based pagination
+- `POST /api/media/{id}/like` -- Toggle like (idempotent)
+- `POST /api/media/{id}/comments` -- Add a comment
+- `GET /api/search?q=...` -- Full-text search with faceted results
+- `GET /api/users/{id}` -- User profile with media and social counts
+- `POST /api/users/{id}/follow` -- Follow/unfollow
+
+### Design Decisions
+
+**Cursor-based pagination** (not offset-based) for the feed. Offsets break when new posts are inserted between pages. A cursor encodes the sort position (e.g., base64 of `created_at + post_id`) so results are stable even as new content arrives.
+
+**Presigned URLs** for media uploads. Instead of proxying a 50 MB video through API servers, the client gets a temporary S3 URL and uploads directly. The API only handles metadata.
+
+**Idempotent operations** for likes and follows. Sending "like" twice should not create two likes or return an error.
+
+<MediaApiDemo client:visible />
+
+## Database Schema Design
+
+The schema needs to support the core operations efficiently: writing posts, reading feeds, tracking social relationships, and aggregating engagement metrics.
+
+### Core Tables
+
+**Users** -- id, username, email, password_hash, avatar_url, bio, created_at
+
+**Posts** -- id, user_id (FK), media_url, thumbnail_url, media_type, caption, width, height, duration, created_at
+
+**Followers** -- follower_id (PK, FK), followee_id (PK, FK), created_at. Composite primary key prevents duplicate follows.
+
+**Likes** -- user_id (PK, FK), post_id (PK, FK), created_at. Composite PK prevents duplicate likes.
+
+**Comments** -- id, post_id (FK), user_id (FK), parent_id (FK, self-referencing for threads), text, created_at
+
+### Key Indexes
+
+- `posts.user_id` -- fetch all posts by a user (profile page)
+- `posts.created_at` -- sort feed by time
+- `followers.followee_id` -- find all followers of a user (fan-out)
+- `followers.follower_id` -- find all users a user follows (feed generation)
+- `comments.post_id` -- fetch comments for a post
+- `comments.parent_id` -- threaded replies
+
+### Storage Choice
+
+At scale, this schema splits across multiple database types:
+- **Users, Followers, Likes** -- relational (PostgreSQL/MySQL) for strong consistency and complex queries
+- **Posts metadata** -- could stay relational or move to a document store
+- **Feed cache** -- Redis (pre-computed feed lists)
+- **Media metadata** -- separate from the main database to avoid bloat
+
+<SchemaDesignDemo client:visible />
+
+## Media Storage Pipeline
+
+The media pipeline is what makes these platforms fundamentally different from a typical web app. You are not storing small JSON records -- you are ingesting, processing, and distributing enormous files at massive scale.
+
+### Upload Flow
+
+1. Client requests a presigned URL from the API
+2. Client uploads the file directly to object storage (S3)
+3. Client sends a confirmation request with metadata (caption, type)
+4. API writes post metadata to the database
+5. A message is published to a queue for processing
+
+### Processing Pipeline
+
+The processing pipeline runs asynchronously. It does not block the upload response.
+
+**For photos:**
+- Validate format (JPEG, PNG, HEIC)
+- Extract EXIF metadata (camera, location, date)
+- Generate multiple sizes: original, large (1080px), medium (640px), thumbnail (150px)
+- Compress to WebP for better compression
+- Store all variants in object storage
+- Update CDN configuration
+
+**For video:**
+- All photo processing steps plus:
+- Transcode to multiple resolutions (4K, 1080p, 720p, 480p, 360p)
+- Generate adaptive bitrate manifests (HLS/DASH)
+- Extract keyframes as thumbnails
+- Content fingerprinting for copyright detection
+- This can take 5-30 minutes per video for long content
+
+### CDN Delivery
+
+CDN (Content Delivery Network) is non-negotiable at this scale. Without it, every image request would travel to your origin servers, which are likely in one region. A user in Tokyo would fetch every image from Virginia.
+
+The flow: Origin (S3) -> CDN PoPs (Points of Presence in 50+ regions) -> User. The first request for an image hits the origin. The CDN caches it. All subsequent requests in that region hit the CDN edge, typically within 20-50ms.
+
+<MediaPipelineDemo client:visible />
+
+## News Feed Generation
+
+The news feed is the hardest problem in media platform design. Not because it is algorithmically complex, but because it must be fast for billions of users while the underlying data changes constantly.
+
+### The Fan-out Problem
+
+When a user with 1 million followers posts a photo, where does that post go? If each follower has a pre-computed feed cache, you need to write that post to 1 million caches. That is 1 million write operations for a single post. This is the fan-out problem.
+
+There are three strategies:
+
+### Fan-out on Write (Push Model)
+
+When a user creates a post, immediately write it to the feed cache of every follower.
+
+- **Pros**: Feed reads are instant (just read from cache). Zero query time.
+- **Cons**: Celebrity posts (millions of followers) cause a write storm. A post from an account with 100M followers requires 100M cache writes.
+- **Best for**: Users with fewer than ~10,000 followers.
+
+### Fan-out on Read (Pull Model)
+
+Do not pre-compute anything. When a user opens their feed, query the database for recent posts from all users they follow.
+
+- **Pros**: Zero write cost for posting. Handles celebrities trivially.
+- **Cons**: Feed loads are slow (must query hundreds of users). Load spikes when many users open the app simultaneously.
+- **Best for**: Celebrity accounts or systems with few active readers.
+
+### Hybrid Approach (Push + Pull)
+
+The production solution used by Instagram and similar platforms:
+
+- For users with fewer than N followers (e.g., 10,000), fan out on write to their followers' feed caches
+- For celebrity accounts, do not fan out. When followers open their feed, pull the celebrity's posts on demand
+- Maintain a "fan-out threshold" that can be tuned per account
+
+This means 99% of posts (from normal users) get the fast-read benefit of push. The 1% from celebrities use pull, which is acceptable because those followers expect to wait a moment for celebrity content.
+
+<FanOutDemo client:visible />
+
+### Feed Ranking
+
+Modern feeds are not purely chronological. They use a relevance score to rank posts:
+
+```
+score = engagement_rate * recency_decay * user_affinity
+```
+
+- **Engagement rate**: likes + comments + shares, normalized by the poster's follower count
+- **Recency decay**: posts lose value over time (exponential decay)
+- **User affinity**: how often the viewer interacts with the poster
+
+This scoring happens at write time for pre-computed feeds, or at read time for pull-based feeds. The trade-off is freshness (pre-computed scores become stale) vs. latency (real-time scoring adds query time).
+
+<NewsFeedDemo client:visible />
+
+## Search & Discovery
+
+Search on a media platform has two distinct use cases: finding specific things (a user, a hashtag) and discovering new content (exploration, recommendations).
+
+### Full-Text Search with Elasticsearch
+
+The core of search is an inverted index. Instead of scanning every document to find "sunset", you maintain a mapping from every word to the documents that contain it. This is what Elasticsearch, Solr, and Lucene all implement.
+
+For example, if Document 1 contains "sunset beach" and Document 3 contains "sunset mountain":
+
+```
+"sunset" -> [doc1, doc3]
+"beach"  -> [doc1]
+"mountain" -> [doc3]
+```
+
+When a user searches "sunset", you look up the inverted index and immediately get the matching documents. No scanning required.
+
+### TF-IDF Scoring
+
+Documents are ranked by TF-IDF (Term Frequency - Inverse Document Frequency):
+
+- **TF** (Term Frequency): How often the search term appears in this document. A document mentioning "sunset" 5 times is more relevant than one mentioning it once.
+- **IDF** (Inverse Document Frequency): How rare the term is across all documents. A rare term like "astrophotography" is more valuable than a common term like "photo" for distinguishing relevant documents.
+
+### Trending and Recommendations
+
+Trending topics are pre-computed every few minutes using a sliding window of recent post activity. They are cached and served from Redis with very short TTL.
+
+Recommendations use collaborative filtering: "users who liked X also liked Y". At scale, this is computed offline using matrix factorization on user-item interaction data, then served as pre-computed recommendation lists.
+
+<SearchIndexDemo client:visible />
+
+## High-Level Design
+
+Now we assemble all the pieces into a complete architecture. Think of this as connecting every service we discussed into a coherent system.
+
+### Components
+
+**Client Layer**: Mobile apps and web browsers. Handle local caching, media display, and user interaction.
+
+**CDN**: Static asset delivery for images and video streams. CloudFront, Akamai, or similar. Edge locations in 50+ regions worldwide.
+
+**Load Balancer**: Distribute API traffic across server instances. L7 load balancing for HTTP/HTTPS with SSL termination.
+
+**API Gateway**: Rate limiting, authentication, request routing. Routes requests to the appropriate service.
+
+**Microservices**:
+- **Media Service**: Handles uploads, metadata storage, and triggers processing pipeline
+- **Feed Service**: Generates and serves personalized feeds (pre-computed cache + on-demand queries)
+- **User Service**: User profiles, authentication, follower/following management
+- **Social Service**: Likes, comments, follows
+- **Search Service**: Full-text search via Elasticsearch
+- **Notification Service**: Push notifications, email (async via message queue)
+- **Media Processing Service**: Transcoding, thumbnail generation, compression (async workers)
+
+**Data Layer**:
+- **Relational DB** (PostgreSQL): Users, followers, social graph, post metadata
+- **Redis**: Feed cache, session cache, rate limiting counters
+- **Object Storage** (S3): Raw and processed media files
+- **Elasticsearch**: Full-text search index
+- **Message Queue** (Kafka/RabbitMQ): Async communication between services
+
+**Request Flows**:
+
+1. **Upload**: Client -> API Gateway -> Media Service -> S3 (presigned URL) -> Kafka -> Processing Workers -> S3 (processed files) -> CDN
+2. **View Feed**: Client -> CDN (images) + API Gateway -> Feed Service -> Redis (cached feed) or DB (on-demand query)
+3. **Search**: Client -> API Gateway -> Search Service -> Elasticsearch -> ranked results
+
+### Architecture Diagram
+
+The system follows a layered architecture: client -> CDN/LB -> API Gateway -> Services -> Data stores. Async processing flows through message queues. All inter-service communication uses a combination of synchronous REST/gRPC calls (for user-facing requests) and asynchronous message queues (for processing and notifications).
+
+## Scaling Considerations
+
+### Sharding
+
+- **Users by user_id**: Consistent hashing to distribute user data across database shards. A user's profile, posts, and social graph live on the same shard for locality.
+- **Posts by post_id**: Distribute post storage across shards. Each shard stores a range of post IDs.
+- **Media by object key**: Object storage (S3) handles this natively -- keys are hashed across storage nodes automatically.
+
+### Caching Strategy
+
+- **Feed cache** (Redis): Pre-computed feed for each user. TTL of 5-15 minutes. Invalidated on new post from a followed user (or allowed to go stale for eventual consistency).
+- **User profile cache** (Redis): Profile data, follower counts. Updated asynchronously.
+- **Media metadata cache** (Redis): Post metadata (caption, like count, comment count). invalidated on write.
+- **CDN cache**: Media files cached at edge for hours to days. Cache invalidation on update or delete.
+
+### Async Processing
+
+Anything that does not need to happen synchronously goes through a message queue:
+- Media transcoding and thumbnail generation
+- Push notifications (likes, comments, follows)
+- Analytics and metrics aggregation
+- Search index updates
+- Feed cache invalidation and re-computation
+
+This keeps API response times fast and makes the system resilient to processing failures.
+
+### Video-Specific Challenges
+
+Video adds an entire layer of complexity on top of photo handling:
+
+- **Streaming**: Video is not downloaded as a single file. It is streamed using HLS (HTTP Live Streaming) or DASH, which splits video into small chunks (2-10 seconds each). The client fetches chunks sequentially, adapting quality based on network conditions.
+- **Adaptive bitrate**: Multiple resolution encodings are stored. The client switches between them mid-stream as bandwidth fluctuates.
+- **Storage cost**: Video storage is 25x larger than photos for equivalent content. Cold storage (S3 Glacier) is used for videos older than 30 days with rarely accessed views.
+- **Processing time**: Transcoding a 10-minute 4K video can take 30+ minutes. This must be fully async with progress tracking.
+
+## Trade-offs & Follow-ups
+
+These are the questions interviewers love to ask. Having good answers ready shows depth.
+
+### Celebrity Accounts (millions of followers)
+
+Use the hybrid fan-out approach. Do not push to all followers. Instead, maintain a "popular account" flag. When a follower opens their feed, pull recent posts from popular accounts they follow. Combine with the pre-computed posts from normal accounts. This limits the write storm while keeping feed latency acceptable.
+
+### Stories (ephemeral content)
+
+Stories expire after 24 hours. This means storage cleanup is critical. Use TTL-based expiration in Redis for story metadata. Store media in object storage with lifecycle policies that auto-delete after 24 hours. Pre-compute a "story ring" (carousel of stories from followed users) and cache it with a short TTL (1-2 minutes).
+
+### Content Moderation
+
+At scale, automated moderation is essential. Use a pipeline: image/video fingerprinting (to detect known bad content), ML classification models (to detect nudity, violence, hate speech), and human review for edge cases. Reports from users feed back into the ML models. This is a queue-based async pipeline.
+
+### Copyright on YouTube
+
+YouTube uses Content ID: a fingerprinting system where copyright holders upload reference files. When a new video is uploaded, it is fingerprinted and compared against the Content ID database. Matches trigger actions: block, monetize (share revenue), or track (allow but notify the copyright holder). This runs as part of the async processing pipeline.
+
+### Comparison Table
+
+| Concern | Instagram | YouTube |
+|---------|-----------|---------|
+| Primary media | Photos (2 MB avg) | Video (50 MB avg) |
+| Storage growth | ~73 TB/year | ~263 PB/year |
+| Bandwidth | ~1 PB/day | ~250 PB/day |
+| Processing | Resize + compress | Transcode to 5+ resolutions |
+| Delivery | Static file from CDN | Adaptive streaming (HLS/DASH) |
+| Feed model | Pre-computed + pull hybrid | Recommendation-driven |
+| Caching | Aggressive (photos are static) | Moderate (multiple quality variants) |
+| Real-time needs | Stories (24h TTL) | Live streaming (ultra-low latency) |
+
+## Self-Check
+
+Before walking into an interview on this topic, make sure you can answer each of these:
+
+- Can you estimate storage and bandwidth requirements from user counts?
+- Why use cursor-based pagination instead of offset-based for feeds?
+- What is the fan-out problem, and what are the three strategies to solve it?
+- When would you choose push vs. pull for feed generation?
+- Why does the hybrid approach use a threshold (e.g., 10K followers)?
+- How does an inverted index make search fast?
+- What is TF-IDF, and why does it work better than simple keyword matching?
+- Why use presigned URLs for media uploads instead of proxying through API servers?
+- What role does a message queue play in media processing?
+- How does adaptive bitrate streaming work, and why is it needed for video?
+- What is the difference between CDN caching and application-level caching?
+- How would you handle a celebrity account with 100M followers differently from a normal account?

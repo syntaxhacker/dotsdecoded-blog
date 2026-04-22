@@ -1,0 +1,223 @@
+---
+title: "System Design Fundamentals: The Blueprint Every Engineer Needs"
+description: "Client-server architecture, latency vs throughput, scalability, availability, fault tolerance, and performance metrics — everything you need before designing your first system."
+date: 2026-04-22
+tags: ["system-design", "fundamentals", "scalability", "interview"]
+---
+
+import ClientServerFlowDemo from '../../components/demos/ClientServerFlowDemo'
+import RequestLifecycleDemo from '../../components/demos/RequestLifecycleDemo'
+import LatencyThroughputDemo from '../../components/demos/LatencyThroughputDemo'
+import ScalabilityCompareDemo from '../../components/demos/ScalabilityCompareDemo'
+import MetricsDashboardDemo from '../../components/demos/MetricsDashboardDemo'
+import CapacityEstimationDemo from '../../components/demos/CapacityEstimationDemo'
+import FaultToleranceDemo from '../../components/demos/FaultToleranceDemo'
+
+## What Is System Design?
+
+Imagine you are the city planner for a new town. You do not start by pouring concrete. You start by asking: how many people will live here? Where will they work? How will they get around? What happens if the main road floods?
+
+System design is the same thing, but for software. Before you write a single line of code, you answer: who are the users? What will they do? How much traffic will the system handle? What breaks first, and how do we recover?
+
+Most engineers learn to build features. System design teaches you to build systems that keep working when 10 users become 10 million, when a database dies at 3am, or when a viral tweet sends 50x your normal traffic.
+
+This distinction matters in interviews because interviewers do not ask "can you implement a login page?" They ask "design Twitter" or "design a URL shortener." They want to see you think about the whole system, not just one function.
+
+The difference: a feature is a function. A system is an architecture of components that communicate, fail, and scale together. This post gives you the vocabulary and mental models to think at the system level.
+
+## Client-Server Architecture
+
+Think of a restaurant. You (the client) sit at a table and look at a menu. You tell the waiter (the network) what you want. The waiter takes your order to the kitchen (the server). The kitchen prepares your food and sends it back through the waiter. You eat.
+
+That is the entire client-server model. The client makes requests, the server processes them, and the network carries messages between them.
+
+Three components:
+
+- **Client**: the application that makes requests. Your browser, a mobile app, a CLI tool, or another server acting as a client.
+- **Server**: the application that handles requests. Receives the request, does the work (query a database, run business logic), and sends back a response.
+- **Network**: the communication layer between them. HTTP over TCP/IP, WebSockets, gRPC, or any protocol that moves data from A to B.
+
+The request-response cycle is the fundamental pattern. The client sends a request, the server processes it and returns a response. The client waits. This is synchronous by default.
+
+Variations exist. A **thin client** does almost nothing (a browser rendering HTML from the server). A **thick client** does heavy lifting locally (a mobile app with offline support and local computation). **Peer-to-peer** systems eliminate the server entirely -- every node is both client and server (BitTorrent, WebRTC).
+
+<ClientServerFlowDemo client:visible />
+
+The demo above shows a packet traveling from client through DNS to the server and database, then the response flowing back. Each step has a time cost, and those costs add up.
+
+## The Request-Response Lifecycle
+
+When you type `https://example.com/users` into your browser and press Enter, a surprising amount happens before anything appears on screen. Understanding each step is what separates engineers who debug effectively from engineers who stare at logs hoping for inspiration.
+
+Here is the full lifecycle:
+
+1. **DNS Lookup** -- The browser asks a DNS resolver to translate `example.com` into an IP address like `93.184.216.34`. This involves checking the browser cache, then OS cache, then router cache, then ISP DNS server, and potentially a recursive lookup to the root DNS servers. Time: 20-120ms.
+
+2. **TCP Handshake** -- The browser opens a TCP connection to that IP address. Three packets: SYN (client says "I want to connect"), SYN-ACK (server says "OK"), ACK (client says "Let's go"). Time: 10-100ms depending on physical distance.
+
+3. **TLS Handshake** -- For HTTPS, the browser and server negotiate encryption. The server presents its certificate, both sides agree on a cipher suite, and exchange key material. After this, all data is encrypted. Time: 30-150ms.
+
+4. **HTTP Request** -- The browser sends the actual request: method (GET), path (`/users`), headers (Authorization, Accept, cookies), and body (for POST/PUT requests). Time: 5-50ms.
+
+5. **Server Processing** -- The server receives the request, runs middleware (authentication, rate limiting, logging), executes the route handler, queries the database or cache, and constructs the response. Time: 10-500ms.
+
+6. **HTTP Response** -- The server sends back status code (200 OK), headers (Content-Type, Cache-Control), and the response body (JSON, HTML, etc.). Time: 5-50ms.
+
+7. **Browser Rendering** -- The browser parses HTML, builds the DOM, applies CSS, executes JavaScript, and paints pixels. Time: 50-300ms.
+
+Total time for a typical request: 130-1270ms. And that is for a happy path. Things go wrong at every step: DNS can time out, TCP connections get dropped, TLS certificates expire, servers crash, databases lock up, and the browser can run out of memory.
+
+<RequestLifecycleDemo client:visible />
+
+## Latency vs Throughput
+
+Imagine a highway. **Latency** is the time it takes one car to travel from one end to the other. **Throughput** is how many cars pass through per hour. These are different things, and optimizing one does not automatically improve the other.
+
+A single lane road might have low latency (one car goes fast) but terrible throughput (only one car at a time). A ten-lane highway has high throughput but the same latency per car. Adding more lanes helps throughput, not latency. Making cars faster helps latency, not throughput.
+
+Formal definitions:
+
+- **Latency**: the time from sending a request to receiving a response. Measured in milliseconds. Example: "Our API has 200ms p99 latency."
+- **Throughput**: the number of requests processed per unit of time. Measured in requests per second (rps) or queries per second (QPS). Example: "Our API handles 5,000 QPS."
+
+These two are connected by **Little's Law**: `L = lambda * W`, where L is the number of requests in the system, lambda is the arrival rate (throughput), and W is the average time in the system (latency). If you know any two, you can calculate the third.
+
+Why this matters: if your API has 200ms latency and you need to handle 10,000 QPS, Little's Law tells you that at any given moment there are `0.2 * 10000 = 2000` requests in flight. Your system needs capacity (connections, memory, threads) for all 2000 simultaneously.
+
+Optimizing one can hurt the other. Batching requests improves throughput (fewer round trips) but increases latency (each request waits for the batch to fill). Compression reduces bandwidth but adds CPU time (higher latency per request). Connection pooling reduces latency (reusing connections) but limits throughput (fixed pool size).
+
+<LatencyThroughputDemo client:visible />
+
+## Scalability: Vertical vs Horizontal
+
+Your laptop is slow. You have two options: buy a faster laptop (vertical scaling) or buy more laptops (horizontal scaling).
+
+**Vertical scaling (scale up)** means adding more resources to a single machine: more CPU, more RAM, faster SSD, more network bandwidth. It is easy -- no code changes, no distributed systems complexity. But it has hard limits. You cannot buy a machine with infinite CPU. At some point, the biggest machine available is not enough, and it costs exponentially more as you approach the top.
+
+**Horizontal scaling (scale out)** means adding more machines and distributing load across them. Two servers handle twice the traffic, ten servers handle ten times. This is virtually unlimited -- you can keep adding machines. But it is hard. Your code must be stateless (any request can go to any server), you need a load balancer to distribute traffic, you need to handle data consistency across machines, and failures become normal (if you have 100 servers, expect one to die every few days).
+
+Auto-scaling is the practice of automatically adding or removing servers based on load. When CPU usage exceeds 70%, spin up more servers. When it drops below 30%, remove some. Cloud providers (AWS Auto Scaling, GCP Autoscaler) do this for you, but you need to design your system to support it -- stateless servers, health checks, and graceful shutdown.
+
+When to use which: start with vertical scaling for simplicity. Move to horizontal when you hit the limits of a single machine or need the redundancy that multiple machines provide. Most production systems use both: reasonably powerful machines, scaled horizontally.
+
+<ScalabilityCompareDemo client:visible />
+
+## Availability vs Reliability
+
+A store that is open 24/7 but sometimes sells expired food has high availability and low reliability. A store with perfect products that closes randomly has high reliability and low availability. You want both, but they are different things.
+
+**Availability** is the percentage of time your system is operational and reachable. Measured in "nines":
+
+| Nines | Downtime per year | Downtime per month |
+|-------|-------------------|--------------------|
+| 99% (two nines) | 3.65 days | 7.3 hours |
+| 99.9% (three nines) | 8.76 hours | 43.8 minutes |
+| 99.99% (four nines) | 52.6 minutes | 4.38 minutes |
+| 99.999% (five nines) | 5.26 minutes | 26.3 seconds |
+
+Moving from 99% to 99.9% is straightforward. Moving from 99.99% to 99.999% is exponentially harder and more expensive. Each additional nine requires redundancy, failover mechanisms, multi-region deployment, and extensive testing.
+
+**Reliability** is the probability that the system performs correctly when it is available. A system can be available but return wrong data (available but unreliable). A system can be down for maintenance but when it is up, every response is correct (reliable but not available).
+
+Three terms you will hear constantly:
+
+- **SLI (Service Level Indicator)**: the metric you measure. Example: "request latency in milliseconds" or "error rate percentage."
+- **SLO (Service Level Objective)**: the target you set. Example: "p99 latency under 500ms" or "error rate below 0.1%."
+- **SLA (Service Level Agreement)**: the contract with consequences. Example: "if we miss our SLO, you get a 10% credit." SLAs are usually business contracts built on top of SLOs.
+
+In interviews, when someone says "design a system with 99.99% availability," they are asking you to think about redundancy, failover, and how to minimize downtime across all failure modes.
+
+## Fault Tolerance
+
+Every car comes with a spare tire. You do not plan to get a flat, but you prepare for it because flats happen. Fault tolerance is the software equivalent: designing your system so that individual component failures do not cause system-wide outages.
+
+Three terms to distinguish:
+
+- **Error**: a human mistake in the code. A typo, a wrong formula, a missing null check. Preventable with testing and code review.
+- **Fault**: an abnormal condition in the system. A disk fills up, a network cable is unplugged, memory runs low. Not preventable, but manageable.
+- **Failure**: the system stops providing the expected service. The user sees a 500 error, the app crashes, data is lost. This is what happens when faults are not tolerated.
+
+The key strategy is **redundancy**: having multiple copies of every critical component. If you have one database and it dies, your system fails. If you have one primary and one replica, the replica takes over. If you have three servers behind a load balancer and one dies, the other two handle the traffic.
+
+**Graceful degradation** means the system provides reduced functionality rather than failing completely. If your search service is down, show cached results instead of a blank page. If your recommendation engine fails, show popular items. If your image CDN is slow, serve lower-resolution images. The user gets a degraded experience rather than no experience.
+
+Common fault tolerance patterns:
+
+- **Retries with exponential backoff**: if a request fails, wait and try again, doubling the wait time each attempt. Prevents hammering a struggling service.
+- **Circuit breakers**: if a downstream service fails repeatedly, stop calling it for a while. Let it recover instead of making things worse.
+- **Bulkheads**: isolate failures to prevent cascading. If one service is slow, do not let it consume all threads and take down everything.
+- **Timeouts**: never wait forever. Set a timeout on every external call. If it does not respond in time, return an error and move on.
+
+<FaultToleranceDemo client:visible />
+
+## Performance Metrics That Matter
+
+You built an API. It works. But how well does it work? These are the metrics that matter:
+
+**QPS (Queries Per Second)** is the raw volume metric. How many requests is your system handling right now? This tells you about load. If your QPS is 100 and your system can handle 10,000, you have headroom. If your QPS is 9,500 and your limit is 10,000, you are about to have a bad day.
+
+**Latency percentiles** tell you about user experience. The most important ones:
+
+- **p50 (median)**: half of all requests are faster than this. Good for a general sense, but hides the worst cases.
+- **p90**: 90% of requests are faster than this. Good for "most users" experience.
+- **p99**: 99% of requests are faster than this. The most commonly used production metric. If p99 is 500ms, 1% of your users (potentially thousands) see worse than 500ms.
+- **p999**: 99.9% of requests are faster than this. Used by large-scale systems where even 0.1% of users is a massive number.
+
+**Why averages lie**: if 99 requests take 50ms and 1 request takes 5000ms, the average is 99.5ms. That looks fine. But p99 is 5000ms, and that one user had a terrible experience. Average hides outliers. Always use percentiles.
+
+**Bandwidth vs throughput**: bandwidth is the maximum data transfer rate of your network link (measured in Mbps or Gbps). Throughput is the actual data transfer rate you achieve (always less than or equal to bandwidth). You can have a 10Gbps network link (bandwidth) but only push 2Gbps through it (throughput) because your disks are slow, your CPU is busy, or the other end cannot receive fast enough.
+
+<MetricsDashboardDemo client:visible />
+
+## Capacity Estimation Basics
+
+Interviewers love capacity estimation questions: "Estimate the storage requirements for Twitter" or "How much bandwidth does Netflix need?" This is not about exact numbers. It is about showing you can think in orders of magnitude and follow a structured approach.
+
+The method is always the same, just with different numbers:
+
+1. **Estimate total users**: How many people use the service? For Twitter, roughly 500 million monthly active users.
+2. **Estimate daily active users (DAU)**: Not all users are active every day. Twitter: roughly 100 million DAU.
+3. **Estimate requests per user per day**: How many actions does each active user take? Twitter: roughly 30 (scrolling, posting, liking, retweeting).
+4. **Calculate QPS**: Total requests per day divided by seconds in a day (86,400). This gives you average load. Multiply by 2-3x for peak.
+5. **Estimate storage per request**: How much data does each request generate? A tweet is roughly 280 bytes of text plus metadata.
+6. **Calculate daily and yearly storage**: DAU times requests per user times size per request, times 365.
+
+Let's walk through it for Twitter:
+
+- 100 million DAU
+- 30 requests per user per day
+- Total requests per day: 100M x 30 = 3 billion
+- Average QPS: 3 billion / 86,400 = ~34,700 QPS
+- Peak QPS (2x): ~69,400 QPS
+- Storage per request: ~280 bytes (tweet text) + ~100 bytes (metadata) = ~380 bytes
+- Daily storage: 3 billion x 380 bytes = ~1.14 TB per day
+- Yearly storage: 1.14 TB x 365 = ~416 TB per year
+- Add 3x for replicas and backups: ~1.25 PB
+
+Those numbers are rough estimates, but they are in the right ballpark. The interviewer is checking: can you identify the right variables, use reasonable assumptions, and do the math without getting lost?
+
+<CapacityEstimationDemo client:visible />
+
+## Self-Check
+
+Answer these without looking back:
+
+1. What are the three components of client-server architecture?
+2. What is the difference between latency and throughput?
+3. What does Little's Law (L = lambda * W) tell you about a system?
+4. When would you choose vertical scaling over horizontal scaling?
+5. What is the difference between 99.9% and 99.99% availability in downtime per year?
+6. What is the difference between an SLI, an SLO, and an SLA?
+7. What is graceful degradation? Give an example.
+8. Why is p99 latency more useful than average latency?
+9. What is the first step in a capacity estimation problem?
+10. What is the difference between bandwidth and throughput?
+
+| Concept | What It Measures | Typical Unit | Interview Use |
+|---------|-----------------|-------------|---------------|
+| Latency | Time per request | Milliseconds | "p99 under 200ms" |
+| Throughput | Requests per time | QPS / RPS | "10,000 QPS" |
+| Availability | Uptime percentage | Nines (99.9%) | "four nines availability" |
+| Reliability | Correctness | Error rate % | "error rate below 0.1%" |
+| Bandwidth | Network capacity | Mbps / Gbps | "10 Gbps backbone" |
+| Storage | Data volume | TB / PB | "500 TB per year" |

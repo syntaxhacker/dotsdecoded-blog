@@ -1,0 +1,530 @@
+---
+title: "Design WhatsApp: Building Real-Time Chat at Scale"
+description: "Full system design interview walkthrough for a messaging platform: real-time connections, message delivery guarantees, group chats, online presence, push notifications, and database schema for billions of messages."
+date: 2026-04-22
+tags: ["system-design", "interview", "whatsapp", "chat", "real-time", "design-problem"]
+---
+
+import CapacityCalcDemo from '../../components/demos/ChatCapacityCalcDemo'
+import ApiDesignDemo from '../../components/demos/ApiDesignDemo'
+import ConnectionDemo from '../../components/demos/ConnectionDemo'
+import SchemaDesignDemo from '../../components/demos/ChatSchemaDesignDemo'
+import DeliveryGuaranteeDemo from '../../components/demos/DeliveryGuaranteeDemo'
+import MessageOrderingDemo from '../../components/demos/MessageOrderingDemo'
+import GroupMessageDemo from '../../components/demos/GroupMessageDemo'
+import PresenceDemo from '../../components/demos/PresenceDemo'
+import ArchitectureDemo from '../../components/demos/ChatArchitectureDemo'
+
+Imagine you have a walkie-talkie. You press a button, speak, and your friend on the other side hears you instantly. No dialing, no waiting for a ring, no voicemail. Push-to-talk, always-on, immediate. Now imagine that walkie-talkie works for two billion people simultaneously, across every country on Earth, on devices ranging from a $50 Android phone to the latest iPhone. That is WhatsApp.
+
+Building a system like this is one of the most common system design interview questions, and for good reason. It touches every hard problem in distributed systems: real-time bidirectional communication, guaranteed message delivery, ordering across multiple servers, fan-out to groups, presence tracking for billions of users, and storage that grows by petabytes per year. In this walkthrough, we will design the system from scratch, making decisions the way you would in a real interview.
+
+## Understanding the Problem
+
+Before writing any code or drawing any boxes, we need to understand what makes chat fundamentally different from other systems.
+
+Most web applications are request-response. You click a button, the browser sends a request, the server responds, done. Even streaming applications like video are fundamentally one-directional: server pushes data to client. Chat is different in four ways.
+
+First, it is real-time. When Alice sends a message to Bob, Bob should see it within 200 milliseconds. Not two seconds, not "eventually consistent." Two hundred milliseconds. Human conversation has a rhythm, and if messages arrive late, the flow breaks. People start typing over each other, or they think the other person is ignoring them.
+
+Second, it is bidirectional. Both Alice and Bob can send messages at any time. There is no "whose turn is it" protocol. This means we need persistent, two-way connections, not just server-push or client-poll.
+
+Third, it is ordered. If Alice sends "I am at the door" and then "Come down," Bob must see them in that order. If the messages arrive reversed, Bob goes down to the street and waits while Alice is still inside.
+
+Fourth, it has delivery guarantees. A lost message in a chat app is not like a dropped frame in a video. It could be "I am breaking up with you" or "The deal is off." Messages must arrive exactly once.
+
+These four constraints -- real-time, bidirectional, ordered, guaranteed -- are what make chat one of the hardest systems to build at scale.
+
+<CapacityCalcDemo client:visible />
+
+## Requirements Gathering
+
+Every system design interview starts with requirements. We need to nail down what we are building and what we are not.
+
+### Functional Requirements
+
+The must-have features for a messaging platform:
+
+- **One-on-one chat**: Send and receive text messages between two users
+- **Group chat**: Send messages to a group of users, with member management (add, remove, admin roles)
+- **Message history**: View past messages in a conversation, paginated and searchable
+- **Online presence**: See whether a user is online, offline, or idle
+- **Typing indicators**: See when the other person is typing a message
+- **Read receipts**: Know when your message has been delivered and read
+- **Media sharing**: Send images, videos, and files in messages
+- **Push notifications**: Receive a notification when a new message arrives and the app is not open
+
+### Non-Functional Requirements
+
+These are the quality attributes that make or break the system:
+
+- **Low latency**: Messages delivered in under 200ms
+- **High availability**: 99.99% uptime (52 minutes of downtime per year)
+- **Message ordering**: Messages in a conversation always appear in send order
+- **Exactly-once delivery**: No lost messages, no duplicate messages
+- **Scalability**: Support 2 billion users and 100 billion messages per day
+- **Durability**: Messages are never lost, even if servers crash
+
+### Scale
+
+- 2 billion registered users
+- 500 million daily active users
+- 100 billion messages per day
+- Average message size: 100 bytes (text), up to 50MB (media)
+- 500 million concurrent WebSocket connections
+
+### Out of Scope
+
+To keep the problem tractable, we explicitly exclude: voice and video calls, stories/status updates, payments, end-to-end encryption (assume transport-level encryption), and ephemeral messages.
+
+## Capacity Estimation
+
+Before designing the architecture, we need to understand the scale of the problem. Capacity estimation is not about getting exact numbers -- it is about showing you can think in orders of magnitude.
+
+Let us walk through the math. We have 2 billion registered users and 500 million daily active users. Each active user sends about 50 messages per day. That gives us:
+
+- **Messages per day**: 500M x 50 = 25 billion messages/day
+- **Messages per second**: 25B / 86,400 = ~289,000 messages/sec
+- **Peak messages per second**: 289K x 3 = ~867,000 messages/sec (assuming 3x peak factor)
+
+For storage, assuming an average message size of 100 bytes:
+
+- **Storage per day**: 25B x 100 bytes = 2.5TB/day
+- **Storage per year**: 2.5TB x 365 = ~912TB/year
+
+But WhatsApp actually processes closer to 100 billion messages per day. With that number:
+
+- **Messages per second**: 100B / 86,400 = ~1.15M messages/sec
+- **Storage per day**: 100B x 100 bytes = 10TB/day
+- **Storage per year**: 10TB x 365 = 3.65PB/year
+
+For concurrent connections, we assume 30% of DAU are active at any time:
+
+- **Concurrent WebSocket connections**: 500M x 0.3 = 150 million
+
+These numbers tell us something important: this is a write-heavy system with massive fan-out. We are not serving cached pages -- we are routing individual messages to individual users in real time.
+
+## API Design
+
+With requirements clear, we can define the API surface. A chat system needs both REST endpoints for CRUD operations and WebSocket events for real-time features.
+
+### REST Endpoints
+
+These handle stateful operations like creating conversations, fetching history, and managing groups:
+
+```
+POST   /api/v1/messages                    Send a message
+GET    /api/v1/conversations/{id}/messages  Fetch message history
+POST   /api/v1/groups                      Create a group
+PUT    /api/v1/groups/{id}/members          Add member to group
+POST   /api/v1/messages/{id}/read           Mark message as read
+GET    /api/v1/users/{id}/conversations     List user's conversations
+```
+
+### WebSocket Events
+
+These handle real-time updates: new messages, typing indicators, presence changes, and read receipts:
+
+```
+message:new       New message received
+typing:start      User started typing
+typing:stop       User stopped typing
+presence:update   User went online/offline
+message:read      Message was read by recipient
+```
+
+<ApiDesignDemo client:visible />
+
+The key design decision here is the separation between REST and WebSocket. REST handles request-response patterns (fetch history, create group) while WebSocket handles push patterns (new message, typing indicator). This separation keeps concerns clean: REST endpoints are stateless and cacheable, WebSocket connections are stateful and real-time.
+
+Authentication for both follows the same pattern: the client authenticates once with a JWT or session token, and all subsequent requests (REST or WebSocket) include that token. WebSocket connections are authenticated during the handshake.
+
+## Connection Management
+
+How do clients and servers talk to each other in real time? There are three main approaches, and choosing the right one is critical.
+
+### Long Polling
+
+The client sends an HTTP request to the server and the server holds the connection open until there is data to send (or a timeout expires, usually 30 seconds). When the timeout hits, the client immediately sends another request.
+
+This works, but it is wasteful. Each "poll" is a full HTTP request with headers (~500 bytes), even if there is no data. With 150 million concurrent connections, that is a lot of overhead. Latency is also high because the server can only push data when the client happens to be polling.
+
+### Server-Sent Events (SSE)
+
+The client opens an HTTP connection and the server keeps it open indefinitely, sending events as they occur. This is efficient for server-to-client push but it is unidirectional. The client cannot send data back through the same connection -- it needs a separate HTTP request for that.
+
+For chat, where both sides send messages, SSE would require two connections per user (one for receiving, one for sending), which doubles the connection count.
+
+### WebSocket
+
+The client and server perform a one-time HTTP handshake (Upgrade header) and then both sides can send frames over the same TCP connection. Each frame has a tiny overhead (2-10 bytes) compared to hundreds of bytes for HTTP.
+
+WebSocket is the clear winner for chat: bidirectional, low overhead, low latency, and a single connection per user.
+
+### Connection Architecture
+
+In production, we do not have one giant WebSocket server. We have a pool of connection servers, each holding tens of thousands of connections. When Alice sends a message to Bob, her connection server needs to find which connection server is holding Bob's WebSocket and route the message there.
+
+This requires a presence service: a distributed hash table that maps `user_id -> connection_server_id`. When Bob connects, his connection server registers him in the presence service. When Alice sends a message, her connection server looks up Bob's location and forwards the message.
+
+<ConnectionDemo client:visible />
+
+### Reconnection
+
+Mobile networks are unreliable. Users go through tunnels, elevators, and airplanes. The client must handle reconnection gracefully. The standard approach is:
+
+1. Detect disconnection (WebSocket `onclose` event)
+2. Reconnect with exponential backoff (1s, 2s, 4s, 8s, max 30s)
+3. On reconnect, send the last received message sequence number
+4. Server sends any messages the client missed during the disconnect
+
+This "resume from last sequence number" approach is how WhatsApp ensures no messages are lost during brief disconnections.
+
+## Database Schema Design
+
+The database schema for a chat system needs to support several access patterns: looking up conversations, fetching message history, tracking read receipts, and managing group membership.
+
+### Core Tables
+
+**Users** stores account information and presence state:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID | Primary key |
+| phone | VARCHAR(20) | Indexed, unique |
+| username | VARCHAR(50) | Indexed, unique |
+| display_name | VARCHAR(100) | |
+| avatar_url | TEXT | |
+| online_status | ENUM | online, offline, idle |
+| last_seen | TIMESTAMP | Indexed |
+| created_at | TIMESTAMP | |
+
+**Conversations** represents both direct messages and group chats:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID | Primary key |
+| type | ENUM | direct, group |
+| name | VARCHAR(200) | NULL for direct |
+| avatar_url | TEXT | |
+| created_by | UUID | FK to users |
+| created_at | TIMESTAMP | |
+
+**Conversation_Members** is the junction table linking users to conversations:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| conversation_id | UUID | FK, composite PK |
+| user_id | UUID | FK, composite PK |
+| role | ENUM | admin, member |
+| muted | BOOLEAN | |
+| joined_at | TIMESTAMP | |
+
+**Messages** is the largest table -- this is where billions of rows live:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID | Primary key |
+| conversation_id | UUID | FK, indexed |
+| sender_id | UUID | FK, indexed |
+| content | TEXT | |
+| message_type | ENUM | text, image, video, file |
+| message_number | BIGINT | Per-conversation sequence, indexed |
+| created_at | TIMESTAMP | Indexed |
+| deleted_at | TIMESTAMP | Soft delete |
+
+**Read_Receipts** tracks which users have read which messages:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| message_id | UUID | FK, composite PK |
+| user_id | UUID | FK, composite PK |
+| read_at | TIMESTAMP | |
+
+<SchemaDesignDemo client:visible />
+
+### Indexing Strategy
+
+Indexes are determined by query patterns. The most common queries are:
+
+- "Get messages for conversation X, ordered by created_at, paginated" -- index on `(conversation_id, created_at DESC)`
+- "Get unread messages for user Y in conversation X" -- join messages with read_receipts where user_id = Y
+- "Find conversation between user A and user B" -- query conversation_members where user_id in (A, B), group by conversation_id having count = 2
+
+### Partitioning
+
+The messages table will grow to billions of rows within months. We partition by `created_at` using monthly ranges. Each partition holds one month of messages. Old partitions can be moved to cold storage (S3) while recent partitions stay on fast SSDs. This is called time-series partitioning, and it is the standard approach for append-only data that grows predictably.
+
+## Message Delivery Guarantees
+
+This is one of the most important topics in chat system design, and interviewers love it. There are three levels of delivery guarantee:
+
+### At-Most-Once
+
+The sender fires the message and forgets about it. If the message arrives, great. If not, it is lost. This is the simplest approach but unacceptable for chat. Imagine sending "I will be there in 5 minutes" and the other person never receives it.
+
+Implementation: the sender pushes the message to the server, the server pushes to the recipient. No retries, no acknowledgments. If any step fails, the message is gone.
+
+### At-Least-Once
+
+The sender keeps retrying until it gets an acknowledgment. This guarantees delivery but can produce duplicates. If the server receives the message, writes it to the database, but crashes before sending the acknowledgment, the sender will retry and the message gets stored twice.
+
+Implementation: the sender sends with a retry policy (exponential backoff, max retries). The server deduplicates on the server side using a message ID. But the recipient might still see duplicates if the server crashes between writing and pushing.
+
+### Exactly-Once (or Near-Exactly-Once)
+
+True exactly-once delivery is theoretically impossible in distributed systems (by the FLP impossibility result), but we can get arbitrarily close. The approach:
+
+1. The sender assigns a unique ID to every message (UUID)
+2. The server stores the message with its ID
+3. The recipient tracks all message IDs it has seen
+4. If a duplicate arrives, the recipient silently drops it
+
+This gives us "effectively exactly-once" delivery. WhatsApp uses a combination of server-side deduplication (using message IDs) and client-side deduplication (tracking seen IDs in a Bloom filter or set).
+
+<DeliveryGuaranteeDemo client:visible />
+
+### In Practice
+
+WhatsApp's actual approach is a hybrid:
+
+- Messages are written to the database before being sent to the recipient (write-ahead)
+- Each message has a unique ID assigned by the server
+- If the recipient is offline, the message is queued in their outbox
+- When the recipient comes online, the server replays the queue
+- The client acknowledges each message, and the server removes it from the queue
+- If the acknowledgment is lost, the server resends but the client deduplicates using the message ID
+
+## Message Ordering
+
+Why does ordering matter? Imagine this conversation:
+
+```
+Alice: I am at the door
+Alice: Come down
+```
+
+If Bob sees them reversed:
+
+```
+Alice: Come down
+Alice: I am at the door
+```
+
+He goes downstairs, waits, and then sees "I am at the door" and gets confused. In a real conversation, messages build on each other. Out-of-order delivery breaks the coherence.
+
+### Per-Conversation Sequence Numbers
+
+The simplest approach: each conversation has a monotonically increasing counter on the server. When a message is written, it gets the next number in the sequence. Messages are displayed in sequence number order, regardless of when they arrive at the client.
+
+This works for a single server. But what about multiple servers?
+
+### Distributed Ordering
+
+In production, messages for the same conversation might be processed by different servers. Alice's connection server and Bob's connection server could assign sequence numbers independently, leading to conflicts.
+
+The solution is a centralized sequence generator per conversation. One approach is to use a Redis INCR command (atomic and fast). Another is to use a Snowflake-style ID that encodes a timestamp in the high bits -- this gives you rough ordering without a centralized counter.
+
+For strict global ordering across servers, we use Lamport timestamps (logical clocks). Each server maintains a counter, and every message includes the server's current timestamp. When a server receives a message from another server, it updates its clock to `max(local_clock, received_clock) + 1`. This guarantees that if message A causally precedes message B, A will have a lower timestamp than B.
+
+<MessageOrderingDemo client:visible />
+
+### Buffering and Reordering
+
+On the client side, messages are buffered and sorted by sequence number before display. If the client receives message #5 but has not seen #4 yet, it holds #5 in a buffer until #4 arrives. This is a simple reordering buffer -- a short-lived data structure that holds out-of-order messages until their predecessors arrive.
+
+## Group Chats
+
+Group chats introduce a fan-out problem. When Alice sends a message to a group of 256 people, the server needs to deliver that message to all 256 recipients. This is fundamentally different from 1:1 chat, where one message goes to one person.
+
+### The Fan-Out Problem
+
+There are two approaches to fan-out:
+
+**Fan-out on write**: When the sender sends a message, the server writes one copy per recipient to their individual message queues. Storage is O(N) per message (N = group size), but reading is fast -- each user just reads their own queue.
+
+**Fan-out on read**: The server stores one copy of the message in the group's shared channel. Each recipient reads from the shared channel when they open the group. Storage is O(1) per message, but reading requires deduplication -- each user needs to track which messages they have already seen.
+
+WhatsApp uses a hybrid approach. For small groups (under ~100 members), fan-out on write is efficient. For large groups (broadcast lists, channels), fan-out on read is better because storing 10,000 copies of one message is wasteful.
+
+### Group Delivery Status
+
+Each member can have a different delivery status for the same message:
+
+- **Queued**: The message is waiting to be delivered (member is offline)
+- **Sent**: Pushed to the member's device
+- **Delivered**: Acknowledged by the member's device
+- **Read**: The member opened the conversation and saw the message
+
+<GroupMessageDemo client:visible />
+
+### Group Metadata
+
+Groups need additional metadata beyond what direct messages require:
+
+- **Group name and avatar**: Editable by admins
+- **Member list**: Who is in the group
+- **Roles**: Admin (can add/remove members, edit info) vs. member (can only send messages)
+- **Join/leave events**: When someone joins or leaves, a system message is posted to the group
+- **Group settings**: Who can send messages (all members, admins only), whether non-members can see group info
+
+## Online Presence and Typing Indicators
+
+Presence is the feature that shows you whether someone is online, offline, or idle. It seems simple, but at WhatsApp's scale, it is a massive distributed state management problem.
+
+### Presence Protocol
+
+The standard approach uses heartbeats:
+
+1. When the app comes to the foreground, the client opens a WebSocket and sends an "online" event
+2. The connection server registers the user as "online" in the presence service
+3. Every 30 seconds, the client sends a heartbeat ping
+4. If the server does not receive a heartbeat for 60 seconds, it marks the user as "offline"
+5. When the app goes to the background, the client sends an "idle" event
+6. The server marks the user as "idle" after 5 minutes of inactivity
+
+### Typing Indicators
+
+Typing indicators are ephemeral. When Alice starts typing, her client sends a `typing:start` event to the server, which forwards it to Bob. After 3 seconds of no typing activity, Alice's client sends `typing:stop` (or the server auto-expires the indicator).
+
+Typing indicators should not be persisted. They are purely real-time, in-memory events. If Bob is offline when Alice starts typing, he should never see the indicator -- it would be meaningless by the time he comes back.
+
+### Privacy
+
+Presence is sensitive information. WhatsApp allows users to control who can see their online status and last seen timestamp. Options include: everyone, contacts only, or nobody. This requires the presence service to check the viewer's relationship with the user before returning status information.
+
+<PresenceDemo client:visible />
+
+## Push Notifications
+
+Push notifications solve a specific problem: the user is not looking at their phone. The app might be backgrounded, force-killed by the OS, or the phone might be locked. Without push notifications, the user would never know they received a message until they open the app.
+
+### The Push Flow
+
+1. The message service determines that the recipient is not connected (no active WebSocket)
+2. The message service sends a push notification request to the notification service
+3. The notification service formats a payload with sender info and message preview
+4. The notification service calls APNs (Apple Push Notification service) for iOS devices, or FCM (Firebase Cloud Messaging) for Android devices
+5. APNs/FCM delivers the notification to the device, which wakes up the app in the background
+
+### Notification Payload
+
+The payload is minimal -- just enough to show a useful notification:
+
+```json
+{
+  "title": "Alice",
+  "body": "Hey, are you free tonight?",
+  "conversation_id": "conv_abc123",
+  "message_id": "msg_xyz789",
+  "badge": 3,
+  "sound": "default"
+}
+```
+
+The `badge` count tells the OS how many unread messages the user has. The `sound` triggers a notification sound. The `conversation_id` lets the app open directly to the right conversation when the user taps the notification.
+
+### Rate Limiting
+
+If someone sends 100 messages in a group of 5 people, we do not want to send 500 push notifications. The notification service should coalesce: if multiple messages arrive from the same conversation within a short window (say, 2 seconds), send a single notification saying "Alice: 3 new messages." This reduces notification fatigue and battery drain.
+
+## High-Level Design
+
+Now we can put all the pieces together into a coherent architecture.
+
+### Architecture Overview
+
+```
+[Client Apps] --WebSocket--> [Connection Servers]
+                                |
+                                v
+                          [Message Queue] (Kafka)
+                                |
+                                v
+                          [Message Service]
+                           /           \
+                          v             v
+                    [Database]    [Presence Service]
+                                       |
+                                       v
+                              [Connection Servers]
+                                       |
+                                       v
+                              [Client Apps]
+```
+
+The flow for sending a message:
+
+1. Alice types a message and hits send
+2. Her client sends the message over her WebSocket connection to her connection server
+3. The connection server validates the message and publishes it to a Kafka topic
+4. The message service consumes from Kafka, assigns a unique ID and sequence number, and writes to the database
+5. The message service looks up Bob's location in the presence service
+6. If Bob is online, the message is routed to Bob's connection server, which pushes it over his WebSocket
+7. If Bob is offline, the message is stored in his outbox queue and a push notification is sent
+8. The message service sends a delivery receipt back to Alice's connection server
+
+### Key Services
+
+**Connection Servers**: Maintain WebSocket connections with clients. They are stateless -- all state is in the presence service. If a connection server crashes, clients reconnect to a different one. These are horizontally scalable.
+
+**Message Service**: The core business logic. Consumes messages from Kafka, persists to the database, handles fan-out for groups, manages read receipts, and coordinates with the presence service for routing. Also horizontally scalable -- partition the Kafka topic by conversation_id so all messages for the same conversation go to the same consumer instance.
+
+**Presence Service**: A distributed hash table mapping `user_id -> connection_server_id`. Built on Redis Cluster for sub-millisecond lookups. Also stores online/offline/idle status with TTL-based expiration.
+
+**Notification Service**: Handles push notifications via APNs and FCM. Includes rate limiting, coalescing, and per-user notification preferences. Decoupled from the message flow via a separate Kafka topic.
+
+**Media Service**: Handles upload, processing (thumbnail generation, compression), and CDN distribution for photos and videos in messages. Messages with media have a URL reference instead of inline content.
+
+<ArchitectureDemo client:visible />
+
+## Scaling Considerations
+
+Getting the architecture right is half the battle. The other half is making it scale.
+
+### Sharding
+
+Users are sharded by `user_id` using consistent hashing. Each shard handles a subset of users. For 1:1 chats, both users in a conversation should ideally be on the same shard, which allows the message service to handle delivery without cross-shard communication. This can be achieved by sharding conversations (not users) -- a conversation's shard is determined by hashing the conversation_id.
+
+### Message Queue
+
+Kafka provides durability and ordering guarantees. Messages are partitioned by `conversation_id`, so all messages in a conversation go to the same partition and are consumed in order. Kafka retains messages for a configurable period (e.g., 7 days), which acts as a buffer for offline users.
+
+### Database Scaling
+
+The messages table is the bottleneck. Strategies:
+
+- **Time-series partitioning**: Monthly partitions for the messages table. Recent data on SSDs, old data on HDDs or S3.
+- **Read replicas**: Message history reads go to read replicas, writes go to the primary.
+- **Hot/cold storage**: Messages older than 90 days are moved to cold storage (compressed, cheaper disks).
+- **Caching**: Recent messages (last 50 per conversation) are cached in Redis. This covers the most common access pattern.
+
+### Handling 500M Concurrent Connections
+
+Each WebSocket connection consumes memory (~50KB for buffers and state) and a file descriptor. With 500 million connections, we need:
+
+- 500M x 50KB = 25TB of memory just for connection state
+- At 100K connections per server, that is 5,000 connection servers
+
+In practice, connection servers use techniques like connection multiplexing (multiple logical connections over one TCP connection), buffer pooling, and zero-copy I/O to reduce per-connection overhead. The presence service offloads most state to Redis, keeping the connection servers lean.
+
+## Self-Check
+
+After designing a system, it is worth stepping back and checking for gaps. Here is a checklist:
+
+- [ ] Can we handle the estimated scale (1.15M messages/sec)?
+- [ ] Are messages delivered in order within a conversation?
+- [ ] What happens when a connection server crashes? Do we lose messages?
+- [ ] How does the system handle network partitions between data centers?
+- [ ] What happens when a user's outbox queue grows very large?
+- [ ] Can we search message history efficiently?
+- [ ] How do we handle media messages (photos, videos)?
+- [ ] What is the monitoring strategy (latency percentiles, queue depths, connection counts)?
+- [ ] How do we roll out schema changes to a table with billions of rows?
+- [ ] What happens if the message queue (Kafka) goes down?
+- [ ] How do we prevent abuse (spam, rate limiting)?
+- [ ] Can we support end-to-end encryption without breaking server-side search?
+- [ ] What is the deployment strategy (blue-green, canary, rolling)?
+- [ ] How do we test this at scale (load testing, chaos engineering)?
+
+If you can answer all of these, you have a solid design. The key insight is that there is no single "right" answer -- the interviewer wants to see your thought process, your ability to make tradeoffs, and your awareness of what you do not know.

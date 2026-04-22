@@ -1,0 +1,173 @@
+---
+title: "Load Balancing & API Gateway: Traffic Control for Distributed Systems"
+description: "How load balancers distribute traffic across servers, from L4 to L7, round-robin to least connections — plus how API gateways manage the front door of your backend."
+date: 2026-04-22
+tags: ["system-design", "load-balancing", "api-gateway", "networking"]
+---
+
+import LoadBalancerOverviewDemo from '../../components/demos/LoadBalancerOverviewDemo'
+import L4L7Demo from '../../components/demos/L4L7Demo'
+import LoadBalanceAlgoDemo from '../../components/demos/LoadBalanceAlgoDemo'
+import HealthCheckDemo from '../../components/demos/HealthCheckDemo'
+import ApiGatewayDemo from '../../components/demos/ApiGatewayDemo'
+
+## Why Do We Need Load Balancing?
+
+Imagine a restaurant with a single waiter serving 50 tables. Every customer waits. The waiter forgets orders. Customers leave angry.
+
+Now imagine 4 waiters with a host at the front door who seats people evenly. No one waits too long. The host is the load balancer.
+
+In software, the problem is identical. One server can only handle so many concurrent requests. Once CPU hits 100% or memory fills up, every new request slows down -- or fails entirely. A single server is also a single point of failure. When it crashes, your entire service goes down.
+
+Without a load balancer:
+- **One server gets crushed** while others sit idle
+- **No failover** -- if the server dies, the service dies
+- **No way to scale** -- adding more servers doesn't help if traffic only hits one
+- **Downtime during deploys** -- restarting the server means zero availability
+
+A load balancer solves all of this by sitting between clients and servers, distributing requests intelligently.
+
+## How Load Balancers Work
+
+The load balancer sits between clients and servers. Clients talk to the load balancer's IP. The load balancer decides which backend server handles each request and forwards it. The client never knows which server actually processed the request.
+
+The LB maintains a **pool** of backend servers. It needs to know which servers are alive and ready to handle traffic. This is where **health checks** come in.
+
+Health checks work by periodically pinging each server -- either by making an HTTP request to a `/health` endpoint (active health check) or by watching for failed connections (passive health check). If a server doesn't respond within the timeout, the LB removes it from the pool and stops sending traffic there. When it starts responding again, the LB adds it back.
+
+The result: if a server crashes, the LB detects it within seconds and redistributes traffic to the remaining healthy servers. Clients see a brief slowdown or a retry, not an outage.
+
+<LoadBalancerOverviewDemo client:visible />
+
+## L4 vs L7 Load Balancers
+
+Not all load balancers are equal. The main distinction is which layer of the network stack they operate at.
+
+**L4 (Transport layer)** load balancers make routing decisions based on IP address and port number. They see a TCP connection from `203.0.113.42:52341` to `10.0.0.5:443` and forward the entire TCP stream to a backend server. They don't inspect the HTTP content. This makes them fast -- they can handle millions of connections per second with minimal latency.
+
+Think of L4 as a mail room. It looks at the address on the envelope and puts it in the right bin. It doesn't open the letter.
+
+**L7 (Application layer)** load balancers understand HTTP. They inspect the request method, path, headers, cookies, and even the request body. This lets them route `/api/users` to one service and `/api/orders` to another. They can terminate TLS, rewrite URLs, add headers, and make decisions based on session cookies.
+
+Think of L7 as a receptionist who reads the letter, understands what it says, and decides which department should handle it.
+
+| Feature | L4 | L7 |
+|---------|----|----|
+| Decision basis | IP + port | HTTP path, headers, cookies |
+| Speed | Very fast (millions/sec) | Slower (thousands/sec) |
+| Content inspection | No | Yes |
+| Use case | Distribute TCP connections | Route HTTP to microservices |
+| Examples | HAProxy, NLB (AWS) | Nginx, ALB (AWS), Envoy |
+
+When to use each: use L4 when you need raw throughput and all servers are identical. Use L7 when you have microservices with different endpoints, need SSL termination at the LB, or want content-based routing.
+
+<L4L7Demo client:visible />
+
+## Load Balancing Algorithms
+
+The algorithm is the brain of the load balancer -- it decides which server gets each request.
+
+**Round Robin** is the simplest. Requests cycle through servers in order: A, B, C, D, A, B, C, D. Fair when all servers are identical. Doesn't account for different server capacities or current load.
+
+**Weighted Round Robin** accounts for different server sizes. If Server A has 4 cores and Server D has 1 core, you assign weights 4:3:2:1. Server A gets roughly 40% of traffic, Server D gets 10%. Still simple, but respects hardware differences.
+
+**Least Connections** sends each request to the server with the fewest active connections. Better when requests take variable time -- a server handling a slow query won't accumulate connections because the LB sends new ones elsewhere.
+
+**Least Response Time** combines connection count with response latency. It sends requests to the server that's both least busy and fastest-responding. The most adaptive algorithm, but requires more computation.
+
+**IP Hash** runs the client's IP through a hash function and uses the result to pick a server. The same IP always hits the same server. This provides session stickiness -- useful when sessions are stored locally (though shared sessions or sticky tokens are better solutions).
+
+| Algorithm | Best When | Ignores Capacity | Session Sticky |
+|-----------|-----------|------------------|----------------|
+| Round Robin | Identical servers | Yes | No |
+| Weighted RR | Different server sizes | No (uses weights) | No |
+| Least Connections | Variable request duration | No (uses active conns) | No |
+| Least Response Time | Mixed workloads | No (uses latency) | No |
+| IP Hash | Need session stickiness | Yes | Yes |
+
+<LoadBalanceAlgoDemo client:visible />
+
+## Health Checks & Failover
+
+A load balancer is only as good as its awareness of server health. Health checks are how the LB stays informed.
+
+**Active health checks** are periodic requests the LB sends to each server, typically a `GET /health` endpoint every 5-30 seconds. The server responds with `200 OK` if healthy. If the LB gets no response, a 5xx error, or a timeout (e.g., 3 seconds), it marks the server as unhealthy.
+
+**Passive health checks** monitor real traffic. If the LB detects a pattern of failed responses from a server (e.g., 5 consecutive 500s), it marks the server unhealthy without sending explicit health check requests. This catches issues that health endpoints might miss (like a database connection pool exhaustion where `/health` returns 200 but real requests fail).
+
+**Failover strategies:**
+
+- **Active-Active**: All servers receive traffic. When one fails, its share is redistributed to the rest. This is the most common setup -- you get full capacity and automatic failover.
+- **Active-Passive**: One server handles all traffic. A standby server waits idle. If the active server fails, the standby takes over. Simpler but wastes resources -- you're paying for a server that does nothing most of the time.
+
+When a server fails and gets removed from the pool, the LB redistributes its traffic to remaining servers. If those servers were already at 60% capacity, they might jump to 80%. This is why you need **capacity headroom** -- running servers at 100% means any failure causes cascading overload.
+
+<HealthCheckDemo client:visible />
+
+## What Is an API Gateway?
+
+Back to the restaurant analogy. The load balancer is the host who seats people at tables. The API gateway is the maitre d' who handles reservations, checks dress code, manages the waitlist, and directs you to the right dining room.
+
+An API gateway is a single entry point for all client requests. Instead of clients connecting directly to each microservice, they connect to the gateway, which handles cross-cutting concerns and routes requests to the appropriate backend.
+
+Why not expose services directly? Because each service would need its own auth, rate limiting, logging, and CORS configuration. That's duplicated effort and inconsistent security. The gateway centralizes all of it.
+
+What a gateway does:
+- **Routing**: Maps incoming requests to the right backend service based on path, headers, or method
+- **Authentication**: Verifies JWT tokens, API keys, or OAuth credentials before forwarding
+- **Rate limiting**: Prevents any single client from overwhelming the system
+- **Request/response transformation**: Adds headers, strips internal fields, converts protocols
+- **Logging & monitoring**: Records every request for debugging and analytics
+- **API versioning**: Routes `/v1/` and `/v2/` to different service versions
+
+## API Gateway Deep Dive
+
+**Request routing** is the core function. The gateway uses rules to match incoming requests to backend services. Path-based routing sends `/api/users/*` to the Users service and `/api/orders/*` to the Orders service. Header-based routing can send requests with `X-Version: 2` to a different service version. Method-based routing can separate `GET /api/products` (read) from `POST /api/products` (write) into different services.
+
+**Authentication at the gateway** means backend services don't need to verify tokens individually. The gateway validates the JWT once, extracts user info, and passes it downstream as headers (`X-User-Id`, `X-User-Role`). This simplifies backend code and ensures consistent auth logic.
+
+**Rate limiting** protects your system from abuse. Common strategies: fixed window (100 requests per minute), sliding window (smoother distribution), token bucket (allows short bursts). The gateway tracks requests per client IP or API key and returns `429 Too Many Requests` when the limit is exceeded.
+
+**Request/response transformation** lets the gateway modify traffic in flight. Add a `X-Request-Id` header for tracing. Strip internal fields from responses. Convert `XML` to `JSON` for legacy clients. Aggregate responses from multiple services into one response.
+
+**Logging & monitoring** at the gateway gives you a single place to observe all traffic. Log the method, path, status code, response time, and client IP for every request. Feed this into your monitoring system (Datadog, Grafana, ELK) for dashboards and alerts.
+
+**API versioning** through the gateway lets you run multiple versions simultaneously. Route `/v1/users` to the legacy service and `/v2/users` to the new one. Gradually migrate clients without big-bang deployments.
+
+<ApiGatewayDemo client:visible />
+
+## Gateway vs Load Balancer
+
+They sound similar, and some tools (like Nginx, Envoy, HAProxy) can do both. But they solve different problems.
+
+A **load balancer** distributes traffic across multiple instances of the **same service**. It cares about server health and connection distribution. Its question: "which server instance should handle this request?"
+
+An **API gateway** manages traffic at the **application level** across **different services**. It cares about routing, auth, rate limiting, and transformation. Its question: "which service should handle this request, and does this request have permission?"
+
+| Concern | Load Balancer | API Gateway |
+|---------|--------------|-------------|
+| Primary job | Distribute traffic across instances | Manage API access |
+| Routing | Same service, different instances | Different services by path |
+| Auth | Usually not | Yes (JWT, API keys, OAuth) |
+| Rate limiting | Rarely | Yes |
+| Content inspection | L7 LBs can, L4 cannot | Yes (always) |
+| TLS termination | Often | Yes |
+| Health checks | Yes | Sometimes |
+| Request transformation | No | Yes |
+
+When you need both: in most production systems, you do. The load balancer sits in front of the gateway instances (distributing traffic across multiple gateway replicas for high availability). The gateway sits behind the LB and handles application-level concerns before routing to backend services.
+
+The typical architecture: `Client -> LB (L4) -> Gateway replicas (L7) -> Backend services`
+
+## Self-Check
+
+- Can you explain why a single server is a single point of failure?
+- What's the difference between L4 and L7 load balancing? When would you choose each?
+- Which load balancing algorithm would you use for servers with different CPU capacities?
+- Which algorithm gives you session stickiness without any shared state?
+- What happens when a health check fails? How does the LB respond?
+- What's the difference between active and passive health checks?
+- What's the difference between a gateway and a load balancer? Can one tool do both?
+- Name 3 things an API gateway does that a load balancer typically does not.
+- Why would you put a load balancer in front of your API gateway instances?
+- What HTTP status code does a gateway return when a client exceeds the rate limit?

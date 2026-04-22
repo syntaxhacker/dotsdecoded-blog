@@ -1,0 +1,351 @@
+---
+title: "Design Uber & Amazon: Complex Systems Interview Walkthrough"
+description: "Two complete system design interviews: geospatial indexing and real-time tracking for ride-sharing, plus product catalog, cart, checkout, and order management for e-commerce."
+date: 2026-04-22
+tags: ["system-design", "interview", "uber", "amazon", "ecommerce", "design-problem"]
+---
+
+import UberCapacityDemo from '../../components/demos/UberCapacityDemo'
+import GeoIndexDemo from '../../components/demos/GeoIndexDemo'
+import DriverMatchDemo from '../../components/demos/DriverMatchDemo'
+import TripLifecycleDemo from '../../components/demos/TripLifecycleDemo'
+import UberArchitectureDemo from '../../components/demos/UberArchitectureDemo'
+import AmazonCapacityDemo from '../../components/demos/AmazonCapacityDemo'
+import ShoppingCartDemo from '../../components/demos/ShoppingCartDemo'
+import OrderPipelineDemo from '../../components/demos/OrderPipelineDemo'
+import InventoryDemo from '../../components/demos/InventoryDemo'
+import AmazonArchitectureDemo from '../../components/demos/AmazonArchitectureDemo'
+
+# Part 1: Design Uber
+
+## Understanding the Problem
+
+Imagine you are standing on a street corner in Manhattan at rush hour. You pull out your phone, tap a button, and within 30 seconds a car pulls up. That car was one of thousands of available drivers, each moving in a different direction, each updating their location every second. The system had to find the closest driver, calculate an accurate ETA, factor in traffic, handle surge pricing, and stream the driver's real-time location to your screen -- all before you finished putting your phone away.
+
+Uber is, at its core, a real-time geospatial matching system operating at planetary scale. A taxi dispatch system optimized for the entire world, running continuously. The key challenges that make this hard are not business logic -- they are infrastructure problems: how do you index millions of moving points, match them in milliseconds, and stream their positions to millions of concurrent viewers?
+
+## Requirements
+
+### Functional Requirements
+
+1. **Request a ride** -- rider specifies pickup and destination
+2. **Driver matching** -- find and assign the nearest available driver
+3. **Real-time tracking** -- stream driver GPS location to rider and vice versa
+4. **Fare calculation** -- compute distance, time, and surge multiplier
+5. **Payment processing** -- charge rider, pay driver
+6. **Rating system** -- both rider and driver rate each other
+7. **Surge pricing** -- adjust fares based on supply and demand
+
+### Non-Functional Requirements
+
+- **Low latency matching**: ride request to driver match in under 3 seconds
+- **Real-time GPS updates**: driver position streamed to rider every 1-3 seconds
+- **High availability**: riders and drivers must always be able to connect
+- **Scalability**: 100M+ daily rides, 5M+ drivers online simultaneously
+- **Consistency**: a driver can only be assigned to one ride at a time
+
+### Scale Assumptions
+
+- 100M daily rides
+- 5M drivers online at peak
+- 15M riders with the app open at peak
+- 2x peak factor (peak is 2x average)
+
+## Capacity Estimation
+
+Capacity estimation is how you prove to your interviewer that you understand the magnitude of the problem. It is not about exact numbers -- it is about showing you can think in orders of magnitude and identify bottlenecks before they happen.
+
+<UberCapacityDemo client:visible />
+
+Let us walk through the key numbers. One hundred million daily rides divided by 86,400 seconds in a day gives roughly 1,150 rides per second on average. At peak (2x), that is about 2,300 rides per second. Each of those rides triggers a matching query, a database write, and potentially a notification.
+
+But the real bottleneck is location tracking. Five million drivers, each sending a GPS update every second, means 5 million writes per second just for positions. And each of those 15 million concurrent riders needs to receive position updates for their assigned driver, which means millions of WebSocket connections streaming data simultaneously.
+
+Storage is deceptively large. Each ride record might be 1KB (pickup, dropoff, driver ID, rider ID, fare, timestamps). One hundred million rides per day at 1KB each is 100GB per day. Over a year, that is 36TB of trip data -- and that is before you store GPS traces, payment records, and audit logs.
+
+## Geospatial Indexing
+
+The fundamental problem Uber must solve is this: given a rider's latitude and longitude, find all available drivers within a few kilometers, sorted by distance. A standard SQL query like `SELECT * FROM drivers WHERE distance < 5 ORDER BY distance` does not work because `distance` is a computed value -- the database would have to scan every single driver row, compute the Haversine distance for each, then sort. With 5 million drivers, that query takes seconds. You need milliseconds.
+
+The solution is a geospatial index -- a data structure that lets you query "what is near this point" without checking every point individually.
+
+<GeoIndexDemo client:visible />
+
+### Geohash
+
+Geohash encodes a latitude and longitude into a short string. The world is divided into a grid, and each cell gets a base-32 character. Longer hashes represent smaller areas. The critical property is that nearby locations share prefix characters. So if you want to find drivers near a rider, you can compute the rider's geohash and then query for all drivers whose geohash starts with the same prefix. This turns a distance computation into a simple string prefix match, which databases handle in milliseconds via B-tree indexes.
+
+The trade-off is precision at boundaries. Two locations on opposite sides of a geohash cell boundary might be physically close but have completely different hashes. You solve this by querying the 8 surrounding cells in addition to the center cell.
+
+### QuadTree
+
+A QuadTree recursively divides 2D space into four quadrants. You keep subdividing until each quadrant has at most N points (say, 50 drivers). When a rider requests a ride, you find the leaf quadrant containing the rider's location and check nearby quadrants. This gives you O(log n) lookup instead of O(n) scanning.
+
+Uber uses a modified QuadTree where cells are split based on driver density. Dense urban areas get deeply subdivided; rural areas stay as large cells.
+
+### Google S2 Geometry
+
+Google's S2 library uses a different approach: it maps the sphere of the Earth onto a cube, then onto a 1D space-filling curve (a Hilbert curve). Each point on Earth gets a 64-bit "cell ID." The advantage over geohash is that S2 cells have more uniform area (geohash cells are narrower near the poles) and better boundary behavior.
+
+## Driver Matching
+
+Once you have a geospatial index that can find nearby drivers in milliseconds, the next question is: which driver do you actually assign? It is not simply "closest driver wins."
+
+<DriverMatchDemo client:visible />
+
+The matching algorithm considers several factors:
+
+1. **Distance and ETA** -- the closest driver in a straight line may not have the fastest ETA due to one-way streets, traffic, or road direction
+2. **Driver rating** -- a driver with a 4.2 rating should not be preferred over a 4.9-rated driver who is 10% farther away
+3. **Ride type** -- an UberX driver cannot be matched to an UberXL request
+4. **Surge zone** -- drivers in high-demand zones should stay there, not be pulled away by a cross-zone request
+5. **Acceptance rate** -- drivers who frequently cancel should be deprioritized
+
+In practice, the system broadcasts the request to the top 3-5 nearby drivers simultaneously. The first driver to accept gets the ride. If all reject, the request is broadcast to the next batch. This "fan-out" approach reduces matching latency from seconds to milliseconds at the cost of slightly more network traffic.
+
+## Real-Time Tracking
+
+Once a driver is matched, both the rider and the driver need to see each other's real-time position on a map. This is a streaming problem, not a request-response problem.
+
+The architecture uses WebSockets. Each driver maintains a persistent WebSocket connection to a tracking service, sending GPS coordinates every 1-3 seconds. The tracking service validates the position, writes it to a time-series store, and forwards it to the rider's WebSocket connection (and to Uber's internal dispatch systems).
+
+For scale, the tracking service is stateless and horizontally sharded. Each shard handles a geographic region. When a driver crosses from one shard's region to another, the connection is seamlessly handed off. Riders see a smooth, continuous tracking experience even though the underlying infrastructure is moving connections between servers.
+
+The rider's phone uses optimistic UI rendering. It interpolates between GPS updates, drawing a smooth path on the map even when updates are delayed by network latency. This is why the car sometimes appears to jump -- the interpolation was wrong and the next GPS update corrected it.
+
+## Trip Lifecycle
+
+Every trip follows a well-defined state machine. Understanding these states is critical because each transition triggers different side effects: notifications, database writes, payment calculations, and dispatch decisions.
+
+<TripLifecycleDemo client:visible />
+
+Each state transition is atomic and idempotent. The trip service uses optimistic locking to prevent concurrent modifications. If a driver tries to advance the trip from "En Route" to "Arrived" while the rider is simultaneously cancelling, the second operation fails and must retry with the latest state.
+
+The state machine also handles timeout transitions. If a driver does not arrive within 15 minutes of matching, the trip is automatically cancelled and the rider is re-matched. If a driver arrives but the rider does not show up within 5 minutes, the driver can mark the rider as a no-show and collect a cancellation fee.
+
+## Surge Pricing
+
+Surge pricing is how Uber balances supply and demand. When there are more riders requesting rides than available drivers, prices go up. This incentivizes drivers in nearby areas to move toward the high-demand zone, and it discourages riders who are not in a hurry from requesting a ride.
+
+The system divides the map into geographic zones (roughly city-block sized in dense areas). Each zone tracks the ratio of ride requests to available drivers. When this ratio exceeds a threshold, the surge multiplier increases. The multiplier is communicated to riders before they confirm the request, so there are no surprises.
+
+The multiplier formula is roughly: `surge_multiplier = base_multiplier * demand_factor`. The demand factor is calculated as `requests / (drivers * expected_completion_rate)`. If there are 100 requests in a zone with 20 drivers, and each driver completes a ride every 10 minutes, the system expects 120 completions per 10 minutes. The demand factor is 100/120, which is under 1, so no surge. But if there are 300 requests, the factor is 300/120 = 2.5x.
+
+## Uber Architecture
+
+Putting it all together, the Uber system is composed of microservices communicating via both synchronous calls (gRPC for matching, REST for the API gateway) and asynchronous events (Kafka for GPS updates and trip lifecycle events).
+
+<UberArchitectureDemo client:visible />
+
+The key architectural decisions are:
+
+- **Location Service** uses Redis with geospatial commands and a QuadTree in memory for sub-millisecond lookups. GPS positions are written to Kafka and consumed by the matching and tracking services.
+- **Matching Service** is stateless and horizontally scalable. It receives a rider's location, queries the QuadTree for nearby drivers, applies ranking logic, and broadcasts to the top candidates via WebSocket.
+- **Trip Service** owns the trip state machine and persists it to PostgreSQL with a Redis cache for hot trips. All state transitions are published to Kafka so other services can react (tracking starts, payment triggers, notifications fire).
+- **Tracking Service** maintains WebSocket connections and forwards GPS updates. It is sharded by geography and handles millions of concurrent connections using a connection pooling layer.
+- **Payment Service** processes charges via Stripe (or a payment processor) with idempotency keys to prevent double-charging. Payouts to drivers are batched and processed asynchronously.
+
+# Part 2: Design Amazon E-Commerce
+
+## Understanding the Problem
+
+Amazon is the world's largest mall, warehouse, and delivery system combined. When you search for "wireless headphones" and get 200,000 results ranked by relevance, price, reviews, and your personal browsing history -- that is the search problem. When you add three items to your cart, see real-time price calculations with tax and shipping estimates, and then check out in under a minute -- that is the cart and checkout problem. When your order triggers inventory deduction in a specific warehouse, a payment charge, a shipping label generation, and a cascade of notifications -- that is the order management problem.
+
+Each of these is a serious distributed systems challenge. Together, they form one of the most complex systems ever built.
+
+## Requirements
+
+### Functional Requirements
+
+1. **Browse and search products** -- full-text search with filtering, sorting, and autocomplete
+2. **Product catalog** -- billions of products with metadata, images, pricing, and reviews
+3. **Shopping cart** -- add, remove, update quantities; persistent across sessions
+4. **Checkout** -- address selection, payment method, order review, place order
+5. **Payment processing** -- credit cards, gift cards, store credit
+6. **Inventory management** -- real-time stock tracking across hundreds of warehouses
+7. **Order tracking** -- status updates, shipping tracking, delivery confirmation
+8. **Recommendations** -- personalized product suggestions based on history
+9. **Reviews and ratings** -- user-generated content on products
+
+### Non-Functional Requirements
+
+- **High availability** -- the store cannot go down, even during Black Friday
+- **Low latency search** -- search results in under 200ms
+- **Strong consistency for inventory** -- cannot oversell (sell more than stock available)
+- **Durability for orders** -- once an order is placed, it must not be lost
+- **Scalability** -- 300M+ active users, billions of products, millions of orders per day
+
+## Capacity Estimation
+
+<AmazonCapacityDemo client:visible />
+
+Three hundred million active users with 100 million daily active users. Ten million orders per day works out to about 115 orders per second on average -- but at peak (Black Friday, Prime Day), this can spike 50-100x. The search system handles 100 million searches per day, but peak search QPS (when everyone is browsing simultaneously) is 5x the average.
+
+The product catalog is the largest data challenge. Two billion products, each with metadata averaging 5KB (title, description, attributes, images, pricing), gives a raw catalog size of 10TB. The search index (inverted index with all text fields) is typically 2-3x the raw data, so roughly 20-30TB of search index. This must be distributed across a cluster and served with sub-200ms latency.
+
+## Product Catalog and Search
+
+The catalog service is the source of truth for product metadata. It stores product details (title, description, brand, category, price, images) in a relational database (PostgreSQL or Amazon's internal Aurora variant). Products are organized in a hierarchical category tree (Electronics > Audio > Headphones > Wireless).
+
+### Search Architecture
+
+Search is powered by Elasticsearch (or Amazon's internal equivalent, CloudSearch/A9). The flow is:
+
+1. **Ingestion**: Product data is written to the catalog database, then asynchronously indexed into Elasticsearch via a change data capture (CDC) pipeline
+2. **Indexing**: Each product's text fields (title, description, brand, attributes) are tokenized, stemmed, and stored in an inverted index. An inverted index maps each word to the list of documents containing it, enabling fast full-text search
+3. **Querying**: When a user searches, the query is tokenized, matched against the inverted index, and results are ranked using BM25 (a relevance scoring algorithm that considers term frequency, document length, and field weights)
+4. **Filtering and faceting**: Users can filter by price range, brand, rating, Prime eligibility. Faceted counts ("Samsung (42), Sony (38), Bose (15)") are pre-computed using aggregations
+5. **Autocomplete**: As the user types, a prefix-based lookup suggests completions from a pre-built suggestion index, updated in near-real-time
+
+### Recommendations
+
+Amazon's recommendation engine uses two main approaches:
+
+- **Collaborative filtering**: "Users who bought X also bought Y." This is computed by building a user-item interaction matrix and finding similar users or similar items. The matrix is enormous (300M users x 2B products) so it is factorized using matrix decomposition techniques (like ALS -- Alternating Least Squares) on a nightly batch job
+- **Content-based filtering**: "Because you viewed wireless headphones, here are similar products." This uses product attribute similarity (same category, similar price range, overlapping keywords)
+
+In practice, both signals are combined into a single relevance score and blended with business logic (boost Prime-eligible products, new arrivals, or items on sale).
+
+## Shopping Cart
+
+The shopping cart seems simple, but it is one of the trickiest parts of an e-commerce system. The cart must be fast (users are actively waiting), accurate (prices change, items go out of stock), and persistent (users expect their cart to survive closing the browser).
+
+<ShoppingCartDemo client:visible />
+
+### Cart Storage Strategy
+
+There are two common approaches:
+
+1. **Session-based (Redis)**: Cart data is stored in Redis with a session ID as the key. This is fast (sub-millisecond reads) but volatile -- if Redis loses data, carts are gone. Suitable for anonymous users.
+2. **Database-backed (PostgreSQL)**: Cart data is stored in a relational database with a user ID foreign key. This is durable but slower (10-50ms per operation). Used for logged-in users.
+
+Amazon uses a hybrid: anonymous carts live in Redis, and when a user logs in, the Redis cart is merged into the database cart. Price calculations are always done server-side (never trust the client) using the latest prices from the catalog service.
+
+### Price Calculation
+
+The total is not simply the sum of item prices. The calculation pipeline is:
+
+1. **Base price**: sum of (item price * quantity) for each cart item
+2. **Discounts**: apply coupon codes, promotional discounts, subscribe-and-save discounts
+3. **Tax**: calculate based on delivery address (tax rates vary by state, county, and city)
+4. **Shipping**: free for Prime members or orders over a threshold; otherwise calculate based on weight, dimensions, and warehouse distance
+5. **Gift wrap, donations, other add-ons**
+
+Each of these steps can fail independently (coupon expired, item price changed between cart and checkout). The checkout service must handle all these edge cases.
+
+## Checkout and Order Management
+
+The checkout flow is a multi-step process that must be atomic: either all steps succeed (order placed, payment charged, inventory deducted) or none do. In distributed systems terminology, this is a saga -- a sequence of local transactions where each step has a compensating action for rollback.
+
+<OrderPipelineDemo client:visible />
+
+### The Saga Pattern
+
+When a user clicks "Place Order," the order service orchestrates a saga:
+
+1. **Create order** (Order Service) -- write order record with status PENDING. If this fails, return error to user.
+2. **Process payment** (Payment Service) -- charge the user's payment method. If payment fails, cancel the order and notify the user.
+3. **Reserve inventory** (Inventory Service) -- deduct stock in the appropriate warehouse. If stock is unavailable, refund the payment and mark order as BACKORDERED.
+4. **Create shipment** (Shipping Service) -- generate shipping label and assign carrier. If this fails, release inventory and refund payment.
+5. **Send confirmation** (Notification Service) -- email and push notification with order details and tracking number.
+
+Each step publishes an event to a message queue (Kafka or Amazon SQS). The next step consumes that event and executes. If any step fails, the orchestrator triggers compensating actions in reverse order.
+
+### Idempotency
+
+Every operation in the checkout pipeline must be idempotent. If the user double-clicks "Place Order" or a network retry sends the same request twice, the system must not create two orders or charge the user twice. Each request includes an idempotency key (a UUID generated by the client). The payment service checks this key before processing and returns the previous result if it exists.
+
+### Order States
+
+```
+CREATED -> CONFIRMED -> PROCESSING -> SHIPPED -> DELIVERED
+   |           |            |
+   v           v            v
+CANCELLED  CANCELLED    RETURNED
+```
+
+Each state transition is persisted to the database with a timestamp and actor (user, system, customer service). The full history is queryable for customer support.
+
+## Inventory Management
+
+Inventory is where consistency matters most. You cannot sell 10 items when you only have 3 in stock. But you also cannot lock inventory for too long, or you will reject valid purchases during high-traffic events.
+
+<InventoryDemo client:visible />
+
+### The Overselling Problem
+
+Imagine two users both try to buy the last Mechanical Keyboard at the same time. Both read the inventory count as 1. Both compute 1 - 1 = 0. Both write 0. This is correct. But if three users do this simultaneously, all three read 1, all three write 0, and the fourth user who should have been rejected gets through. With millions of concurrent purchases, this race condition happens constantly.
+
+### Solutions
+
+1. **Distributed locking**: Before deducting inventory, acquire an exclusive lock on the product's stock record. Only one request can hold the lock at a time. This is correct but can become a bottleneck under high contention. Redis provides distributed locks via the `SETNX` command.
+2. **Optimistic concurrency control**: Each inventory record has a version number. When you read stock, you also read the version. When you write, you include `WHERE version = X`. If the version has changed (another request modified it), the write fails and you retry. This works well when contention is low but causes many retries under high contention.
+3. **Pre-decrement with compensation**: Decrement optimistically, then verify. If stock goes negative, increment it back and reject the order. This is fast but requires careful handling to avoid cascading failures.
+
+In practice, Amazon uses a combination: Redis for fast reads and decrements (with TTL-based locks for hot items), and a relational database for durable inventory records. A reconciliation job runs periodically to ensure Redis and the database are in sync.
+
+### Warehouse Allocation
+
+When an order is placed, the system must decide which warehouse to ship from. The algorithm considers:
+
+- **Stock availability**: which warehouses have all items in stock
+- **Distance to customer**: nearest warehouse minimizes shipping time and cost
+- **Fulfillment cost**: some warehouses have lower labor or shipping rates
+- **Inventory balancing**: avoid depleting one warehouse while another has excess stock
+
+This is formulated as a constrained optimization problem and solved by a fulfillment engine that evaluates all possible warehouse assignments and picks the one with the lowest total cost while meeting delivery SLA requirements.
+
+## Amazon Architecture
+
+The full Amazon e-commerce system is composed of dozens of microservices. Here are the core services and how they interact:
+
+<AmazonArchitectureDemo client:visible />
+
+### Service Communication
+
+Most inter-service communication is event-driven via message queues (Amazon SQS and Kafka). When an order is placed, the Order Service publishes an `OrderPlaced` event. The Payment Service, Inventory Service, Shipping Service, and Notification Service all subscribe to this event and react independently. This decoupling means adding a new service (like a fraud detection service) does not require modifying existing services -- it just subscribes to the relevant events.
+
+Synchronous communication (REST or gRPC) is used when the caller needs an immediate response: the API Gateway calls the Search Service synchronously because the user is waiting for search results. But the API Gateway calls the Cart Service synchronously only for cart reads; cart writes are asynchronous (the client optimistically updates the UI and the server confirms).
+
+### Data Stores
+
+- **PostgreSQL/Aurora**: order records, user accounts, payment records (ACID transactions required)
+- **Redis**: cart data, session data, inventory cache, rate limiting counters
+- **Elasticsearch**: product search index, autocomplete index
+- **S3**: product images, static assets, logs
+- **DynamoDB**: product catalog (key-value access pattern, massive scale), user preferences
+
+## Trade-offs and Self-Check
+
+### Uber Trade-offs
+
+| Decision | Option A | Option B | Uber's Choice | Why |
+|----------|----------|----------|---------------|-----|
+| Location index | Geohash (simple, prefix matching) | QuadTree (adaptive, uniform) | QuadTree + Geohash | QuadTree for matching, Geohash for indexing |
+| Driver assignment | Closest driver wins | Broadcast to top N, first accept | Broadcast | Reduces matching latency, handles rejections |
+| GPS protocol | HTTP polling | WebSocket streaming | WebSocket | Lower latency, lower server load per update |
+| Trip state storage | SQL (strong consistency) | NoSQL (high throughput) | SQL with Redis cache | Strong consistency needed for billing |
+| Surge zones | Fixed grid | Dynamic zones based on demand | Dynamic | More accurate pricing, better supply balancing |
+
+### Amazon Trade-offs
+
+| Decision | Option A | Option B | Amazon's Choice | Why |
+|----------|----------|----------|-----------------|-----|
+| Cart storage | Redis (fast, volatile) | SQL (durable, slower) | Hybrid: Redis for anonymous, SQL for logged-in | Balance of speed and durability |
+| Inventory locking | Pessimistic (lock before read) | Optimistic (version check on write) | Optimistic with Redis pre-decrement | Higher throughput, acceptable retry cost |
+| Checkout | Synchronous orchestration | Event-driven saga | Event-driven saga | Better fault tolerance, independent scaling |
+| Search index | Build on write | Async CDC pipeline | Async CDC | Search index is eventually consistent, acceptable |
+| Recommendations | Real-time ML inference | Batch pre-computed | Batch nightly + real-time serving | Cost-effective at scale, good enough relevance |
+
+### Self-Check Questions
+
+1. How would you handle a driver's phone losing GPS signal mid-trip?
+2. What happens to a ride request if no drivers are available within 10 minutes?
+3. How would you prevent a rider from requesting rides from multiple accounts simultaneously?
+4. What database consistency model does Uber need for trip state vs GPS positions?
+5. How would you design the system to handle a 10x traffic spike during a major event?
+6. What happens if the payment service is down but the inventory service already deducted stock?
+7. How would you prevent review manipulation (fake reviews, paid reviews)?
+8. How does Amazon handle "Add to Cart" during Prime Day when inventory is changing every second?
+9. What is the recovery strategy if the order database fails mid-saga?
+10. How would you design A/B testing for the search ranking algorithm?
