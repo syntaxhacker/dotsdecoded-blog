@@ -212,8 +212,9 @@ const groups = Array.from(groupMap.entries())
           pagefind = window.pagefind
         } else {
           import('/pagefind/pagefind.js').then(function(pf) {
-            pagefind = pf
-            pagefind.init()
+            pf.init().then(function() {
+              pagefind = pf
+            })
           })
         }
       } catch (e) {}
@@ -256,18 +257,22 @@ const groups = Array.from(groupMap.entries())
 
         debounce = setTimeout(function() {
           if (!pagefind) return
+          var currentQ = input.value.trim()
+          if (currentQ !== q) return
           pagefind.search(q).then(function(results) {
             if (results.results.length === 0) return
-            var urls = new Set(results.results.map(function(r) { return r.url }))
+            var currentQ2 = input.value.trim()
+            if (currentQ2 !== q) return
+            var urls = new Set(results.results.map(function(r) { return r.url.replace(/\/$/, '') }))
 
             cards.forEach(function(card) {
-              var href = card.getAttribute('href') || ''
+              var href = (card.getAttribute('href') || '').replace(/\/$/, '')
               var match = urls.has(href)
               card.style.display = match ? '' : 'none'
             })
 
             treeFiles.forEach(function(file) {
-              var href = file.getAttribute('href') || ''
+              var href = (file.getAttribute('href') || '').replace(/\/$/, '')
               var match = urls.has(href)
               file.style.display = match ? '' : 'none'
             })
