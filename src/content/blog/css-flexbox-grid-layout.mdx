@@ -1,0 +1,246 @@
+---
+title: "Modern CSS Layout: Flexbox, Grid & Visual Rendering"
+description: "Flexbox one-dimensional layout, Grid two-dimensional layout, viewport units, CSS custom properties, paint order, and composite layers — the layout tools that power every modern interface."
+date: 2026-04-22
+tags: ["css", "frontend", "flexbox", "grid", "layout", "performance"]
+---
+
+import FlexboxPlaygroundDemo from '../../components/demos/FlexboxPlaygroundDemo'
+import FlexItemDemo from '../../components/demos/FlexItemDemo'
+import FlexPatternsDemo from '../../components/demos/FlexPatternsDemo'
+import GridPlaygroundDemo from '../../components/demos/GridPlaygroundDemo'
+import GridPatternsDemo from '../../components/demos/GridPatternsDemo'
+import FlexVsGridDemo from '../../components/demos/FlexVsGridDemo'
+import ViewportUnitsDemo from '../../components/demos/ViewportUnitsDemo'
+import CustomPropertiesDemo from '../../components/demos/CustomPropertiesDemo'
+import PaintOrderDemo from '../../components/demos/PaintOrderDemo'
+
+## Why Flexbox and Grid Exist
+
+Before 2015, CSS layout was a collection of workarounds. We used `float: left` with `clear: both` to place elements side by side. We used `display: table-cell` to make equal-height columns. We used negative margins, `inline-block` hacks, and `box-sizing` tricks to get anything to look right. Every designer's mockup was a battle against the box model.
+
+Flexbox shipped in 2015. It solved **one-dimensional** layout: arranging items in a single row or column. Think of it like a conveyor belt at a factory — items move in one direction, and you control spacing, alignment, and wrapping along that line.
+
+Grid shipped in 2017. It solved **two-dimensional** layout: controlling both rows and columns at the same time. Think of it like a spreadsheet — you define the grid, and items snap into cells, spanning rows or columns as needed.
+
+The key insight: these tools are **complementary**, not competing. Use Grid for the page skeleton (header, sidebar, main content, footer). Use Flexbox for the components inside (navigation items, card layouts, button groups). Every modern interface combines both.
+
+## Flexbox Fundamentals
+
+Flexbox has two players: the **container** and the **items**. You turn a container into a flex context with `display: flex`, and every direct child becomes a flex item.
+
+The container has two axes:
+
+- **Main axis**: the direction items flow. Set by `flex-direction` — `row` (left to right), `column` (top to bottom), `row-reverse`, or `column-reverse`.
+- **Cross axis**: perpendicular to the main axis. If items flow horizontally, the cross axis is vertical, and vice versa.
+
+With the axes established, you control alignment:
+
+- `justify-content` distributes items along the **main axis**: `start`, `center`, `end`, `space-between`, `space-around`, `space-evenly`.
+- `align-items` aligns items along the **cross axis**: `start`, `center`, `end`, `stretch` (fill available space), `baseline` (align text baselines).
+- `flex-wrap` controls whether items wrap to the next line when they run out of space: `nowrap` or `wrap`.
+- `gap` adds spacing between items without margins.
+
+<FlexboxPlaygroundDemo client:visible />
+
+## Flex Item Properties
+
+While container properties control the group, item properties control individual behavior:
+
+- `flex-grow`: how much an item should grow relative to siblings when there is extra space. Default is `0` (don't grow).
+- `flex-shrink`: how much an item should shrink when space is tight. Default is `1` (shrink equally).
+- `flex-basis`: the initial size before growing or shrinking. Can be `auto`, `0`, or any length value.
+
+The shorthand `flex` combines all three. `flex: 1` is actually `flex: 1 1 0%` — grow by 1, shrink by 1, start at zero width. This is the "fill remaining space" pattern you'll use most often.
+
+Other item properties:
+
+- `align-self` overrides the container's `align-items` for one specific item.
+- `order` changes the visual order without changing the DOM. Use sparingly — it breaks tab order and screen readers.
+
+<FlexItemDemo client:visible />
+
+## Common Flex Patterns
+
+Flexbox excels at component-level layout. Here are the patterns you'll use every day:
+
+**Centering** — the simplest centering in CSS history:
+```css
+.container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+```
+
+**Navbar** — logo on the left, links on the right:
+```css
+nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+```
+
+**Holy Grail** — header, footer, sidebar, main content. The classic three-column layout that used to require floats and hacks.
+
+**Equal Columns** — `flex: 1` on each child makes them share space equally, regardless of content.
+
+**Card Grid** — `flex-wrap: wrap` with a fixed `flex-basis` or percentage creates a responsive grid of cards.
+
+<FlexPatternsDemo client:visible />
+
+## Grid Fundamentals
+
+CSS Grid gives you two-dimensional control. You define the structure, and items place themselves.
+
+The container properties:
+
+- `grid-template-columns`: defines the column tracks. Use fixed widths (`200px 1fr 200px`), the fractional unit (`1fr 1fr 1fr` for equal columns), or `repeat()` for patterns.
+- `grid-template-rows`: defines the row tracks. Same syntax as columns.
+- `gap` (or `row-gap` / `column-gap`): spacing between tracks.
+- `grid-template-areas`: names regions of the grid for semantic placement.
+
+The `fr` unit is Grid's superpower. `1fr` means "one fraction of the remaining space." If you write `1fr 2fr`, the second column is twice as wide as the first. Unlike percentages, `fr` accounts for gaps and fixed-width columns automatically.
+
+<GridPlaygroundDemo client:visible />
+
+## Grid Item Placement
+
+Grid gives you precise control over where items go:
+
+- `grid-column: 1 / 3` places an item from column line 1 to line 3 (spanning 2 columns).
+- `grid-row: span 2` makes an item span 2 rows.
+- `grid-column: span 2` is shorthand for spanning 2 columns.
+- `grid-area: sidebar` places an item in a named area from `grid-template-areas`.
+- `justify-self` and `align-self` align items within their grid cell.
+- `place-self: center` is shorthand for both.
+
+When you don't explicitly place items, Grid uses **auto-placement**. Items fill cells left to right, top to bottom. You can control this with `grid-auto-flow: dense` to pack items into gaps.
+
+## Common Grid Patterns
+
+Grid shines at page-level layout and complex component structures:
+
+**Responsive Grid** — `repeat(auto-fit, minmax(250px, 1fr))` is the most powerful line of CSS for responsive layouts. It creates as many columns as fit, each at least 250px wide, sharing extra space equally. No media queries needed.
+
+**Dashboard** — `grid-template-areas` lets you name each section of a dashboard layout: `"header header" "sidebar main" "footer footer"`. Items reference their area by name.
+
+**Bento Layout** — Grid's ability to span items across multiple cells creates the bento-box layout popular in modern dashboards and portfolios. A chart might span 2 columns, a stat card 1 column, and a featured item 2 rows.
+
+<GridPatternsDemo client:visible />
+
+## Flexbox vs Grid
+
+The most common question: which one should I use? Here's the rule of thumb:
+
+- **One dimension** (row OR column): Flexbox. Navigation bars, button groups, card rows, centering content.
+- **Two dimensions** (rows AND columns): Grid. Page layouts, dashboards, image galleries, forms with labels and inputs.
+
+Use them together. Grid defines the page skeleton. Flexbox handles the content within each grid area.
+
+| Feature | Flexbox | Grid |
+|---------|---------|------|
+| Dimensions | One (row or column) | Two (rows and columns) |
+| Content-driven | Yes — sizes from content | No — sizes from template |
+| Wrapping | Manual with flex-wrap | Built-in with auto-fit/fill |
+| Alignment | Per-axis control | Per-cell control |
+| Overlap | Difficult | Easy (grid-area) |
+| Best for | Components | Page layout |
+
+<FlexVsGridDemo client:visible />
+
+## Viewport & Container Units
+
+CSS offers units that scale with the viewport:
+
+- `vw` — 1% of the viewport width
+- `vh` — 1% of the viewport height
+- `vmin` — 1% of the smaller dimension (width or height)
+- `vmax` — 1% of the larger dimension
+
+The problem with raw viewport units: they don't have a minimum or maximum. A `5vw` heading is 48px on a 960px screen but 192px on a 4K display. Enter `clamp()`:
+
+```css
+h1 {
+  font-size: clamp(1.5rem, 5vw, 3rem);
+}
+```
+
+`clamp(min, preferred, max)` keeps the value between bounds. The preferred value uses `vw` for fluid scaling, but the result never goes below `1.5rem` or above `3rem`. No media queries needed.
+
+`clamp()` works with any CSS value — font sizes, widths, padding, margins. Combined with viewport units, it replaces most responsive typography breakpoints.
+
+<ViewportUnitsDemo client:visible />
+
+## CSS Custom Properties
+
+CSS custom properties (often called "CSS variables") let you define reusable values:
+
+```css
+:root {
+  --accent: #5b8def;
+  --spacing: 16px;
+  --radius: 8px;
+}
+
+.button {
+  background: var(--accent);
+  padding: var(--spacing);
+  border-radius: var(--radius);
+}
+```
+
+The critical difference from preprocessor variables (Sass `$var`): **custom properties are live**. They inherit through the DOM, cascade like any other property, and can be changed at runtime with JavaScript. This makes them the foundation of theming, design systems, and dynamic interfaces.
+
+Inheritance means you can set `--accent: red` on a specific component, and every child that uses `var(--accent)` picks up the red. Change it on `:root`, and the entire page updates.
+
+```js
+document.documentElement.style.setProperty('--accent', '#e85d5d')
+```
+
+This single line recolors every element that references `--accent` — no class toggling, no re-rendering, no React state.
+
+<CustomPropertiesDemo client:visible />
+
+## Paint Order & Composite Layers
+
+When the browser renders a page, it goes through three phases:
+
+1. **Layout** — calculates the size and position of every element. Triggered by changes to `width`, `height`, `padding`, `margin`, `left`, `top`.
+2. **Paint** — fills in pixels: backgrounds, borders, text, shadows, images. Triggered by changes to `color`, `background`, `box-shadow`, `outline`.
+3. **Composite** — combines painted layers in the correct order. Triggered by changes to `transform` and `opacity`.
+
+The paint order within a single element is fixed: background, borders, children, outlines. You cannot change this order.
+
+The key performance insight: **layout is the most expensive phase, composite is the cheapest**. Animating `left` triggers layout on every frame. Animating `transform: translateX()` only triggers composite — the browser moves a pre-painted layer without recalculating anything.
+
+```
+expensive  left: 200px       → layout → paint → composite
+cheap     transform: translateX(200px) → composite only
+```
+
+`will-change` tells the browser to promote an element to its own compositing layer ahead of time. This can eliminate jank for animations but should be used sparingly — each layer consumes GPU memory.
+
+```css
+.animated {
+  will-change: transform;
+}
+```
+
+The rule: only use `will-change` on elements that will actually animate, and remove it after the animation completes. Overusing it causes more harm than good.
+
+<PaintOrderDemo client:visible />
+
+## Self-Check
+
+Can you explain each of these without looking back?
+
+- [ ] Why does `flex: 1` make an item fill remaining space? What are the three values it sets?
+- [ ] When would you choose Grid over Flexbox for a component? Give two examples.
+- [ ] What does `repeat(auto-fit, minmax(250px, 1fr))` do? Why does it work without media queries?
+- [ ] What is the difference between `1fr` and `1%` in a grid template?
+- [ ] Why is `transform: translateX()` faster than `left` for animations?
+- [ ] What happens if you set `--accent: red` on a child element — does it affect siblings?
+- [ ] What is `clamp(1rem, 3vw, 2rem)` equivalent to in plain English?
+- [ ] When should you use `will-change`, and when should you avoid it?

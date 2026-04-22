@@ -1,0 +1,246 @@
+---
+title: "How CSS Actually Works: The Box Model, Display & Positioning"
+description: "How browsers parse styles, the cascade, specificity, the CSS box model, box-sizing, display types, positioning modes, containing blocks, block formatting contexts, and stacking contexts — with interactive visualizations."
+date: 2026-04-22
+tags: ["css", "frontend", "layout", "box-model", "positioning"]
+---
+
+import RenderPipelineDemo from '../../components/demos/RenderPipelineDemo'
+import CascadeSpecificityDemo from '../../components/demos/CascadeSpecificityDemo'
+import InheritanceExplorerDemo from '../../components/demos/InheritanceExplorerDemo'
+import BoxModelDemo from '../../components/demos/BoxModelDemo'
+import BoxSizingDemo from '../../components/demos/BoxSizingDemo'
+import AutoSizingDemo from '../../components/demos/AutoSizingDemo'
+import DisplayTypeDemo from '../../components/demos/DisplayTypeDemo'
+import PositioningDemo from '../../components/demos/PositioningDemo'
+import ContainingBlockDemo from '../../components/demos/ContainingBlockDemo'
+import BFCDemo from '../../components/demos/BFCDemo'
+import StackingContextDemo from '../../components/demos/StackingContextDemo'
+import OverflowClipDemo from '../../components/demos/OverflowClipDemo'
+
+## How Browsers Turn CSS Into Pixels
+
+Think of CSS as a set of instructions you hand to a painter. You describe what you want — colors, sizes, positions — and the browser's rendering engine translates those descriptions into actual pixels on screen. But between your stylesheet and the final painted page, several stages of processing happen.
+
+The browser first parses your HTML into a tree structure called the **DOM** (Document Object Model). Separately, it parses all your CSS into the **CSSOM** (CSS Object Model). These two trees are then combined into a **Render Tree** — a structure that only contains the elements that will actually appear on screen (hidden elements are excluded). From there, the browser calculates the exact position and size of every element in a stage called **Layout** (or "reflow"), then fills in the pixels during **Paint**, and finally composites layers together during **Composite**.
+
+Understanding this pipeline matters because some CSS changes are cheap (composite-only) and others are expensive (triggering layout or paint). Moving an element with `transform` only triggers compositing. Changing `width` triggers the full pipeline from layout onward.
+
+<RenderPipelineDemo client:visible />
+
+## The Cascade: Which Rule Wins?
+
+When multiple CSS rules target the same element with conflicting property values, the browser needs a way to decide which one wins. This decision process is called **the cascade**, and it follows a strict priority order.
+
+The cascade resolves conflicts in this order: **Origin and importance** (browser defaults < author stylesheets < `!important`) beats **Specificity** (how precisely a selector targets an element) beats **Source order** (last rule wins if specificity is tied).
+
+Specificity is calculated as a four-part score: `inline-style, #id, .class, element`. A selector like `div.box#main` scores `0, 1, 1, 1` — one ID, one class, one element. A more specific selector always beats a less specific one, regardless of source order. This is why inline styles (score `1, 0, 0, 0`) are nearly impossible to override without `!important`.
+
+The `!important` declaration flips the cascade: `!important` author styles beat normal author styles. But two `!important` rules still compare by specificity. In practice, `!important` is a last resort — it makes debugging harder because it breaks the natural cascade.
+
+<CascadeSpecificityDemo client:visible />
+
+## Inheritance: Styles That Pass Down
+
+Some CSS properties automatically pass from a parent element to its children. This is called **inheritance**, and it's the reason you can set `font-family` on `<body>` and every element on the page picks it up.
+
+Properties that deal with **text appearance** tend to inherit: `color`, `font-family`, `font-size`, `line-height`, `text-align`, `letter-spacing`, `visibility`. These make sense to inherit because you usually want consistent text styling throughout a section.
+
+Properties that deal with **box model** or **layout** do NOT inherit: `margin`, `padding`, `border`, `width`, `height`, `background`, `display`, `position`. Each element should control its own box.
+
+You can force inheritance behavior with explicit keywords:
+- `inherit` — copies the parent's computed value
+- `initial` — resets to the CSS specification default (not the browser default)
+- `unset` — behaves like `inherit` for inherited properties, `initial` for non-inherited ones
+- `revert` — rolls back to the browser's default stylesheet
+
+<InheritanceExplorerDemo client:visible />
+
+## The CSS Box Model
+
+Every element on a web page is a rectangular box. The **CSS box model** defines four nested layers that determine the element's total size and spacing.
+
+Think of it like a shipping package:
+- **Content** — the product itself (text, images). This is what `width` and `height` control by default.
+- **Padding** — the bubble wrap around the product. Creates space between content and border.
+- **Border** — the cardboard box. Wraps the padding.
+- **Margin** — the clearance space between this box and neighboring boxes. Collapses with adjacent vertical margins.
+
+By default, `width: 200px` sets only the content width. If you add `padding: 20px` and `border: 5px`, the element's total width becomes `200 + 20*2 + 5*2 = 250px`. This surprises most beginners.
+
+**Margin collapsing** is another gotcha: when two block elements stack vertically, their adjacent margins don't add up — the browser uses only the larger one. Two elements with `margin-bottom: 30px` and `margin-top: 20px` have `30px` between them, not `50px`. Only vertical margins collapse, and only between block-level siblings or parent/child.
+
+<BoxModelDemo client:visible />
+
+## Box Sizing: The Fix Everyone Uses
+
+The default box model (`box-sizing: content-box`) is unintuitive. When you set `width: 300px` and add padding, the element grows beyond 300px. This makes responsive layouts unpredictable.
+
+The fix is `box-sizing: border-box`. With this model, `width: 300px` means the total width including content + padding + border. The content area shrinks to accommodate padding and border.
+
+Nearly every modern CSS reset includes:
+
+```css
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+```
+
+This one rule eliminates an entire class of layout bugs. When you set a column to `width: 33.33%` and add padding, it stays at exactly one-third of the container.
+
+<BoxSizingDemo client:visible />
+
+## Width, Height & Auto
+
+The `auto` keyword does different things depending on the element's display type. For block elements, `width: auto` means "fill the parent's content area." For height, `auto` means "fit the content."
+
+Inline elements completely ignore `width` and `height` — their size is determined by their content. You cannot make an inline `<span>` 200px wide without changing its display type.
+
+**Percentage values** resolve against the containing block's width (for `width`) or height (for `height`). A child with `width: 50%` inside a 400px parent is 200px. But `height: 50%` only works if the parent has an explicit height — otherwise the percentage resolves to nothing useful.
+
+**`min-width` and `max-width` always win** over `width`. An element with `width: 100px; min-width: 200px` renders at 200px. This is the basis of responsive design patterns like `width: 100%; max-width: 1200px; margin: 0 auto` — the element grows with the viewport but never exceeds 1200px.
+
+<AutoSizingDemo client:visible />
+
+## Display Types
+
+Every element has a `display` type that determines how it participates in layout. The main types are `block`, `inline`, `inline-block`, and `none`.
+
+**Block elements** (`div`, `p`, `h1`–`h6`, `section`) start on a new line and stretch to fill their parent's full width. They respect `width`, `height`, `margin`, and `padding` in all directions.
+
+**Inline elements** (`span`, `a`, `strong`, `em`) flow within text. They sit on the same line as surrounding content. Crucially, vertical `margin` and `padding` exist but don't affect layout — they overflow visually but don't push other elements away. `width` and `height` are ignored.
+
+**`inline-block`** gives you the best of both: the element flows inline with text (no line break), but internally behaves like a block — respecting `width`, `height`, and all padding/margin. This is how buttons and small widgets typically work.
+
+**`none`** removes the element from the layout entirely. The page renders as if the element doesn't exist. This is different from `visibility: hidden`, which hides the element but preserves its space.
+
+<DisplayTypeDemo client:visible />
+
+## Positioning
+
+CSS positioning controls where an element is placed relative to its normal position, its parent, or the viewport. There are five modes:
+
+**`static`** is the default. Elements follow normal document flow. `top`, `right`, `bottom`, `left` have no effect.
+
+**`relative`** offsets the element from its normal position. The element still occupies its original space in the flow (other elements don't move to fill the gap). Useful for nudging elements without disrupting layout.
+
+**`absolute`** removes the element from normal flow entirely. It positions relative to its nearest positioned ancestor (any ancestor with `position` set to something other than `static`). If no positioned ancestor exists, it positions relative to the initial containing block (the viewport).
+
+**`fixed`** works like absolute, but always relative to the viewport. The element stays in place even when the page scrolls. Fixed headers and floating action buttons use this.
+
+**`sticky`** is a hybrid: the element scrolls normally until it reaches a threshold (like `top: 0`), then it "sticks" to that position within its containing block. It returns to normal scrolling when it reaches the end of its parent.
+
+<PositioningDemo client:visible />
+
+## Containing Block
+
+The **containing block** is the reference rectangle that an element uses to resolve percentage widths, heights, and positioned offsets. Which element serves as the containing block depends on the child's positioning:
+
+For **statically and relatively positioned** elements, the containing block is the nearest block-level ancestor's content box. This is usually the parent `div`.
+
+For **absolutely positioned** elements, the containing block is the nearest ancestor that has a `position` value other than `static`. If no such ancestor exists, the initial containing block (viewport) is used. This is why adding `position: relative` to a parent is such a common pattern — it creates a containing block for absolutely positioned children.
+
+For **fixed positioned** elements, the containing block is normally the viewport. However, if any ancestor has a `transform`, `perspective`, or `filter` property (even `transform: none` in some browsers), that ancestor becomes the containing block instead. This catches people off guard.
+
+<ContainingBlockDemo client:visible />
+
+## Block Formatting Context
+
+A **Block Formatting Context (BFC)** is an isolated layout region where block-level boxes are laid out. Elements inside a BFC don't affect elements outside it, and vice versa.
+
+BFCs are created by: `overflow` set to anything except `visible`, `float` (left or right), `display: flow-root` or `display: flex`/`grid`, `position: absolute` or `fixed`, and certain other properties.
+
+Two important BFC behaviors:
+
+1. **Contains floats** — a BFC parent will expand to contain its floated children. Without a BFC, a parent with only floated children collapses to zero height. This is the classic "clearfix" problem.
+
+2. **Prevents margin collapsing** — margins of elements in different BFCs never collapse. This lets you prevent unwanted margin collapse between parent and child.
+
+The modern approach to creating a BFC is `display: flow-root`. It's explicit, has no side effects (unlike `overflow: hidden` which can clip content), and clearly communicates intent.
+
+<BFCDemo client:visible />
+
+## Stacking Context
+
+The `z-index` property controls the visual stacking order of overlapping elements. But it only works within the same **stacking context**. A child with `z-index: 9999` inside a parent with `z-index: 1` will always appear behind a sibling with `z-index: 2`.
+
+A new stacking context is created by: `position: relative/absolute/fixed` combined with a `z-index` value other than `auto`, `opacity` less than 1, `transform` with any value, `isolation: isolate`, `will-change` specifying certain properties, and several others.
+
+The most common stacking context bug: you have a modal overlay (`z-index: 1000`) that correctly covers the page, but a tooltip inside the modal (`z-index: 9999`) still appears behind a sidebar (`z-index: 500`). This happens because the modal creates a stacking context, so the tooltip's `z-index` only competes with other elements *inside* the modal.
+
+The fix is usually to ensure the stacking context hierarchy matches the visual hierarchy you want.
+
+<StackingContextDemo client:visible />
+
+## Overflow & Clipping
+
+When content exceeds an element's box, the `overflow` property controls what happens:
+
+- **`visible`** (default) — content spills out of the box and is fully visible
+- **`hidden`** — content is clipped at the box boundary. Scrolling is disabled.
+- **`scroll`** — scrollbars are always shown, even if content fits
+- **`auto`** — scrollbars appear only when content overflows
+
+For text truncation with an ellipsis, three properties must work together:
+
+```css
+white-space: nowrap;
+overflow: hidden;
+text-overflow: ellipsis;
+```
+
+Without `white-space: nowrap`, the text wraps to the next line and no truncation occurs. Without `overflow: hidden`, the text spills out visibly. Without `text-overflow: ellipsis`, the text is simply clipped with no visual indicator that content was cut off.
+
+For multi-line truncation, use `-webkit-line-clamp` with `display: -webkit-box` and `-webkit-box-orient: vertical` — note this is a non-standard but widely supported approach.
+
+<OverflowClipDemo client:visible />
+
+## Self-Check
+
+Test your understanding with these questions. Cover the answers and see how many you get right.
+
+### Review Questions
+
+1. What are the six stages of the browser rendering pipeline?
+2. In what order does the cascade resolve conflicting rules?
+3. Which CSS properties inherit and which do not?
+4. What are the four layers of the box model?
+5. What is the difference between `content-box` and `border-box`?
+6. What does `width: auto` do on a block element?
+7. Which display type ignores `width` and `height`?
+8. What is the difference between `relative` and `absolute` positioning?
+9. What determines the containing block for an absolutely positioned element?
+10. What creates a Block Formatting Context?
+11. Why can a high `z-index` still appear behind a lower `z-index`?
+12. Which three CSS properties are required for text-overflow ellipsis?
+13. What happens when two adjacent vertical margins meet?
+14. What is the difference between `display: none` and `visibility: hidden`?
+15. Why does `height: 50%` sometimes have no effect?
+
+### Comparison Tables
+
+| Property | `static` | `relative` | `absolute` | `fixed` | `sticky` |
+|---|---|---|---|---|---|
+| Removed from flow? | No | No | Yes | Yes | No |
+| Containing block | N/A | Self | Positioned ancestor | Viewport | Nearest scroll ancestor |
+| `top/left` effect | Ignored | Offset from normal | From containing block | From viewport | Threshold to stick |
+| Scroll behavior | Normal | Normal | Scrolls with ancestor | Stays fixed | Sticks at threshold |
+
+| Box Model | `width: 200px` + `padding: 20px` + `border: 5px` | Total |
+|---|---|---|
+| `content-box` | Content = 200px | 250px |
+| `border-box` | Content = 150px | 200px |
+
+| Display Type | New line? | Respects width/height? | Vertical margin affects layout? |
+|---|---|---|---|
+| `block` | Yes | Yes | Yes |
+| `inline` | No | No | No |
+| `inline-block` | No | Yes | Yes |
+| `none` | N/A | N/A | N/A |
+
+| Keyword | Inherited props | Non-inherited props |
+|---|---|---|
+| `inherit` | Copies from parent | Copies from parent |
+| `initial` | CSS spec default | CSS spec default |
+| `unset` | Acts like `inherit` | Acts like `initial` |
+| `revert` | Browser default | Browser default |
