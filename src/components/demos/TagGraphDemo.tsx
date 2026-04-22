@@ -41,6 +41,8 @@ interface SimNode {
   x: number
   y: number
   radius: number
+  clusterIndex: number
+  degree: number
 }
 
 interface ShapeEdge {
@@ -48,101 +50,116 @@ interface ShapeEdge {
   target: string
 }
 
+const CLUSTERS = [
+  { name: 'Rails', color: '#e85d5d', lightColor: '#d94444', tags: ['rails', 'ruby', 'fundamentals', 'backend', 'authentication', 'security'] },
+  { name: 'Systems', color: '#5b8def', lightColor: '#4a7ce0', tags: ['system-design', 'interview', 'design-problem', 'architecture', 'caching', 'devops', 'networking'] },
+  { name: 'AI', color: '#9b7bea', lightColor: '#8a6adb', tags: ['ai', 'llm', 'machine-learning'] },
+  { name: 'Frontend', color: '#3dd68c', lightColor: '#2bc07a', tags: ['css', 'frontend', 'layout', 'javascript'] },
+  { name: 'Data', color: '#e8945a', lightColor: '#d7803f', tags: ['databases', 'performance', 'streaming', 'real-time', 'design-patterns'] },
+]
+
 function buildSimNodes(
   tags: TagData[],
-  cx: number,
-  cy: number,
+  edges: EdgeData[],
   w: number,
   h: number,
-  p: { verticalHeight: number; horizontalWidth: number; minRadius: number; maxRadius: number; linePadding: number }
-): { nodes: SimNode[]; shapeEdges: ShapeEdge[] } {
-  const maxCount = Math.max(...tags.map((t) => t.count), 1)
-  const vh = h * p.verticalHeight
-  const hw = w * p.horizontalWidth
-  const sorted = [...tags].sort((a, b) => b.count - a.count)
-  const topTags = sorted.filter((t) => t.count === maxCount)
-  const restTags = sorted.filter((t) => t.count < maxCount)
-  const nodes: SimNode[] = []
-  const minSpacing = p.maxRadius * 2.4
-
-  const padVH = vh * p.linePadding
-  const lineTop = cy - vh + padVH
-  const lineBot = cy + vh - padVH
-
-  let lineSpacing: number
-  let lineStartY: number
-  if (topTags.length <= 1) {
-    lineSpacing = 0
-    lineStartY = cy
-  } else {
-    lineSpacing = Math.max((lineBot - lineTop) / (topTags.length - 1), minSpacing)
-    const totalH = lineSpacing * (topTags.length - 1)
-    lineStartY = cy - totalH / 2
+  p: { minRadius: number; maxRadius: number; labelThreshold: number; padding: number }
+): { nodes: SimNode[]; shapeEdges: ShapeEdge[]; clusterAssignments: Map<string, number> } {
+  const adjacency = new Map<string, Set<string>>()
+  for (const t of tags) adjacency.set(t.name, new Set())
+  for (const e of edges) {
+    adjacency.get(e.source)?.add(e.target)
+    adjacency.get(e.target)?.add(e.source)
   }
 
-  for (let i = 0; i < topTags.length; i++) {
-    const y = topTags.length === 1 ? cy : lineStartY + i * lineSpacing
-    const tag = topTags[i]
-    const r = p.minRadius + (tag.count / maxCount) * (p.maxRadius - p.minRadius)
-    nodes.push({ name: tag.name, count: tag.count, x: cx - hw, y, radius: r })
-  }
+  const degreeMap = new Map<string, number>()
+  for (const t of tags) degreeMap.set(t.name, adjacency.get(t.name)?.size || 0)
 
-  const shapeEdges: ShapeEdge[] = []
+  const tagToCluster = new Map<string, number>()
+  const clusterTags: TagData[][] = CLUSTERS.map(() => [])
 
-  for (let i = 0; i < nodes.length - 1; i++) {
-    if (i < topTags.length - 1) {
-      shapeEdges.push({ source: nodes[i].name, target: nodes[i + 1].name })
+  for (const t of tags) {
+    let assigned = false
+    for (let ci = 0; ci < CLUSTERS.length; ci++) {
+      if (CLUSTERS[ci].tags.includes(t.name)) {
+        tagToCluster.set(t.name, ci)
+        clusterTags[ci].push(t)
+        assigned = true
+        break
+      }
+    }
+    if (!assigned) {
+      tagToCluster.set(t.name, CLUSTERS.length - 1)
+      clusterTags[CLUSTERS.length - 1].push(t)
     }
   }
 
-  const arcStartIdx = nodes.length
+  const activeClusters = CLUSTERS.map((_, ci) => clusterTags[ci].length > 0 ? ci : -1).filter(ci => ci !== -1)
+  const N = activeClusters.length
+  const aspectRatio = w / h
+  const cols = Math.max(1, Math.ceil(Math.sqrt(N * aspectRatio)))
+  const rows = Math.max(1, Math.ceil(N / cols))
+  const cellW = w / cols
+  const cellH = h / rows
 
-  const arcCX = cx - hw
-  const arcRX = hw * 2
-  const arcRY = vh
+  const allMaxDegree = Math.max(...tags.map(t => degreeMap.get(t.name) || 0), 1)
 
-  const padAngle = p.linePadding * 0.6
-  const aFullStart = -Math.PI / 2 + padAngle
-  const aFullEnd = Math.PI / 2 - padAngle
-  const aFullRange = aFullEnd - aFullStart
+  const nodes: SimNode[] = []
+  const shapeEdges: ShapeEdge[] = []
+  const clusterAssignments = new Map<string, number>()
 
-  const approxArcLen = Math.PI * Math.sqrt((arcRX * arcRX + arcRY * arcRY) / 2)
-  const minAngStep = approxArcLen > 0 ? (minSpacing / approxArcLen) * aFullRange : 0
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const idx = row * cols + col
+      if (idx >= N) break
+      const ci = activeClusters[idx]
+      const cTags = clusterTags[ci]
+      if (cTags.length === 0) continue
 
-  let angStep: number
-  let angStart: number
-  if (restTags.length <= 1) {
-    angStep = 0
-    angStart = 0
-  } else {
-    angStep = Math.max(aFullRange / (restTags.length - 1), minAngStep)
-    const totalAng = angStep * (restTags.length - 1)
-    angStart = -Math.PI / 2 + (Math.PI - totalAng) / 2
+      const sorted = [...cTags].sort((a, b) => (degreeMap.get(b.name) || 0) - (degreeMap.get(a.name) || 0))
+
+      const cellCenterX = col * cellW + cellW / 2
+      const cellCenterY = row * cellH + cellH / 2
+      const padX = cellW * p.padding
+      const padY = cellH * p.padding
+      const innerW = cellW - padX * 2
+      const innerH = cellH - padY * 2
+
+      const maxRadiusForCell = Math.min(innerW, innerH) / (sorted.length <= 1 ? 2 : Math.max(2, sorted.length * 0.8))
+      const maxR = Math.min(p.maxRadius, maxRadiusForCell * 0.5)
+      const minR = Math.min(p.minRadius, maxR * 0.6)
+
+      const circleRadius = sorted.length <= 1 ? 0 : Math.min(innerW, innerH) * 0.38
+
+      const startIdx = nodes.length
+
+      for (let i = 0; i < sorted.length; i++) {
+        const tag = sorted[i]
+        const deg = degreeMap.get(tag.name) || 0
+        const r = minR + (deg / allMaxDegree) * (maxR - minR)
+
+        let x: number
+        let y: number
+        if (sorted.length === 1) {
+          x = cellCenterX
+          y = cellCenterY
+        } else {
+          const angle = (i / sorted.length) * Math.PI * 2 - Math.PI / 2
+          x = cellCenterX + Math.cos(angle) * circleRadius
+          y = cellCenterY + Math.sin(angle) * circleRadius
+        }
+
+        nodes.push({ name: tag.name, count: tag.count, x, y, radius: r, clusterIndex: ci, degree: deg })
+        clusterAssignments.set(tag.name, ci)
+      }
+
+      for (let i = startIdx; i < nodes.length - 1; i++) {
+        shapeEdges.push({ source: nodes[i].name, target: nodes[i + 1].name })
+      }
+    }
   }
 
-  for (let i = 0; i < restTags.length; i++) {
-    const angle = restTags.length === 1 ? 0 : angStart + i * angStep
-    const tag = restTags[i]
-    const r = p.minRadius + (tag.count / maxCount) * (p.maxRadius - p.minRadius)
-    nodes.push({
-      name: tag.name,
-      count: tag.count,
-      x: arcCX + Math.cos(angle) * arcRX,
-      y: cy + Math.sin(angle) * arcRY,
-      radius: r,
-    })
-  }
-
-  for (let i = arcStartIdx; i < nodes.length - 1; i++) {
-    shapeEdges.push({ source: nodes[i].name, target: nodes[i + 1].name })
-  }
-
-  if (topTags.length > 0 && nodes.length > arcStartIdx) {
-    shapeEdges.push({ source: nodes[topTags.length - 1].name, target: nodes[arcStartIdx].name })
-    shapeEdges.push({ source: nodes[0].name, target: nodes[nodes.length - 1].name })
-  }
-
-  return { nodes, shapeEdges }
+  return { nodes, shapeEdges, clusterAssignments }
 }
 
 function isDarkTheme(): boolean {
@@ -154,11 +171,9 @@ function getThemeColors(dark: boolean) {
   if (dark) {
     return {
       bg: s.bg,
-      dotFill: s.accent,
-      dotBorder: s.border2,
-      labelText: s.text,
+      clusterColors: CLUSTERS.map(c => c.color),
       edgeColor: s.border2,
-      edgeHoverColor: s.accent,
+      crossEdgeColor: '#2a3040',
       tooltipBg: s.bg2,
       tooltipBorder: s.border,
       tooltipText: s.text,
@@ -167,11 +182,9 @@ function getThemeColors(dark: boolean) {
   }
   return {
     bg: '#fafafa',
-    dotFill: '#3b6ecf',
-    dotBorder: '#c4c4cc',
-    labelText: '#18181b',
+    clusterColors: CLUSTERS.map(c => c.lightColor),
     edgeColor: '#d4d4d8',
-    edgeHoverColor: '#3b6ecf',
+    crossEdgeColor: '#e8e8ec',
     tooltipBg: '#ffffff',
     tooltipBorder: '#e4e4e7',
     tooltipText: '#18181b',
@@ -179,12 +192,21 @@ function getThemeColors(dark: boolean) {
   }
 }
 
+function getClusterForTag(tagName: string): number {
+  for (let ci = 0; ci < CLUSTERS.length; ci++) {
+    if (CLUSTERS[ci].tags.includes(tagName)) return ci
+  }
+  return CLUSTERS.length - 1
+}
+
 export default function TagGraphDemo({ tags, edges }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
-    const nodesRef = useRef<SimNode[]>([])
-    const shapeEdgesRef = useRef<ShapeEdge[]>([])
+  const nodesRef = useRef<SimNode[]>([])
+  const shapeEdgesRef = useRef<ShapeEdge[]>([])
+  const clusterAssignmentsRef = useRef<Map<string, number>>(new Map())
+  const baseNodesRef = useRef<SimNode[]>([])
   const hoveredRef = useRef<string | null>(null)
   const highlightedTagsRef = useRef<Set<string>>(new Set())
   const sizeRef = useRef({ w: 400, h: 400 })
@@ -222,14 +244,16 @@ export default function TagGraphDemo({ tags, edges }: Props) {
     const dpr = window.devicePixelRatio || 1
 
     const defaults = {
-      verticalHeight: 0.42,
-      horizontalWidth: 0.23,
-      minRadius: 26,
-      maxRadius: 49,
-      linePadding: 0.14,
-      edgeOpacity: 0.09,
-      edgeHoverOpacity: 0.81,
-      dimOpacity: 0.13,
+      minRadius: 14,
+      maxRadius: 28,
+      labelThreshold: 3,
+      padding: 0.15,
+      edgeOpacity: 0.12,
+      edgeHoverOpacity: 0.75,
+      dimOpacity: 0.1,
+      crossEdgeOpacity: 0.04,
+      animSpeed: 0.0008,
+      driftRange: 8,
     }
 
     const params = { ...defaults }
@@ -241,17 +265,21 @@ export default function TagGraphDemo({ tags, edges }: Props) {
         gui = new mod.default({ title: 'Tag Graph' })
         guiRef.current = gui
         const layoutFolder = gui.addFolder('Layout')
-        layoutFolder.add(params, 'verticalHeight', 0.1, 0.5, 0.01).name('Height').onChange(rebuild)
-        layoutFolder.add(params, 'horizontalWidth', 0.08, 0.4, 0.01).name('Width').onChange(rebuild)
         layoutFolder.add(params, 'minRadius', 6, 30, 1).name('Min Radius').onChange(rebuild)
-        layoutFolder.add(params, 'maxRadius', 16, 60, 1).name('Max Radius').onChange(rebuild)
-        layoutFolder.add(params, 'linePadding', 0, 0.4, 0.01).name('Line Pad').onChange(rebuild)
+        layoutFolder.add(params, 'maxRadius', 10, 50, 1).name('Max Radius').onChange(rebuild)
+        layoutFolder.add(params, 'labelThreshold', 1, 10, 1).name('Label Degree').onChange(render)
+        layoutFolder.add(params, 'padding', 0.05, 0.35, 0.01).name('Padding').onChange(rebuild)
         layoutFolder.open()
+
+        const animFolder = gui.addFolder('Animation')
+        animFolder.add(params, 'animSpeed', 0, 0.005, 0.0001).name('Speed')
+        animFolder.add(params, 'driftRange', 0, 30, 0.5).name('Drift')
 
         const styleFolder = gui.addFolder('Style')
         styleFolder.add(params, 'edgeOpacity', 0, 0.5, 0.01).name('Edge Alpha').onChange(render)
         styleFolder.add(params, 'edgeHoverOpacity', 0.1, 1, 0.01).name('Hover Edge').onChange(render)
         styleFolder.add(params, 'dimOpacity', 0, 0.2, 0.01).name('Dim Alpha').onChange(render)
+        styleFolder.add(params, 'crossEdgeOpacity', 0, 0.15, 0.01).name('Cross Edge').onChange(render)
 
         gui.add(
           {
@@ -285,36 +313,45 @@ export default function TagGraphDemo({ tags, edges }: Props) {
 
     const refSize = 800
 
+    let animFrame = 0
+    const phaseSeeds: number[] = []
+
     function rebuild() {
       resize()
       const { w, h } = sizeRef.current
       const scale = Math.min(w, h) / refSize
       const clamped = Math.max(scale, 0.45)
       const scaledParams = {
-        ...params,
-        minRadius: Math.min(params.minRadius * clamped, 14),
-        maxRadius: Math.min(params.maxRadius * clamped, 24),
+        minRadius: params.minRadius * clamped,
+        maxRadius: Math.min(params.maxRadius * clamped, 36),
+        labelThreshold: params.labelThreshold,
+        padding: params.padding,
       }
-      const result = buildSimNodes(tags, w / 2, h / 2, w, h, scaledParams)
-      nodesRef.current = result.nodes
+      const result = buildSimNodes(tags, edges, w, h, scaledParams)
+      baseNodesRef.current = result.nodes.map(n => ({ ...n }))
+      nodesRef.current = result.nodes.map(n => ({ ...n }))
       shapeEdgesRef.current = result.shapeEdges
-      render()
+      clusterAssignmentsRef.current = result.clusterAssignments
+
+      if (phaseSeeds.length !== result.nodes.length) {
+        phaseSeeds.length = 0
+        for (let i = 0; i < result.nodes.length; i++) {
+          phaseSeeds.push(Math.random() * Math.PI * 2)
+        }
+      }
     }
 
-    function render() {
+    function tick(time: number) {
+      const base = baseNodesRef.current
+      const live = nodesRef.current
+      for (let i = 0; i < base.length; i++) {
+        const b = base[i]
+        const seed = phaseSeeds[i] || 0
+        live[i].x = b.x + Math.sin(time * params.animSpeed + seed) * params.driftRange
+        live[i].y = b.y + Math.cos(time * params.animSpeed * 0.7 + seed * 1.3) * params.driftRange
+      }
       draw()
-    }
-
-    function resize() {
-      const rect = container.getBoundingClientRect()
-      const w = rect.width
-      const h = rect.height
-      sizeRef.current = { w, h }
-      canvas.width = w * dpr
-      canvas.height = h * dpr
-      canvas.style.width = w + 'px'
-      canvas.style.height = h + 'px'
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      animFrame = requestAnimationFrame(tick)
     }
 
     const edgeMap = new Map<string, number>()
@@ -333,13 +370,32 @@ export default function TagGraphDemo({ tags, edges }: Props) {
     const maxWeight = Math.max(...edges.map((e) => e.weight), 1)
     const maxCount = Math.max(...tags.map((t) => t.count), 1)
 
+    function render() {
+      draw()
+    }
+
+    function resize() {
+      const rect = container.getBoundingClientRect()
+      const w = rect.width
+      const h = rect.height
+      sizeRef.current = { w, h }
+      canvas.width = w * dpr
+      canvas.height = h * dpr
+      canvas.style.width = w + 'px'
+      canvas.style.height = h + 'px'
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    }
+
     rebuild()
+    animFrame = requestAnimationFrame(tick)
 
     function draw() {
       const nodes = nodesRef.current
+      const assignments = clusterAssignmentsRef.current
       const { w, h } = sizeRef.current
       const tc = getThemeColors(themeRef.current)
       const hovered = hoveredRef.current
+      const dark = themeRef.current
 
       ctx.clearRect(0, 0, w, h)
 
@@ -372,6 +428,7 @@ export default function TagGraphDemo({ tags, edges }: Props) {
         const b = nodes.find((n) => n.name === e.target)
         if (!a || !b) continue
 
+        const sameCluster = a.clusterIndex === b.clusterIndex
         const isHighlighted = hasHighlight && connectedSet.has(e.source) && connectedSet.has(e.target)
         const isDimmed = hasHighlight && !isHighlighted
 
@@ -381,14 +438,18 @@ export default function TagGraphDemo({ tags, edges }: Props) {
         ctx.lineWidth = 1 + (e.weight / maxWeight) * 1.5
 
         if (isHighlighted) {
-          ctx.strokeStyle = tc.edgeHoverColor
+          const ci = a.clusterIndex
+          ctx.strokeStyle = tc.clusterColors[ci] || tc.edgeColor
           ctx.globalAlpha = params.edgeHoverOpacity
         } else if (isDimmed) {
-          ctx.strokeStyle = tc.edgeColor
+          ctx.strokeStyle = sameCluster ? (tc.clusterColors[a.clusterIndex] || tc.edgeColor) : tc.crossEdgeColor
           ctx.globalAlpha = params.dimOpacity
-        } else {
-          ctx.strokeStyle = tc.edgeColor
+        } else if (sameCluster) {
+          ctx.strokeStyle = tc.clusterColors[a.clusterIndex] || tc.edgeColor
           ctx.globalAlpha = params.edgeOpacity
+        } else {
+          ctx.strokeStyle = tc.crossEdgeColor
+          ctx.globalAlpha = params.crossEdgeOpacity
         }
 
         ctx.stroke()
@@ -407,16 +468,19 @@ export default function TagGraphDemo({ tags, edges }: Props) {
         ctx.beginPath()
         ctx.moveTo(a.x, a.y)
         ctx.lineTo(b.x, b.y)
-        ctx.lineWidth = 2
+        ctx.lineWidth = 1.5
+
+        const ci = a.clusterIndex
+        const cc = tc.clusterColors[ci] || tc.edgeColor
 
         if (isHighlighted) {
-          ctx.strokeStyle = tc.edgeHoverColor
+          ctx.strokeStyle = cc
           ctx.globalAlpha = 0.9
         } else if (isDimmed) {
-          ctx.strokeStyle = tc.edgeHoverColor
+          ctx.strokeStyle = cc
           ctx.globalAlpha = 0.12
         } else {
-          ctx.strokeStyle = tc.edgeHoverColor
+          ctx.strokeStyle = cc
           ctx.globalAlpha = 0.35
         }
 
@@ -425,65 +489,50 @@ export default function TagGraphDemo({ tags, edges }: Props) {
       }
 
       for (const nd of nodes) {
-        const frac = nd.count / maxCount
         const isHovered = nd.name === hovered
         const isConnected = hasHighlight && connectedSet.has(nd.name)
         const isDimmed = hasHighlight && !isHovered && !isConnected
 
-        let alpha = 0.45 + frac * 0.55
+        const cc = tc.clusterColors[nd.clusterIndex] || tc.edgeColor
+        let alpha = 0.5 + (nd.count / maxCount) * 0.5
         if (isHovered) alpha = 1
-        else if (isDimmed) alpha = 0.3
+        else if (isDimmed) alpha = 0.2
         else if (isConnected) alpha = 1
 
         if (isHovered) {
-          ctx.shadowColor = tc.dotFill
-          ctx.shadowBlur = 18
+          ctx.shadowColor = cc
+          ctx.shadowBlur = 20
         }
 
         ctx.beginPath()
         ctx.arc(nd.x, nd.y, nd.radius, 0, Math.PI * 2)
         ctx.globalAlpha = alpha
-        ctx.fillStyle = tc.dotFill
+        ctx.fillStyle = cc
         ctx.fill()
-        ctx.lineWidth = 1.5
-        ctx.strokeStyle = tc.dotBorder
-        ctx.globalAlpha = alpha
+        ctx.lineWidth = isHovered ? 2 : 1.5
+        ctx.strokeStyle = cc
+        ctx.globalAlpha = isHovered ? 1 : alpha * 0.6
         ctx.stroke()
 
         ctx.shadowColor = 'transparent'
         ctx.shadowBlur = 0
         ctx.globalAlpha = 1
-
-        const showLabel = nd.radius > 18 || isHovered || isConnected
-        if (showLabel) {
-          const fontSize = nd.radius > 18 ? 10 + frac * 2 : 10
-          ctx.font = `700 ${fontSize}px ${s.mono}`
-          ctx.textAlign = 'center'
-          ctx.textBaseline = 'middle'
-          ctx.globalAlpha = isDimmed ? 0.3 : 1
-          ctx.fillStyle = tc.labelText
-
-          const maxTextWidth = nd.radius * 1.7
-          let displayName = nd.name
-          while (ctx.measureText(displayName).width > maxTextWidth && displayName.length > 3) {
-            displayName = displayName.slice(0, -1)
-          }
-          if (displayName !== nd.name) displayName += '..'
-
-          ctx.fillText(displayName, nd.x, nd.y)
-          ctx.globalAlpha = 1
-        }
       }
 
       const tooltip = tooltipRef.current
       if (tooltip && hovered) {
         const nd = nodes.find((n) => n.name === hovered)
         if (nd) {
+          const ci = nd.clusterIndex
+          const clusterName = CLUSTERS[ci]?.name || 'Other'
+          const clusterColor = tc.clusterColors[ci] || tc.edgeColor
+
           tooltip.style.display = 'block'
           tooltip.style.left = nd.x + 'px'
-          tooltip.style.top = nd.y - nd.radius - 44 + 'px'
+          tooltip.style.top = nd.y - nd.radius - 56 + 'px'
           tooltip.style.transform = 'translateX(-50%)'
-          tooltip.innerHTML = `<div style="font-weight:700;color:${tc.tooltipText};font-size:13px;margin-bottom:2px">${nd.name}</div><div style="color:${tc.tooltipSub};font-size:11px">${nd.count} post${nd.count !== 1 ? 's' : ''}</div>`
+          const displayName = nd.name.replace(/\b\w/g, c => c.toUpperCase())
+          tooltip.innerHTML = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${clusterColor}"></span><span style="font-size:10px;font-weight:600;color:${clusterColor};text-transform:uppercase;letter-spacing:0.5px">${clusterName}</span></div><div style="font-weight:700;color:${tc.tooltipText};font-size:13px">${displayName}</div><div style="color:${tc.tooltipSub};font-size:11px">${nd.count} post${nd.count !== 1 ? 's' : ''}</div>`
           tooltip.style.background = tc.tooltipBg
           tooltip.style.borderColor = tc.tooltipBorder
         }
@@ -547,6 +596,7 @@ export default function TagGraphDemo({ tags, edges }: Props) {
     window.addEventListener('posthover', onPostHover)
 
     return () => {
+      cancelAnimationFrame(animFrame)
       ro.disconnect()
       if (guiRef.current) {
         guiRef.current.destroy()
@@ -584,7 +634,7 @@ export default function TagGraphDemo({ tags, edges }: Props) {
             position: 'absolute',
             display: 'none',
             pointerEvents: 'none',
-            padding: '6px 12px',
+            padding: '8px 12px',
             borderRadius: 6,
             border: '1px solid',
             fontSize: 12,
