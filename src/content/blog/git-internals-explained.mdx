@@ -1,0 +1,678 @@
+---
+title: "Git Internals: Objects, Refs, and How Git Actually Stores Your Data"
+description: "A deep dive into Git's internals — the object model (blobs, trees, commits), the staging area, branches as pointers, merging vs rebasing, the reflog, and how to recover from mistakes."
+date: 2026-05-15T01:00:00
+tags: ["git", "internals", "version-control", "devops"]
+---
+
+import GitObjectDemo from '../../components/demos/GitObjectDemo'
+import GitBlobDemo from '../../components/demos/GitBlobDemo'
+import GitTreeDemo from '../../components/demos/GitTreeDemo'
+import GitCommitDemo from '../../components/demos/GitCommitDemo'
+import ThreeTreesDemo from '../../components/demos/ThreeTreesDemo'
+import BranchPointerDemo from '../../components/demos/BranchPointerDemo'
+import StagingAreaDemo from '../../components/demos/StagingAreaDemo'
+import MergeVisualDemo from '../../components/demos/MergeVisualDemo'
+import RebaseDemo from '../../components/demos/RebaseDemo'
+import ReflogDemo from '../../components/demos/ReflogDemo'
+import CherryPickDemo from '../../components/demos/CherryPickDemo'
+import ResetTypesDemo from '../../components/demos/ResetTypesDemo'
+
+## What Is Git?
+
+Most version control systems (like SVN or CVS) store data as a list of file-level changes. Think of a spreadsheet where each row records "file X changed by +5 lines, -2 lines." To reconstruct version N, the system starts at version 0 and applies all N diffs in sequence.
+
+Git does the opposite. Every time you commit, Git takes a **snapshot** of your entire project — a complete copy of every file at that moment. If a file did not change between commits, Git does not store a second copy; it links back to the existing one. The resulting structure is a **DAG (directed acyclic graph)** of snapshots, where each snapshot points to its parent(s).
+
+This design choice makes Git fast, safe, and extremely hard to corrupt. You never "apply diffs" to reconstruct history — you just grab the snapshot you want and walk backward through the graph.
+
+### The Library Catalog Analogy
+
+A public library has a card catalog. Each card lists a book's title, author, and shelf location. To find a book, you look up the card, not the shelf. Git works the same way.
+
+Every piece of data Git stores gets a **hash** (a 40-character SHA-1 checksum) derived from its contents. That hash is both the identifier and the lookup key. You ask Git "give me the object with hash `a1b2c3...`" and Git retrieves it from its internal storage. If the data changes even by one byte, the hash changes entirely. The content *is* the address.
+
+This property — **content-addressable storage** — is the foundation of everything else. It means Git can verify data integrity trivially (recompute the hash and compare), deduplicate automatically (same content = same hash = stored once), and never lose data silently.
+
+## The .git Directory
+
+Every Git repository has a `.git/` directory at its root. This is the repository itself — your working tree is just a checkout. Everything Git knows lives inside `.git/`.
+
+```
+.git/
+  objects/     # All your data (blobs, trees, commits, tags)
+  refs/        # Pointers to commits (branches, tags)
+  HEAD         # The current branch or commit
+  index        # The staging area (binary file)
+  config       # Repository-specific settings
+  description  # Used by GitWeb
+  hooks/       # Scripts triggered on events (commit, push, etc.)
+  info/        # Additional metadata (like exclude rules)
+  logs/        # The reflog — every HEAD movement
+```
+
+The four most important entries are `objects/`, `refs/`, `HEAD`, and `index`. Everything else is auxiliary.
+
+- **`objects/`** stores every version of every file, every directory tree, every commit, and every tag. It is a flat key-value store where the key is the SHA-1 hash and the value is the compressed, typed object.
+- **`refs/`** holds named pointers. `refs/heads/main` points to the latest commit on the `main` branch. `refs/tags/v1.0` points to a specific commit (or an annotated tag object).
+- **`HEAD`** is a plain text file that says either `ref: refs/heads/main` (you are on a branch) or a raw commit hash (you are in detached HEAD state).
+- **`index`** is a binary file (`.git/index`) that tracks what will go into the next commit — the staging area.
+
+Inspect any repository right now: `ls -la .git`. You will see the same structure regardless of whether the project is one file or a million lines of code.
+
+## Blobs
+
+A **blob** (binary large object) stores the contents of a single file. Not the filename, not the permissions, not the directory — just the bytes. Two files with identical content produce the same blob hash, regardless of where they live in the project.
+
+Create a blob manually:
+
+```bash
+echo "hello world" | git hash-object --stdin
+# 3b18e512dba79e4c8300dd08aeb37f8e728b8dad
+```
+
+The hash `3b18e51` is the SHA-1 of `"blob 12\0hello world\n"` — Git prepends the object type and size, separated by a null byte. This header ensures that the same content in different contexts (say, a blob vs. a tree) never collides.
+
+Store the object permanently:
+
+```bash
+echo "hello world" | git hash-object -w --stdin
+# Now lives in .git/objects/3b/18e512dba79e4c8300dd08aeb37f8e728b8dad
+```
+
+Inside `.git/objects/`, objects are stored as files named by the hash: the first two characters become a directory, the remaining 38 become the filename. This keeps the directory manageable (at most 256 subdirectories at each level).
+
+Read a blob back:
+
+```bash
+git cat-file -p 3b18e512dba79e4c8300dd08aeb37f8e728b8dad
+# hello world
+```
+
+Blobs are the atomic unit of storage. Every file in your project, every version of it, is a blob. Two identical files across different commits share the same blob — Git never duplicates.
+
+<GitBlobDemo client:visible />
+
+## Trees
+
+A **tree** represents a directory. It is a sorted list of entries, each containing:
+
+- A file mode (e.g., `100644` for a regular file, `100755` for executable, `040000` for a subdirectory)
+- The object type (blob or tree)
+- The SHA-1 hash of the object
+- The filename
+
+A tree maps names to hashes. It is Git's way of saying "the file `src/main.js` at this commit has content hash `abc123`."
+
+View a tree:
+
+```bash
+git cat-file -p HEAD^{tree}
+# 100644 blob 3b18e51    hello.txt
+# 040000 tree a1b2c3d    src
+```
+
+Recurse into subtrees:
+
+```bash
+git ls-tree -r HEAD
+# Lists every file with its full path, type, and blob hash
+```
+
+Trees are also content-addressed. If two directories have the exact same contents (same filenames, same file contents, same permissions), they produce the same tree hash. This is how Git deduplicates whole directory structures — an unchanged subtree is stored exactly once across any number of commits.
+
+Trees can nest arbitrarily. A tree points to blobs (files) and other trees (subdirectories). The root tree of a commit represents the entire project root.
+
+<GitTreeDemo client:visible />
+
+## Commits
+
+A **commit** is a snapshot of the project at a point in time. It contains:
+
+- A pointer to the root tree (the entire project state)
+- Zero or more parent pointers (previous commits)
+- Author and committer metadata (name, email, timestamp)
+- A commit message
+
+A commit with no parents is an **initial commit** (the first in the repository). A commit with one parent is a normal commit. A commit with two or more parents is a **merge commit**.
+
+```bash
+git cat-file -p HEAD
+# tree 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b
+# parent 9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b
+# author Alice <alice@example.com> 1747267200 +0000
+# committer Alice <alice@example.com> 1747267200 +0000
+#
+# Add user authentication module
+```
+
+The commit object itself is a small text file. It does not store diffs — it stores the root tree hash. To compute what changed between two commits, Git compares their trees recursively.
+
+### The Commit Graph (DAG)
+
+Commits form a **directed acyclic graph** because each commit points backward to its parent(s), and following parent pointers can never create a cycle (a child commit cannot exist before its parent).
+
+```
+A <-- B <-- C <-- D   (main)
+```
+
+Merge commits introduce branching:
+
+```
+      E <-- F <-- G   (feature)
+     /         \
+A <--B <-- C <-- D <-- H   (main)
+```
+
+Here, commit H (on main) has two parents: D and G. It merges the feature branch into main.
+
+Walk the graph with `git log --graph --oneline` to see the DAG in any repository.
+
+<GitCommitDemo client:visible />
+
+## Objects Overview
+
+The three object types — blob, tree, commit — form a hierarchy:
+
+```
+Commit
+  |
+  +-- Tree (root)
+        |
+        +-- Blob  (src/main.js)
+        +-- Blob  (README.md)
+        +-- Tree  (src/)
+        |     |
+        |     +-- Blob (src/utils.js)
+        |     +-- Blob (src/index.js)
+        +-- Tree  (tests/)
+              |
+              +-- Blob (tests/test_main.js)
+```
+
+There is a fourth object type — **tag** (annotated tags store a GPG signature, a message, and a pointer to a commit) — but the core trio of blob, tree, and commit handles all versioned data.
+
+Every object is identified by its SHA-1 hash. The hash is deterministic: given the same type header, content, and length, you always get the same 40-character hexadecimal string. This is what makes content-addressability possible — the identifier is a cryptographic checksum of the thing itself.
+
+```bash
+# Manual object computation (blob "hello world\n")
+printf 'blob 12\0hello world\n' | sha1sum
+# 3b18e512dba79e4c8300dd08aeb37f8e728b8dad
+```
+
+<GitObjectDemo client:visible />
+
+## The Three Trees
+
+Git tracks three distinct tree-like structures at all times:
+
+1. **HEAD** — the last commit on the current branch (what you last committed)
+2. **Index** — the staging area (what you plan to commit next)
+3. **Working tree** — your actual files on disk (what you can edit)
+
+The term "three trees" is slightly misleading because the index and working tree are not literally Git tree objects, but the conceptual model is powerful.
+
+```
+HEAD               Index              Working Tree
+(committed)        (staged)           (on disk)
+  |                  |                   |
+  v                  v                   v
+  tree_a             tree_b              tree_c
+```
+
+Commands move data between the three:
+
+- `git add` copies working tree into the index
+- `git commit` freezes the index into a new commit (updating HEAD)
+- `git restore` copies HEAD or index back into the working tree
+- `git reset` moves HEAD and optionally updates the index and working tree
+
+Think of the three trees as layers of a pipeline. You edit files in the working tree (the clay), selectively stage changes into the index (the mold), and commit the index to create a permanent snapshot (the fired ceramic).
+
+<ThreeTreesDemo client:visible />
+
+## Branches Are Pointers
+
+A branch in Git is simply a movable pointer to a commit. That is it. No fanfare. When you `git commit`, the current branch pointer automatically moves forward to the new commit.
+
+Branches are stored as files in `.git/refs/heads/`:
+
+```bash
+cat .git/refs/heads/main
+# a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0
+```
+
+That is a 40-character hash. A branch is literally a text file containing a commit hash.
+
+Creating a branch creates a new file pointing to the same commit as its parent:
+
+```bash
+git branch feature
+# Creates .git/refs/heads/feature with the same hash as HEAD
+```
+
+Moving between branches updates your working tree to match the commit the branch points to:
+
+```bash
+git switch feature
+# HEAD now says "ref: refs/heads/feature"
+# Working tree matches the commit at feature
+```
+
+The term **HEAD** always refers to the tip of the current branch. When you are on `main`, HEAD points to `refs/heads/main` which points to a commit. When you `git checkout` a specific hash (detached HEAD), HEAD points directly to a commit.
+
+Because branches are just pointers, they are cheap. Creating a branch is instantaneous — it writes 41 bytes to a file. There is no copy of files, no overhead. This is why Git encourages branching early and often.
+
+<BranchPointerDemo client:visible />
+
+## The Staging Area
+
+The staging area (also called the index) is Git's most misunderstood feature. Why have three states (modified, staged, committed) instead of just two (modified, committed)?
+
+The staging area lets you build a commit incrementally. You can edit three files, stage two of them, and commit only those. The third file stays modified but unstaged — it will not be included in the commit.
+
+### What `git add` Does
+
+When you run `git add file.txt`, Git:
+
+1. Compresses the file contents into a blob
+2. Stores the blob in `.git/objects/`
+3. Updates `.git/index` with the new blob hash and file metadata
+
+The index is a binary file that maintains a sorted list of paths, each with:
+- The staged blob hash
+- File metadata (ctime, mtime, dev, inode, uid, gid, mode)
+- The pathname
+
+`git status` compares three snapshots: HEAD vs index (what is staged), and index vs working tree (what is not staged). The output is derived from these two comparisons.
+
+```bash
+# See exactly what is in the index
+git ls-files --stage
+# 100644 3b18e51 0       hello.txt
+```
+
+### What `git reset` Does to the Index
+
+`git reset` without a path moves the current branch pointer. `git reset <commit> <path>` updates the index entry for that path to match the given commit — without touching the working tree.
+
+```bash
+# Unstage a file (update index to match HEAD)
+git reset HEAD README.md
+```
+
+This is exactly equivalent to `git restore --staged README.md`.
+
+The staging area is what makes partial commits possible. It is the assembly line where you arrange changes before committing them into permanent storage.
+
+<StagingAreaDemo client:visible />
+
+## Merging
+
+Merging combines divergent lines of development. Git supports two merge strategies: **fast-forward** and **three-way merge**.
+
+### Fast-Forward Merge
+
+If the branch being merged is a direct descendant of the current branch (no divergence), Git simply moves the pointer forward:
+
+```
+Before:  A -- B -- C (main)
+                     \
+                       D -- E (feature)
+
+After:   A -- B -- C -- D -- E (main, feature)
+```
+
+No merge commit is created. The history remains linear.
+
+### Three-Way Merge
+
+If the branches have diverged, Git performs a three-way merge using three snapshots:
+
+1. The **merge base** — the most recent common ancestor of both branches
+2. The current branch tip (ours)
+3. The branch being merged (theirs)
+
+Git computes two diffs: base-to-ours and base-to-theirs. For each file:
+
+- If neither side changed the file -> keep it
+- If only one side changed -> adopt that change
+- If both sides changed identically -> adopt the change
+- If both sides changed differently -> **conflict**
+
+A merge conflict occurs when both branches modified the same region of the same file in incompatible ways. Git inserts conflict markers into the file and leaves resolution to you:
+
+```bash
+<<<<<<< HEAD
+console.log("hello")
+=======
+console.log("goodbye")
+>>>>>>> feature
+```
+
+Resolve the conflict by editing the file, removing the markers, then `git add` and `git commit` to finalize the merge.
+
+### Merge Commits
+
+A merge commit is a commit with two or more parents. It stores the merged result as its tree and records both parent lineages. This preserves the full history — you can always see exactly which commits were merged.
+
+```bash
+git log --oneline --graph --parents
+```
+
+<MergeVisualDemo client:visible />
+
+## Rebasing
+
+Rebasing rewrites history by replaying commits on top of a new base. Instead of creating a merge commit, it transplants commits one by one:
+
+```
+Before:
+A -- B -- C (main)
+     \
+      D -- E (feature)
+
+git rebase main feature:
+
+After:
+A -- B -- C -- D' -- E' (feature)
+```
+
+Each commit D and E is reapplied as a new commit (D' and E') with a different parent (C instead of B). Because the parent pointer changes, each new commit gets a **new hash** — even if the file contents are identical.
+
+### Interactive Rebase
+
+`git rebase -i` opens an editor showing a list of commits and actions:
+
+```bash
+git rebase -i HEAD~3
+```
+
+```
+pick a1b2c3 First commit
+pick d4e5f6 Second commit
+pick g7h8i9 Third commit
+```
+
+You can change `pick` to:
+- `reword` — change the commit message
+- `edit` — stop to amend the commit
+- `squash` — combine with the previous commit
+- `fixup` — combine but discard the message
+- `drop` — remove the commit entirely
+
+### Merge vs Rebase
+
+| Aspect | Merge | Rebase |
+|--------|-------|--------|
+| History | Preserves exact branching structure | Creates linear history |
+| Commit hashes | Original hashes preserved | Hashes change |
+| Conflict resolution | One-time at merge point | Per commit (can be tedious) |
+| Safety | Safe for shared branches | Dangerous on shared branches |
+| Readability | Shows when branches diverged | Clean, linear timeline |
+
+**Golden rule**: never rebase commits that have been pushed to a shared branch. Rebase rewrites history — anyone who pulled the old commits will have a divergent history to reconcile.
+
+<RebaseDemo client:visible />
+
+## Cherry-Pick
+
+Cherry-picking applies a specific commit (or range of commits) from one branch onto the current branch. It creates a new commit with the same changes but a different parent, timestamp, and hash.
+
+```bash
+git checkout main
+git cherry-pick a1b2c3d
+```
+
+This takes the changes introduced in commit `a1b2c3d` on `feature` and applies them as a new commit on `main`.
+
+Cherry-pick is useful when:
+- You need a hotfix from a release branch without merging the entire branch
+- A developer committed on the wrong branch
+- You want to selectively port specific features between branches
+
+Internally, cherry-pick works by computing the diff between the target commit and its parent, then applying that diff to the current branch using a three-way merge against the current HEAD.
+
+If conflicts occur, resolve them the same way as a merge, then `git cherry-pick --continue`.
+
+```bash
+git cherry-pick --abort   # Cancel the cherry-pick
+git cherry-pick --skip    # Skip this commit
+git cherry-pick --continue # Resume after resolving conflicts
+```
+
+<CherryPickDemo client:visible />
+
+## Reset Types
+
+`git reset` moves the current branch pointer and optionally updates the index and working tree. The `--soft`, `--mixed`, and `--hard` flags control how far the reset propagates.
+
+```
+HEAD~1
+  |
+  v
+Commit A <-- Commit B (HEAD)
+
+git reset --soft HEAD~1:
+  HEAD moves to A
+  Index = B's state
+  Working tree = B's state
+  Changes from B are "staged and ready to commit"
+
+git reset --mixed HEAD~1 (default):
+  HEAD moves to A
+  Index = A's state
+  Working tree = B's state
+  Changes from B are "unstaged but present"
+
+git reset --hard HEAD~1:
+  HEAD moves to A
+  Index = A's state
+  Working tree = A's state
+  Changes from B are gone (but recoverable from reflog)
+```
+
+### When to Use Each
+
+| Flag | HEAD | Index | Working Tree | Use Case |
+|------|------|-------|-------------|----------|
+| `--soft` | Move | Keep | Keep | Undo commit, keep staged |
+| `--mixed` | Move | Reset | Keep | Unstage files (default) |
+| `--hard` | Move | Reset | Reset | Discard all uncommitted changes |
+
+**Warning**: `git reset --hard` discards uncommitted changes in the working tree. They are not gone permanently (reflog preserves them), but recovering them requires extra steps.
+
+`git reset` with a file path only affects the index for that file, not HEAD:
+
+```bash
+git reset HEAD~1 README.md
+# Unstages README.md and restores it to the version from the previous commit
+```
+
+<ResetTypesDemo client:visible />
+
+## Reflog
+
+The **reference log** (reflog) records every movement of HEAD — every commit, checkout, merge, rebase, reset, and cherry-pick. It is Git's safety net.
+
+View the reflog:
+
+```bash
+git reflog
+# a1b2c3d HEAD@{0}: commit: Add login feature
+# e5f6g7h HEAD@{1}: commit: Fix navbar styling
+# i9j0k1l HEAD@{2}: reset: moving to HEAD~1
+# m2n3o4p HEAD@{3}: checkout: moving from main to feature
+```
+
+The reflog is stored in `.git/logs/HEAD`. Each entry contains:
+
+- The old hash and new hash
+- The committer and timestamp
+- A description of the action
+
+### Recovering Lost Commits
+
+Imagine you ran `git reset --hard HEAD~2` by accident and lost the last two commits. The commits still exist — they are just unreachable from any branch. The reflog still records them:
+
+```bash
+git reflog
+# a1b2c3d HEAD@{0}: reset: moving to HEAD~2
+# d4e5f6g HEAD@{1}: commit: Add important feature
+# h7i8j9k HEAD@{2}: commit: Another important change
+```
+
+Restore them by creating a branch at the reflog entry:
+
+```bash
+git branch recovered HEAD@{1}
+# Now the commits are reachable via the 'recovered' branch
+```
+
+Or merge the reflog entry:
+
+```bash
+git merge HEAD@{1}
+```
+
+The reflog is local — it is never pushed or fetched. Each developer has their own reflog tracking their own operations. Entries expire after 90 days by default.
+
+The reflog only tracks references (branches, HEAD). Blobs and trees that become unreachable are cleaned up by `git gc` after a grace period.
+
+<ReflogDemo client:visible />
+
+## Git in Practice
+
+Understanding Git's internals transforms how you use it. Here are practical applications.
+
+### Recovering a Deleted Branch
+
+If you deleted a branch with `git branch -D`, the commits are unreachable from any ref, but the reflog still has them:
+
+```bash
+git branch -D feature
+# Oh no.
+
+git reflog | grep feature
+# Find the last commit on that branch
+
+git branch feature <hash>
+```
+
+If the reflog expired, try `git fsck --lost-found` — it scans all objects and extracts dangling commits.
+
+### Git Bisect
+
+`git bisect` uses binary search to find the commit that introduced a bug. It walks the commit graph, checking out the midpoint between good and bad commits:
+
+```bash
+git bisect start
+git bisect bad HEAD        # Current commit is broken
+git bisect good v1.0       # v1.0 was working
+
+# Git checks out the midpoint ~ 500 commits ago
+# Test, then mark:
+git bisect good            # This one is fine
+# Git narrows to ~250 commits
+git bisect bad             # This one is broken
+# Repeat until the exact commit is found
+git bisect reset
+```
+
+Internally, bisect counts commits along the DAG to pick the midpoint that minimizes the number of steps.
+
+### Git Worktrees
+
+`git worktree` checks out multiple branches at once in separate directories, all sharing the same `.git/objects/`:
+
+```bash
+git worktree add ../hotfix hotfix-branch
+# Creates a new directory with the hotfix branch checked out
+```
+
+This is efficient because objects are shared — no redundant storage. Use worktrees when you need to work on a different branch without stashing or committing your current changes.
+
+### Recovering from Common Mistakes
+
+| Mistake | Recovery |
+|---------|----------|
+| Committed to wrong branch | `git reset HEAD~1 && git stash && git switch correct && git stash pop` |
+| Accidentally staged a file | `git reset README.md` or `git restore --staged README.md` |
+| Amended wrong commit | `git reflog` then `git reset --hard HEAD@{1}` or `git reset --hard ORIG_HEAD` |
+| Need a file from an old commit | `git restore --source a1b2c3d -- path/to/file` |
+| Deleted a branch by accident | `git reflog` or `git fsck --lost-found` |
+| Pushed a commit with secrets | `git filter-branch` or `git filter-repo` (rewrites history) |
+
+The common thread is the reflog and object database. As long as the object still exists in `.git/objects/`, you can recover it by finding the right hash and attaching a branch or tag to it.
+
+## Self-Check
+
+Test your understanding of Git internals with these questions.
+
+### Object Graph Through a Merge
+
+Given this history:
+
+```
+A -- B -- C (main)
+      \
+       D -- E (feature)
+```
+
+We are on `main` and we merge `feature`:
+
+1. What are the three snapshots involved in the three-way merge?
+2. How many parent pointers does the resulting merge commit have?
+3. After the merge, does `feature` point to the merge commit or stay at E?
+4. If we then delete the `feature` branch, are commits D and E gone forever?
+
+<details>
+<summary>Answers</summary>
+
+1. Merge base = B, ours = C, theirs = E.
+2. Two parents: C (main tip) and E (feature tip).
+3. `feature` stays at E — merging does not move the merged branch.
+4. No. D and E are reachable from the merge commit (through the second parent pointer). They are also still in the reflog. They only become unreachable if the merge commit itself is deleted and the reflog has not mentioned them in 90 days.
+
+</details>
+
+### Identify Reset Types by Effect
+
+For each scenario, name the reset flag used (`--soft`, `--mixed`, or `--hard`):
+
+1. HEAD moves to the target commit. The index and working tree are unchanged.
+2. HEAD moves to the target commit. The index matches the target commit. The working tree is unchanged.
+3. HEAD moves to the target commit. Both the index and working tree match the target commit.
+4. You commit, immediately realize the commit message is wrong, and want to re-commit with a corrected message without re-staging anything.
+
+<details>
+<summary>Answers</summary>
+
+1. `--soft` — only HEAD moves.
+2. `--mixed` — HEAD and index move, working tree preserved.
+3. `--hard` — all three move, uncommitted changes discarded.
+4. `git reset --soft HEAD~1` — keeps the index as-is so you can re-run `git commit` with the correct message.
+
+</details>
+
+### DAG Walkthrough
+
+Starting from the merge commit in the diagram above, trace the output of `git log --oneline --graph`:
+
+```
+Merge commit H (parents: C, E)
+C (parent: B)
+E (parent: D)
+D (parent: B)
+B (parent: A)
+A (no parent)
+```
+
+The graph walker in `git log` uses a **priority queue** — it always shows the most recent commit first by timestamp, then follows parents. The exact ordering depends on `--date-order`, `--topo-order`, or `--author-date-order`.
+
+### Concept Checks
+
+1. If two files on different branches have identical contents, do they share the same blob hash? **Yes** — blobs are content-addressed, so identical bytes produce the same hash regardless of filename, path, or branch.
+2. Can a commit exist without a tree? **No** — every commit must have exactly one root tree (the `tree` field in the commit object).
+3. What happens to the old commit objects after a rebase? **They become dangling** — unreachable from any ref. They persist in `.git/objects/` for 90 days (reflog) before `git gc` reclaims them.
+4. Can two different commits have the same root tree? **Yes** — if the second commit introduces no file changes (e.g., `git commit --allow-empty` with no changes, or two commits with identical file trees but different metadata/timestamps). The tree hash only depends on directory contents, not on commit metadata.
