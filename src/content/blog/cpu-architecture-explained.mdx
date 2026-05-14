@@ -1,0 +1,508 @@
+---
+title: "CPU Architecture Explained: From Transistors to Modern Processors"
+description: "A complete guide to CPU architecture — how processors execute instructions, pipeline stages, cache hierarchy, branch prediction, SIMD, and what it all means for programmers."
+date: 2026-05-15T01:00:00
+tags: ["cpu", "architecture", "hardware", "performance"]
+---
+
+import CpuCycleDemo from '../../components/demos/CpuCycleDemo'
+import PipelineDemo from '../../components/demos/PipelineDemo'
+import CoreThreadDemo from '../../components/demos/CoreThreadDemo'
+import CacheHierarchyDemo from '../../components/demos/CacheHierarchyDemo'
+import CacheMissDemo from '../../components/demos/CacheMissDemo'
+import BranchPredictorDemo from '../../components/demos/BranchPredictorDemo'
+import CiscRiscDemo from '../../components/demos/CiscRiscDemo'
+import SimdDemo from '../../components/demos/SimdDemo'
+import OutOfOrderDemo from '../../components/demos/OutOfOrderDemo'
+import SpeculativeExecDemo from '../../components/demos/SpeculativeExecDemo'
+import CpuProfilerDemo from '../../components/demos/CpuProfilerDemo'
+
+## What is a CPU?
+
+Imagine you are in a kitchen with a world-class chef. A cookbook sits open on the counter. The chef reads a step, performs it, then moves to the next. Chop an onion. Sear the meat. Add broth. Simmer for thirty minutes. Each instruction is simple on its own, but combined they produce something far more complex than any single step.
+
+A CPU is that chef. It is the brain of the computer — a tiny slab of silicon containing billions of switches called **transistors** that can read instructions from memory and execute them at breathtaking speed.
+
+Every program you have ever run — a browser, a game, a compiler, even an operating system — is just a long list of these instructions. The CPU fetches them one by one, decodes what each means, and carries out the operation. It does this billions of times per second.
+
+The CPU does not "understand" your Python or JavaScript code directly. Those languages are first compiled or interpreted down to **machine code** — raw binary instructions that the CPU's hardware knows how to handle. A typical instruction might say "load the number 5 into register A" or "add register B to register C and store the result."
+
+Three components define a CPU's architecture:
+
+- **Arithmetic Logic Unit (ALU)** — does the actual math (add, subtract, AND, OR, compare)
+- **Control Unit** — decodes instructions and coordinates the rest of the chip
+- **Registers** — a handful of ultra-fast storage slots inside the CPU (we will come back to these)
+
+The CPU works in a cycle, and that cycle is the foundation of everything.
+
+## The Instruction Cycle
+
+The CPU executes every instruction in four stages, known as the **instruction cycle**:
+
+1. **Fetch** — Read the next instruction from memory (RAM)
+2. **Decode** — Figure out what the instruction means (which operation, which registers)
+3. **Execute** — Perform the operation (math, memory access, jump)
+4. **Writeback** — Save the result back to a register
+
+Think of following a recipe. You read a step (fetch). You interpret what "fold in the egg whites" means (decode). You physically fold the egg whites into the batter (execute). You set the bowl aside (writeback). Then you move to the next step.
+
+Here is what a simple instruction looks like in a real assembly language (x86-64):
+
+```asm
+mov rax, 42    ; load the value 42 into register rax
+add rax, rbx   ; add the value in rbx to rax
+mov [mem], rax ; store the result to memory
+```
+
+The CPU does not understand `mov` or `add`. It sees these as binary numbers. The instruction `mov rax, 42` might be encoded as the bytes `48 C7 C0 2A 00 00 00` — the first bytes are the opcode (what operation to perform), the rest are operands (the values to operate on).
+
+The decode stage translates these raw bytes into control signals that activate the right parts of the ALU and routing circuitry.
+
+<CpuCycleDemo client:visible />
+
+Try stepping through the animation above to see each stage in action. Notice how the instruction moves through fetch, decode, execute, and writeback, with the relevant data changing at each step.
+
+## Clock Speed
+
+A CPU does not just execute one instruction and stop. It runs the instruction cycle over and over, billions of times per second. This rhythm is governed by the **clock** — an internal oscillator that emits a steady electrical pulse, like a metronome.
+
+The clock speed, measured in **gigahertz (GHz)**, tells you how many pulses the CPU generates per second. A 3.0 GHz processor ticks 3 billion times every second. Each tick is a heartbeat — a moment when the CPU can advance to the next stage of the instruction cycle.
+
+A single instruction often takes multiple clock cycles to complete. On a simple processor, a `mov` instruction might take 1 cycle, while a `mul` (multiply) could take 3-5 cycles. The number of cycles per instruction varies by the instruction and the CPU design.
+
+But clock speed is not the whole story. Two CPUs at the same GHz can perform very differently because of **IPC — Instructions Per Cycle**. A modern CPU can retire 3-6 instructions per clock on average (more on this when we discuss superscalar and out-of-order execution).
+
+The performance equation is simple:
+
+$$
+\text{Performance} = \text{Clock Speed (GHz)} \times \text{IPC}
+$$
+
+A 2.0 GHz CPU that executes 3 instructions per cycle (6 billion instructions/second) can outperform a 4.0 GHz CPU that executes only 1 instruction per cycle (4 billion instructions/second). This is why mobile processors with lower clock speeds can still feel fast — they are designed for high IPC.
+
+Clock speed also has physical limits. Higher speeds generate more heat. Modern CPUs dynamically adjust their clock speed based on workload and temperature — a feature called **turbo boost** on Intel or **Precision Boost** on AMD.
+
+## Cores vs Threads
+
+For decades, CPU designers simply raised clock speeds to make processors faster. Around 2005, we hit a wall — the "power wall." Higher clock speeds generated too much heat to dissipate. So architects changed strategy: instead of one faster chef, why not hire multiple chefs working side by side?
+
+This is how we got **multi-core processors**. A core is an independent CPU unit — its own ALU, control unit, registers, and cache — that can execute instructions completely independently. A quad-core CPU is four CPUs on a single chip.
+
+But there is a catch. Most programs are written as a single sequence of instructions (a **thread** of execution). To use multiple cores, the program must be written to split work into parallel tasks. This is hard. A single-threaded program runs on only one core, leaving the others idle.
+
+This brings us to **simultaneous multithreading (SMT)**, which Intel calls **Hyper-Threading**. SMT lets a single physical core appear as two **logical cores** to the operating system. It works by duplicating certain parts of the core (registers, program counters) while sharing the execution units.
+
+Imagine a chef with two recipe books open. When one recipe hits a step where the chef is waiting for water to boil, the chef can work on the other recipe instead of standing idle. The core is never perfectly efficient — there are always gaps where execution units sit empty. SMT fills those gaps with useful work from a second thread.
+
+A 4-core CPU with Hyper-Threading appears as 8 logical processors to the OS. In practice, SMT adds roughly 15-30% performance over a non-SMT design, but it is not a replacement for real cores.
+
+<CoreThreadDemo client:visible />
+
+The demo above shows how threads map to cores. Notice how SMT lets two threads share a core, interleaving their instructions to keep execution units busy.
+
+## Instruction Set Architecture (ISA)
+
+If the CPU is the chef, the **instruction set architecture (ISA)** is the recipe language the chef understands. It is the contract between the hardware and the software — the vocabulary of instructions the CPU can execute.
+
+There are two dominant ISA families in the world today:
+
+**CISC (Complex Instruction Set Computer)** — x86 (Intel, AMD). Instructions can be complex and variable-length (1 to 15 bytes). A single instruction might do multiple things: load a value from memory, add it to a register, and store the result back. The CPU internally decodes these complex instructions into simpler micro-ops.
+
+**RISC (Reduced Instruction Set Computer)** — ARM (Apple M-series, Qualcomm, most phones), RISC-V. Instructions are simple, fixed-length (usually 4 bytes), and each does exactly one operation: add two registers, load from memory, store to memory. Simpler to decode, easier to pipeline, and more power-efficient.
+
+Here is the same operation — adding two numbers — in both styles:
+
+```c
+// What the programmer writes:
+int a = b + c;
+```
+
+CISC (x86) approach — one instruction, the CPU does the memory load and add:
+```asm
+add eax, [memory_address]  ; add value at memory_address to register eax
+```
+
+RISC (ARM) approach — separate load and add:
+```asm
+ldr r0, [memory_address]   ; load from memory into register r0
+add r0, r0, r1             ; add r1 to r0, store in r0
+```
+
+Why does RISC use more instructions? Because each one is simpler and faster. A RISC CPU can clock higher and pipeline deeper. The tradeoff is more instructions per program, but better efficiency per instruction.
+
+This is why your phone (ARM) gets all-day battery life while a desktop x86 CPU needs a fan. And why Apple's M-series chips — a RISC architecture — deliver desktop-class performance at a fraction of the power.
+
+Modern x86 CPUs are actually RISC under the hood. They decode CISC instructions into internal RISC-like micro-ops, then execute them on a RISC-style backend. The ISA you see is just a compatibility layer.
+
+<CiscRiscDemo client:visible />
+
+Explore the comparison above. Same operation, different instruction formats, and see how the decode stage differs between the two approaches.
+
+## The Memory Hierarchy
+
+The CPU can execute billions of instructions per second. But it needs data — numbers to add, pixels to render, strings to compare. Where does that data live?
+
+Main memory (RAM) is fast by human standards, but painfully slow compared to the CPU. A single access to RAM takes about 100 clock cycles. In that time, a 3 GHz CPU could have executed 300 instructions — but it is stalled, waiting for data.
+
+The solution is **cache** — small, ultra-fast memory embedded directly on the CPU die. Most modern CPUs have three levels:
+
+| Level | Size | Latency | Location |
+|-------|------|---------|----------|
+| L1 | 32-64 KB per core | ~1 ns (3-4 cycles) | Inside each core |
+| L2 | 256-512 KB per core | ~3-5 ns (10-15 cycles) | Per core, but larger |
+| L3 | 8-32 MB shared | ~10-15 ns (30-50 cycles) | Shared across all cores |
+| RAM | 8-256 GB | ~50-100 ns (100-300 cycles) | Off-chip DIMMs |
+| Disk | 256 GB-2 TB | ~10,000,000 ns | SSD or HDD |
+
+Think of it as a desk in an office. On your desk (registers), you keep the paper you are currently reading. In your desk drawer (L1 cache), you keep files you reach for frequently. In a filing cabinet across the room (L2), you keep the project folders you need occasionally. In a warehouse downstairs (L3), you keep archived projects. And in a library across town (RAM), you keep everything else.
+
+Each level is about 10x larger but 10x slower than the level above it. The CPU automatically copies data from slower levels to faster ones as it is accessed. When the CPU requests a memory address, it first checks L1, then L2, then L3, then RAM. If it finds the data in L1, that is a **cache hit** — very fast. If it falls through all the way to RAM, that is a **cache miss** — expensive.
+
+The magic of cache is **locality**:
+
+- **Temporal locality**: if you accessed an address, you will probably access it again soon (a loop variable)
+- **Spatial locality**: if you accessed an address, you will probably access nearby addresses (an array iteration)
+
+When you load one byte from RAM, the CPU pulls an entire **cache line** (typically 64 bytes) into L1. This is why iterating over an array in order is fast — the next element is already in cache.
+
+<CacheHierarchyDemo client:visible />
+
+The demo above visualizes the speed gap between cache levels. Try accessing data at different levels and watch the latency grow.
+
+## Pipelining
+
+An instruction goes through four stages (fetch, decode, execute, writeback). If each stage takes 1 clock cycle, a single instruction takes 4 cycles to complete. On a non-pipelined CPU, the next instruction cannot start until the previous one finishes. That means at most 1 instruction every 4 cycles — terrible throughput.
+
+But each stage uses different hardware. The fetch unit is not busy during the execute stage. The ALU is idle during writeback. So why not overlap them?
+
+**Pipelining** works like an assembly line. While instruction 1 is being executed, instruction 2 is being decoded, and instruction 3 is being fetched. Once the pipeline is full, one instruction completes every cycle — even though each individual instruction still takes 4 cycles.
+
+A classic 5-stage RISC pipeline:
+
+| Cycle | Stage 1 (Fetch) | Stage 2 (Decode) | Stage 3 (Execute) | Stage 4 (Memory) | Stage 5 (Writeback) |
+|-------|-----------------|-------------------|-------------------|------------------|----------------------|
+| 1 | Inst 1 | | | | |
+| 2 | Inst 2 | Inst 1 | | | |
+| 3 | Inst 3 | Inst 2 | Inst 1 | | |
+| 4 | Inst 4 | Inst 3 | Inst 2 | Inst 1 | |
+| 5 | Inst 5 | Inst 4 | Inst 3 | Inst 2 | Inst 1 |
+
+At cycle 5, the pipeline is full, and one instruction finishes every clock cycle. That is a 5x throughput improvement over the non-pipelined design.
+
+But pipelines introduce **hazards** — situations where the next instruction cannot run because it depends on the current one:
+
+- **Data hazard**: instruction 2 needs the result of instruction 1, which has not been written back yet
+- **Control hazard**: a branch instruction changes the flow, so the instructions already fetched are wrong
+- **Structural hazard**: two instructions need the same hardware unit at the same time
+
+Data hazards are solved with **forwarding** (also called bypassing) — the result of the execute stage is fed directly to the next instruction's execute stage, skipping the writeback-read round trip. Control hazards are trickier and lead us to branch prediction.
+
+Modern CPUs have pipelines 14-20 stages deep (Intel) or up to 19 stages (Apple M-series). Deeper pipelines allow higher clock speeds but make hazards more expensive on mispredictions.
+
+<PipelineDemo client:visible />
+
+Watch the pipeline in action above. See how instructions flow through stages in parallel, and what happens when a hazard stalls the pipeline.
+
+## Branch Prediction
+
+Branches — `if` statements, loops, function calls — are everywhere in code. The CPU does not know which way a branch will go until it reaches the execute stage and evaluates the condition. By then, several instructions have already entered the pipeline.
+
+Consider this simple code:
+
+```c
+for (int i = 0; i < 1000; i++) {
+    sum += data[i];
+}
+```
+
+At the end of each iteration, the CPU encounters a branch: should it loop back or exit? It does not know the answer until it evaluates `i < 1000`. Without prediction, it would stall for several cycles at every branch, waiting for the comparison to finish.
+
+This is where **branch prediction** comes in. The CPU guesses which way the branch will go and continues fetching instructions from that path. If the guess is right, no cycles are wasted. If it is wrong, the pipeline must be flushed and the correct instructions fetched — a **misprediction penalty** of 10-20 cycles on a modern CPU.
+
+Modern branch predictors are astonishingly accurate — often over 95% for typical code. They use:
+
+- **Pattern history tables**: remember whether recent branches were taken or not
+- **Two-level predictors**: track patterns like "taken, taken, not-taken, taken"
+- **Neural predictors**: simple machine learning models that correlate branch outcomes with past history
+
+The jump to the loop start is almost always taken (you iterate 999 times out of 1000). The exit branch is almost never taken (only once). A simple predictor that "assume taken" gets 99.9% accuracy here.
+
+Harder patterns trip up predictors. This bit of code tests the limits of branch prediction:
+
+```c
+for (int i = 0; i < 1000; i++) {
+    if (data[i] > 128) {   // unpredictable if data is random
+        sum += data[i];
+    }
+}
+```
+
+If `data` contains random values 0-255, the branch is taken roughly 50% of the time with no predictable pattern. Prediction accuracy drops to 50%, and the misprediction penalty destroys performance. Sorting the data first can make the branch predictable and speed up the loop by 3-4x on some CPUs — a well-known optimization trick.
+
+<BranchPredictorDemo client:visible />
+
+Try different branch patterns in the demo — predictable vs random — and watch the accuracy change. See how a predictable pattern lets the pipeline stay full, while mispredictions cause costly flushes.
+
+## Speculative Execution
+
+Branch prediction lets the CPU guess which way a branch will go. But what do we do with that guess? We cannot just sit idle waiting to confirm. We **speculatively execute** instructions from the predicted path as if they were certain.
+
+Speculative execution means the CPU executes instructions before knowing whether they should run at all. It works like this:
+
+1. The branch predictor guesses "taken" and the CPU starts fetching and executing instructions from the target address
+2. The results are stored in a temporary buffer called the **reorder buffer**, not committed to architectural state (registers, memory)
+3. When the branch condition is finally evaluated:
+   - **Correct prediction**: the speculative results are committed — they become permanent
+   - **Misprediction**: the speculative results are discarded. The pipeline is flushed. Execution restarts from the correct path
+
+The "discard" step is critical. It means speculatively executed instructions never permanently change registers or memory. The CPU rolls back to the exact state it would have been in if it had waited.
+
+Why go through all this trouble? Remember the pipeline. If we waited for the branch to resolve before fetching the next instruction, we would waste 10-20 cycles on every branch. Speculative execution keeps the pipeline full, converting predicted-idle time into potentially useful work.
+
+Here is where speculative execution intersects with security. In 2018, researchers discovered **Spectre** and **Meltdown** — attacks that exploit speculative execution to leak sensitive data. The core insight: speculatively executed instructions are not supposed to affect architectural state, but they do affect **microarchitectural state** — specifically, what data is in the cache. An attacker can trick the CPU into speculatively accessing memory it should not, and then detect the access via cache timing.
+
+The fixes (kernel page table isolation, LFENCE serialization, retpolines) cost 5-30% performance on some workloads. The era of "free" speculative execution was over.
+
+<SpeculativeExecDemo client:visible />
+
+Step through the speculative execution flow above. See how the CPU executes instructions from the predicted path, then either commits or discards the results when the branch is resolved.
+
+## SIMD Instructions
+
+A typical CPU instruction operates on one pair of values: `add r1, r2, r3` adds the contents of registers r2 and r3 and puts the result in r1. But many workloads — image processing, audio, machine learning, scientific computing — need to do the same operation on many values at once.
+
+**SIMD (Single Instruction, Multiple Data)** lets one instruction operate on multiple data elements simultaneously. Instead of adding two numbers, a SIMD `add` instruction adds two **vectors** of numbers — 4, 8, or even 16 at a time.
+
+Think of a conveyor belt at a factory. A regular instruction is a worker handling one item at a time. SIMD is the worker handling a whole batch simultaneously, applying the same action to every item in parallel.
+
+Modern SIMD extensions by family:
+
+| ISA | Extension | Width | Elements per instruction |
+|-----|-----------|-------|-------------------------|
+| x86 | SSE | 128-bit | 4 floats / 2 doubles |
+| x86 | AVX | 256-bit | 8 floats / 4 doubles |
+| x86 | AVX-512 | 512-bit | 16 floats / 8 doubles |
+| ARM | NEON | 128-bit | 4 floats / 2 doubles |
+| ARM | SVE | 128-2048-bit | Scalable width |
+
+Here is a concrete example. Suppose we want to add two arrays of 8 floats:
+
+```c
+// Scalar loop — one add at a time
+float a[8], b[8], c[8];
+for (int i = 0; i < 8; i++) {
+    c[i] = a[i] + b[i];
+}
+```
+
+With AVX (256-bit), a single instruction replaces the entire loop:
+
+```c
+#include <immintrin.h>
+
+__m256 va = _mm256_loadu_ps(a);   // load 8 floats from a
+__m256 vb = _mm256_loadu_ps(b);   // load 8 floats from b
+__m256 vc = _mm256_add_ps(va, vb); // add all 8 at once
+_mm256_storeu_ps(c, vc);          // store all 8 results
+```
+
+This is not just a convenience — the SIMD version runs 8x faster because the CPU's vector ALU performs all eight additions in parallel. Compilers often auto-vectorize simple loops, but they need help: the loops must be straightforward with no complex pointer aliasing.
+
+SIMD is the foundation of modern matrix multiplication libraries (BLAS), neural network inference (one matrix multiply = thousands of SIMD instructions), and video encoding/decoding (which processes pixel blocks in parallel).
+
+<SimdDemo client:visible />
+
+The demo shows scalar vs SIMD execution side by side. Watch how SIMD processes an entire vector of values in a single step while the scalar path iterates one by one.
+
+## Out-of-Order Execution
+
+In a simple CPU, instructions execute in program order — the order the programmer wrote them. This is called **in-order execution**. The problem is that a slow instruction (like a cache miss load) stalls everything behind it, even if those later instructions do not depend on the stalled one.
+
+Modern CPUs use **out-of-order (OoO) execution**: the hardware looks at a window of upcoming instructions, identifies which ones can run right now (their inputs are ready), and executes them early. Results are temporarily stored and then **retired** in original program order, so the programmer sees the same result as in-order execution.
+
+Think of a kitchen with a prep team. The recipe says: "Chop onions, wait for water to boil, chop carrots." The chef does not stand idle waiting for water. The prep team works on whatever inputs are ready — chop the carrots now, come back to the onions when the pot boils. But the finished plates always come out in recipe order.
+
+OoO execution relies on two key hardware structures:
+
+- **Reservation stations**: each execution unit has a queue of instructions waiting for their operands. An instruction sits in the reservation station until all its input values are ready, then dispatches immediately
+- **Reorder buffer (ROB)**: holds completed but not-yet-retired instructions, sorted in original program order. It tracks which instructions have finished executing and waits until each is ready to retire
+
+Consider this code:
+
+```asm
+ldr r0, [r1]       ; load from memory (slow — 100 cycles)
+add r2, r3, r4     ; add registers (fast — 1 cycle)
+sub r5, r6, r7     ; subtract (fast — 1 cycle)
+```
+
+In-order: the `add` and `sub` stall for 100 cycles waiting for the `ldr` to complete.
+Out-of-order: the CPU sees that `add` and `sub` do not depend on `ldr`. It executes them immediately while the load is still in flight. The `add` and `sub` retire as soon as the `ldr` finishes, effectively hiding the memory latency.
+
+The biggest challenge in OoO design is **register renaming**. Instructions reference architectural registers (r0, r1, etc.), but the CPU has many more physical registers than architectural ones. When two instructions try to write to r0, the CPU renames them to different physical registers, allowing both to execute in parallel without conflicts. The reorder buffer maps architectural registers back to the correct physical register at retirement.
+
+<OutOfOrderDemo client:visible />
+
+The demo above visualizes the instruction window, reservation stations, and reorder buffer. See how independent instructions execute ahead of a stalled load, and how the ROB reassembles them in order.
+
+## Superscalar Architecture
+
+Pipelining lets different stages overlap. Out-of-order execution lets independent instructions bypass stalled ones. But a single execution unit (ALU) can still only do one thing at a time. How do we get more throughput?
+
+**Superscalar** design puts multiple execution units on the same core. Instead of one ALU, we have two or three. Instead of one load/store unit, we have two. The CPU examines the instruction stream, finds independent instructions, and dispatches them to different execution units simultaneously.
+
+A modern superscalar core might have:
+
+- 4 integer ALUs
+- 2-3 load/store units
+- 2 floating-point units (one for add, one for multiply)
+- 1 SIMD/vector unit
+- 1 branch unit
+
+In a single cycle, the CPU can dispatch 4-6 micro-ops to these units. This is called the **issue width** or **dispatch width**. An Apple M1 Firestorm core can dispatch 8 micro-ops per cycle — one of the widest designs in the industry.
+
+Superscalar execution combined with out-of-order scheduling explains the IPC numbers we mentioned earlier. A well-tuned superscalar OoO core can sustain 3-6 instructions retired per cycle, multiplying the base clock speed into real throughput.
+
+The catch: not all code contains enough independent instructions to fill all execution units. This is **instruction-level parallelism (ILP)** — the amount of parallelism inherent in a sequence of instructions. Code with long dependency chains (each instruction depends on the previous) has low ILP and cannot exploit superscalar width. Compilers try to help by reordering instructions, but there is a fundamental limit.
+
+## Cache-Friendly Code
+
+The memory hierarchy exists because RAM is slow. The cache exists because it is fast. The single most important optimization many programmers can make is to write **cache-friendly code** — code that minimizes cache misses.
+
+Two principles govern cache behavior:
+
+**Temporal locality**: if you access an address, you will likely access it again soon. Keep frequently used data hot in cache by reusing it in tight loops.
+
+**Spatial locality**: if you access an address, you will likely access nearby addresses. Access data sequentially so that the cache line (64 bytes) you loaded serves multiple requests.
+
+Compare these two ways to sum a 2D array:
+
+```c
+// Cache-friendly: row-major access (sequential)
+int sum_row_major(int matrix[N][N]) {
+    int total = 0;
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++)
+            total += matrix[i][j];  // sequential memory access
+    return total;
+}
+
+// Cache-unfriendly: column-major access (strided)
+int sum_col_major(int matrix[N][N]) {
+    int total = 0;
+    for (int j = 0; j < N; j++)
+        for (int i = 0; i < N; i++)
+            total += matrix[i][j];  // jumping by N*4 bytes each time
+    return total;
+}
+```
+
+In C, arrays are stored row-major: `matrix[0][0], matrix[0][1], matrix[0][2], ...` are contiguous in memory. The row-major loop accesses addresses sequentially — every element is in the same or next cache line. The column-major loop jumps across rows, landing on a different cache line every iteration. For a 1000x1000 matrix, the row-major version may be 10-50x faster.
+
+The same principle applies to structs. If you iterate over many objects but only access one field, you waste cache bandwidth loading unused fields. This is why **data-oriented design** splits structs into separate arrays (struct of arrays vs array of structs):
+
+```c
+// Array of structs — wastes cache if iterating only age
+struct Person { char name[64]; int age; float salary; };
+struct Person people[100000];
+int sum = 0;
+for (int i = 0; i < 100000; i++) sum += people[i].age;
+
+// Struct of arrays — only loads the data you need
+struct People { char name[64][100000]; int age[100000]; float salary[100000]; };
+int sum = 0;
+for (int i = 0; i < 100000; i++) sum += people.age[i];
+```
+
+The second version is more cache-friendly for the age-summing loop because `age` values are packed contiguously in memory with no gaps.
+
+<CacheMissDemo client:visible />
+
+The demo shows the performance impact of different access patterns. Compare sequential vs strided vs random access, and watch the miss rate skyrocket as locality decreases.
+
+## CPU Profiling
+
+All of this theory matters only if it helps you write faster programs. **CPU profiling** is the practice of measuring where a program spends its CPU time, identifying the hot spots worth optimizing.
+
+The primary tool is the **performance counter** — special hardware registers inside the CPU that count events: instructions retired, cache misses, branch mispredictions, cycles stalled, and hundreds more. Tools like `perf` on Linux expose these counters:
+
+```bash
+# Count cache misses and instructions for a program
+perf stat -e cache-misses,instructions,cache-references ./myprogram
+
+# Sample the program every 1ms to build a flame graph
+perf record -F 1000 -g ./myprogram
+perf script | ./stackcollapse-perf.pl | ./flamegraph.pl > output.svg
+```
+
+**Flame graphs** are the most useful visualization. Each rectangle is a function call. Width represents time spent (inclusive of children). Stack depth shows the call chain. Wide rectangles at the top are your hottest leaf functions — the ones worth optimizing.
+
+When profiling, focus on:
+
+- **Cache misses**: high miss rates mean your data access pattern is fighting the cache hierarchy. Restructure data layout.
+- **Branch mispredictions**: high rates (over 5-10%) suggest unpredictable branches. Replace branches with branchless code or sort data.
+- **IPC (instructions per cycle)**: low IPC (< 1) means the CPU is stalled on something — likely cache misses or dependency chains. High IPC (> 3) means your code is CPU-bound and worth optimizing.
+- **Front-end stalls**: the CPU cannot fetch instructions fast enough. Often caused by instruction cache misses or complex instruction decoding.
+
+The 90/10 rule applies: 90% of execution time is spent in 10% of the code. Profile first, optimize the hotspots, and measure again. Never guess where the bottleneck is — you will almost always be wrong.
+
+<CpuProfilerDemo client:visible />
+
+Explore a simulated profiler output above. Click functions to see their performance counters, spot the hot path, and see what optimization would yield.
+
+## Self-Check Questions
+
+Test your understanding with these questions. Attempt each before reading the answer.
+
+**Q1**: A 3.0 GHz CPU with IPC of 2.5 processes instructions at what rate?
+
+**A1**: 3.0 billion cycles/second x 2.5 instructions/cycle = 7.5 billion instructions per second (7.5 GIPS).
+
+**Q2**: Why does iterating a 2D array row-first perform better than column-first?
+
+**A2**: Row-first access is sequential in memory, so each cache line (64 bytes) serves 16 consecutive 4-byte integers. Column-first jumps by row stride, hitting a different cache line per access and wasting throughput on cache misses.
+
+**Q3**: What is the difference between a cache miss and a branch misprediction penalty?
+
+**A3**: A cache miss stalls the CPU for ~100-300 cycles while data arrives from RAM. A branch misprediction stalls for ~10-20 cycles while the pipeline drains and refills. Both waste cycles, but cache misses are typically more expensive.
+
+**Q4**: How does out-of-order execution improve performance on a cache miss?
+
+**A4**: Independent instructions behind the cache miss can execute and retire while the miss resolves, keeping execution units busy instead of stalling the entire pipeline.
+
+**Q5**: Why does Hyper-Threading/SMT provide less than 2x performance even though it presents 2 logical cores per physical core?
+
+**A5**: The two threads share the same execution units, caches, and memory interface. SMT fills gaps when one thread stalls, but both threads cannot execute simultaneously on the same ALU. Realistic gains are 15-30%.
+
+**Q6**: A function processes a linked list node by node. Is this cache-friendly? Why or why not?
+
+**A6**: No. Nodes in a linked list are typically allocated at arbitrary heap locations, so traversing the list jumps between unrelated addresses with no spatial locality. Each node access is likely a cache miss. An array or vector (contiguous storage) would be far more cache-friendly.
+
+**Q7**: True or false: Increasing clock speed always increases performance.
+
+**A7**: False. Higher clock speed increases heat and power consumption. It may require deeper pipelines (increasing branch misprediction penalties) or lower IPC. Performance = clock x IPC, so IPC must not drop proportionally.
+
+### Concept Comparison Table
+
+| Concept | What it solves | How it works | Key tradeoff |
+|---------|---------------|--------------|--------------|
+| Pipelining | Slow instruction throughput | Overlap stages of multiple instructions | Hazards when instructions depend on each other |
+| Superscalar | Limited per-stage throughput | Multiple execution units in parallel | Requires ILP in code |
+| Out-of-order | Stalls from slow instructions | Execute independent instructions early | Complexity, power, die area |
+| Branch prediction | Pipeline bubbles from branches | Guess and speculatively execute | Misprediction penalty |
+| Cache | Slow RAM latency | Fast on-chip SRAM with locality | Limited size, coherence cost |
+| SIMD | Same operation on many values | Wide vector registers and ALUs | Programmer must vectorize or rely on compiler |
+
+### Mastery Checklist
+
+- [ ] I can explain the fetch-decode-execute-writeback cycle
+- [ ] I understand why clock speed alone does not determine performance
+- [ ] I can distinguish CISC from RISC with examples
+- [ ] I know the latency and size of each cache level
+- [ ] I can describe what happens during a branch misprediction
+- [ ] I understand why speculative execution exists and its security implications
+- [ ] I can write a SIMD loop with intrinsics
+- [ ] I know how the reorder buffer enables out-of-order execution
+- [ ] I can identify cache-friendly vs cache-unfriendly access patterns
+- [ ] I can interpret a flame graph and spot optimization opportunities
+
+CPU architecture is a deep field, but you now understand the core concepts that every programmer should know. The CPU is not a magic black box — it is a carefully engineered machine with clear principles: fetch instructions, keep the pipeline full, hide latency, and exploit parallelism at every level. When you write code with these principles in mind, you are not just writing for the compiler — you are writing for the silicon itself.
