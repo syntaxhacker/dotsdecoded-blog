@@ -1,0 +1,518 @@
+---
+title: "Design Netflix: Building a Video Streaming Platform at Scale"
+description: "A complete system design walkthrough for video streaming — adaptive bitrate streaming (HLS/DASH), encoding pipeline, CDN delivery, recommendation engine, and scaling to hundreds of millions of users."
+date: 2026-05-15T01:00:00
+tags: ["system-design", "interview", "netflix", "video-streaming", "design-problem"]
+---
+
+import StreamingRequirementsDemo from '../../components/demos/StreamingRequirementsDemo'
+import AdaptiveBitrateDemo from '../../components/demos/AdaptiveBitrateDemo'
+import EncodingPipelineDemo from '../../components/demos/EncodingPipelineDemo'
+import CdnDeliveryDemo from '../../components/demos/CdnDeliveryDemo'
+import RecommendationEngineDemo from '../../components/demos/RecommendationEngineDemo'
+import WatchHistoryDemo from '../../components/demos/WatchHistoryDemo'
+import ContentCatalogDemo from '../../components/demos/ContentCatalogDemo'
+import NetflixArchitectureDemo from '../../components/demos/NetflixArchitectureDemo'
+
+You press play. In under two seconds, your screen fills with video. The picture quality adjusts seamlessly as your wifi weakens. You pause, close the app, and open it later on your phone -- it picks up exactly where you left off. This experience, now so natural we take it for granted, is powered by one of the most sophisticated distributed systems ever built.
+
+Designing Netflix in a system design interview means solving the hardest problems in large-scale media delivery: how to encode video so it looks good at every bitrate, how to deliver petabytes per day without breaking the bank, how to recommend content to 250 million subscribers, and how to resume playback across devices. This walkthrough covers every layer from zero knowledge to system design mastery.
+
+## Understanding the Problem
+
+Netflix started as a DVD-by-mail service in 1997. The streaming service launched in 2007 with 1,000 titles. Today, it streams over 2 billion hours per month to 250 million subscribers across 190 countries. The catalog contains over 20,000 titles in dozens of languages. Users watch on smart TVs, phones, tablets, laptops, and game consoles.
+
+What makes Netflix unique is that it solves four hard problems simultaneously:
+
+- **Massive content library** -- thousands of hours of video that must be encoded, stored, and delivered in multiple formats
+- **Global distribution** -- serving every country with low latency, which requires a custom content delivery network
+- **Personalization at scale** -- 250 million users each need a unique homepage with tailored recommendations
+- **Device heterogeneity** -- the same video must play on an 8K TV and a 3G phone in rural India
+
+Think of it like a global TV station where every viewer gets a different channel and the picture quality adjusts itself based on how good their antenna is. That is the core design challenge.
+
+## Requirements Gathering
+
+Before we design anything, we need to know what we are building. In an interview, you ask clarifying questions and categorize requirements into functional (what the system must do) and non-functional (how well it must do it).
+
+### Functional Requirements
+
+1. **Browse catalog** -- search and filter thousands of titles by genre, actor, year, rating
+2. **Stream video** -- play video on any device with adaptive quality based on network conditions
+3. **Resume playback** -- pick up where you left off across devices and sessions
+4. **Multi-device support** -- web, mobile, smart TV, game console with synchronized profiles
+5. **User profiles** -- multiple profiles per account with personalized recommendations per profile
+6. **Personalized recommendations** -- each user sees a unique homepage based on viewing history and preferences
+7. **Offline downloads** -- download titles for offline viewing on mobile devices
+8. **Parental controls** -- maturity ratings and PIN-protected profiles
+
+### Non-Functional Requirements
+
+1. **High availability** -- 99.99% uptime; a seven-season TV show must always be playable
+2. **Low startup time** -- less than 2 seconds from tap to first frame
+3. **Minimal buffering** -- rebuffering ratio under 1% of total watch time
+4. **Global scale** -- support 250M+ subscribers across 190 countries
+5. **Cost-efficient delivery** -- exabytes of monthly traffic must be delivered economically (Netflix spends ~$1B/year on CDN)
+6. **Fault isolation** -- a failure in the recommendations service must not break playback
+7. **Consistency trade-offs** -- eventual consistency is acceptable for catalog views; strong consistency needed for billing and profile settings
+
+<StreamingRequirementsDemo client:visible />
+
+### Out of Scope
+
+For this interview, we explicitly skip: live streaming (separate problem), payments/subscriptions (handled by Stripe), user-generated content, social features, and the content production pipeline (Netflix Studios).
+
+## Video Fundamentals
+
+To design a streaming platform, we must first understand how digital video works. Video is not a single file -- it is a sequence of still images (frames) compressed using a codec and wrapped in a container format.
+
+### Codecs and Containers
+
+A codec determines how video frames are compressed. H.264 (AVC) is the universal baseline -- every device supports it. H.265 (HEVC) offers 50% better compression but requires newer hardware. AV1 is the open-source future with 30% better compression than H.265, but it is computationally expensive to encode.
+
+A container format wraps the compressed video stream with audio tracks, subtitles, and metadata. Common containers:
+
+| Container | Codecs | Use Case |
+|-----------|---------|----------|
+| MP4 | H.264, AAC | Universal, progressive download |
+| MKV | Any | High-quality archival |
+| FMP4 (fragmented) | H.264/5, AV1 | DASH streaming |
+| TS (MPEG-TS) | H.264/5 | HLS streaming |
+
+Netflix uses fragmented MP4 (fMP4) segments inside both HLS and DASH manifests. Each segment is 2-6 seconds of video, independently decodable.
+
+### Bitrate and Resolution
+
+Bitrate determines video quality. Higher bitrate means more data per second, which means better quality but more bandwidth. The relationship is not linear -- doubling bitrate does not double perceived quality.
+
+| Resolution | Bitrate Range | Codec | Data per Hour |
+|------------|--------------|-------|---------------|
+| 360p | 300-1000 Kbps | H.264 | 225-450 MB |
+| 480p | 1000-2500 Kbps | H.264 | 450 MB - 1.1 GB |
+| 720p | 2500-5000 Kbps | H.264 | 1.1-2.25 GB |
+| 1080p | 5000-8000 Kbps | H.264 | 2.25-3.6 GB |
+| 4K | 15000-25000 Kbps | H.265 | 6.75-11.25 GB |
+
+Netflix uses "per-title encoding" -- each movie is analyzed individually to determine the optimal bitrate ladder. An action movie with lots of motion needs higher bitrates than a dialogue-driven drama, even at the same resolution.
+
+### Storage Math
+
+The scale of video storage is staggering. A single 4K movie at 20 Mbps average bitrate with a 2-hour runtime:
+
+- 20,000 Kbps / 8 = 2,500 KB/s
+- 2,500 KB/s x 7,200 seconds = ~18 GB per rendition
+- 5 renditions (360p to 4K) = ~40 GB per title
+- 20,000 titles x 40 GB = 800 TB (just for encoded masters)
+
+Before encoding, source files from studios are even larger -- often 100-500 GB per title in ProRes or DNxHD format.
+
+## Capacity Estimation
+
+Capacity estimation shows the interviewer you can think in orders of magnitude. Let us walk through the numbers based on Netflix public data.
+
+**Assumptions:**
+
+- 250 million subscribers
+- Average 2 hours of watch time per subscriber per day
+- 15% of subscribers actively streaming at peak (concurrency factor)
+- Average bitrate during streaming: 5 Mbps (mix of HD and SD)
+- 20,000 titles in catalog, average 40 GB per title (all renditions)
+- 5 million new encoding jobs per month (new titles + re-encodes)
+
+**Traffic estimates:**
+
+- Peak concurrent streams: 250M x 15% = 37.5 million
+- Total bandwidth at peak: 37.5M x 5 Mbps = 187.5 Tbps
+- Daily data delivered: 187.5 Tbps x 86,400 seconds x 0.3 (average utilization) = 4.86 exabytes/day
+- Monthly data: ~150 exabytes
+
+**Storage estimates:**
+
+- Encoded catalog: 20,000 x 40 GB = 800 TB
+- Source masters: 20,000 x 200 GB = 4 PB
+- Thumbnails, artwork, subtitles: ~100 TB
+- Analytics and logs: ~10 PB/year
+
+The key insight: bandwidth is the bottleneck, not storage. Netflix spends over a billion dollars per year on CDN delivery. Storage is cheap (a few million dollars for the catalog). This is why the entire architecture is optimized to reduce bandwidth cost through caching, compression, and CDN placement.
+
+## Adaptive Bitrate Streaming (HLS/DASH)
+
+The core technology that makes streaming work is Adaptive Bitrate (ABR) streaming. Instead of downloading one giant video file, the client downloads short segments -- each 2-6 seconds long -- from a manifest file that lists multiple quality levels.
+
+### How ABR Works
+
+Think of it like a buffet. The manifest is the menu listing all the dishes (quality levels). The player is the diner who picks one dish at a time based on how hungry they are (available bandwidth). If the network is fast, the player picks the filet mignon (4K). If the network slows down, the player switches to the side salad (480p) without interrupting the meal.
+
+The manifest file (HLS: `.m3u8`, DASH: `.mpd`) lists every available rendition with its bandwidth requirement:
+
+```json
+# HLS Master Manifest (manifest.m3u8)
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=16000000,RESOLUTION=3840x2160
+4k.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080
+1080p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1280x720
+720p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=854x480
+480p.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360
+360p.m3u8
+```
+
+Each rendition has its own media manifest listing individual segment URLs. The player downloads the master manifest, then fetches segments from the appropriate rendition based on real-time bandwidth measurements.
+
+### Player-Side Algorithm
+
+The client player runs a rate-based ABR algorithm every few seconds:
+
+```python
+def select_rendition(bandwidth_estimate, renditions):
+    target_bitrate = bandwidth_estimate * 0.8
+    best = renditions[0]
+    for r in renditions:
+        if r.bitrate <= target_bitrate and r.bitrate > best.bitrate:
+            best = r
+    return best
+```
+
+The 0.8 factor (called the "safety margin") prevents over-estimation. More sophisticated algorithms also consider buffer occupancy -- if the buffer is filling up, the player can safely pick a higher rendition.
+
+### Segment Duration Trade-offs
+
+Short segments (2 seconds) let the player adapt faster but increase manifest size and HTTP overhead. Long segments (10 seconds) are more efficient but slow to react to bandwidth changes. Netflix uses 4-second segments as a compromise.
+
+<AdaptiveBitrateDemo client:visible />
+
+## Encoding Pipeline
+
+Raw video from studios must be transformed before it can be streamed. This is the encoding pipeline, one of the most compute-intensive parts of the system.
+
+### Pipeline Stages
+
+**1. Ingest.** The studio delivers source files (typically ProRes or DNxHD at 4K resolution, 50+ Mbps). Files are validated for integrity, checked for metadata (audio channel mapping, subtitle tracks), and stored in hot storage backed by S3.
+
+**2. Transcode.** The source file is encoded into 5-8 renditions at different resolutions and bitrates. This is a CPU/GPU-intensive distributed job. Netflix uses a custom fork of FFmpeg running on thousands of spot EC2 instances. Each rendition uses:
+
+```python
+# Example FFmpeg transcode command
+ffmpeg -i source.mkv \
+  -c:v libx264 -b:v 8000k -s 1920x1080 -profile:v high \
+  -c:a aac -b:a 192k \
+  1080p.mp4
+```
+
+**3. Package.** The encoded renditions are fragmented into 4-second segments (fMP4). The packager generates HLS `.m3u8` and DASH `.mpd` manifests. It also creates timed metadata for chapter markers, ad insertion points, and alternative audio tracks.
+
+**4. Encrypt.** Every segment is encrypted with AES-128. Multiple DRM schemes are applied: Widevine (Android, Chrome), FairPlay (Apple devices), and PlayReady (Xbox, Windows). License URLs are embedded in the manifest so the client can request decryption keys.
+
+**5. Distribute.** Encrypted segments and manifests are uploaded to the CDN origin. Metadata is published to the catalog service so the content is discoverable. Hot content is pre-warmed on Open Connect appliances during off-peak hours.
+
+### Per-Title Encoding
+
+Netflix's key innovation in encoding is "per-title encoding." Instead of using a fixed bitrate ladder for every movie, each title is analyzed before encoding. An animated film like _The Mitchells vs. the Machines_ needs only half the bitrate of an action movie like _Extraction_ at the same resolution, because the noise and motion complexity differ.
+
+The analysis algorithm uses VMAF (Video Multi-Method Assessment Fusion), Netflix's own perceptual quality metric, to find the minimum bitrate that achieves acceptable quality for each resolution.
+
+<EncodingPipelineDemo client:visible />
+
+## CDN Delivery
+
+Delivering exabytes per month requires a multi-tier CDN strategy. Netflix uses a hierarchy: edge caches at ISP peering points, regional caches, and the origin.
+
+### Open Connect
+
+Netflix built its own CDN called Open Connect. Instead of paying Akamai or Cloudflare for every byte, Netflix deploys its own servers inside ISP data centers worldwide. These appliances, each holding 100+ TB of SSD storage, are pre-loaded with popular content during off-peak hours.
+
+The key insight: Netflix controls what content will be popular. New seasons of hit shows are known to be in high demand days before release. Open Connect pre-positions this content so the first viewer gets a cache hit.
+
+### Cache Hierarchy
+
+When a client requests a video segment:
+
+1. **Edge (Open Connect appliance at ISP):** If the segment is cached, serve from edge (5-15ms latency). ~95% hit rate for popular content.
+
+2. **Regional cache:** If the edge misses, the request goes to a regional cache hub (20-50ms additional latency).
+
+3. **Origin (AWS S3 + CloudFront):** If the regional cache also misses, the segment is served from the origin in AWS US-East-1 (80-200ms latency). This is rare for popular content.
+
+### Cache Eviction
+
+Netflix uses an intelligent eviction strategy. Standard LRU would evict an episode of a show that was watched yesterday but not today -- even though the user will likely watch the next episode tomorrow. Instead, Netflix uses a content-aware eviction that considers:
+
+- Content popularity (global + regional)
+- Release recency (new episodes get priority)
+- User behavior patterns (weekend vs weekday, primetime vs late night)
+- Predictive pre-warming (next episode in a series after someone finishes the current one)
+
+<CdnDeliveryDemo client:visible />
+
+## Content Catalog Service
+
+The catalog is the "source of truth" for everything a user can watch. It stores metadata, genres, actors, ratings, artwork URLs, subtitle tracks, and audio languages.
+
+### Database Schema
+
+The catalog uses PostgreSQL for the core relational data, with Redis caching for hot metadata and Elasticsearch for search.
+
+```sql
+CREATE TABLE videos (
+  id            UUID PRIMARY KEY,
+  title         TEXT NOT NULL,
+  description   TEXT,
+  release_year  INTEGER,
+  rating        TEXT CHECK(rating IN ('G','PG','PG-13','R','TV-MA')),
+  duration_min  INTEGER,
+  poster_url    TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE genres (
+  id   UUID PRIMARY KEY,
+  name TEXT UNIQUE NOT NULL
+);
+
+CREATE TABLE actors (
+  id         UUID PRIMARY KEY,
+  name       TEXT NOT NULL,
+  birth_year INTEGER
+);
+
+CREATE TABLE video_genres (
+  video_id UUID REFERENCES videos(id),
+  genre_id UUID REFERENCES genres(id),
+  PRIMARY KEY (video_id, genre_id)
+);
+
+CREATE TABLE video_actors (
+  video_id  UUID REFERENCES videos(id),
+  actor_id  UUID REFERENCES actors(id),
+  role_name TEXT,
+  sort_order INTEGER DEFAULT 0,
+  PRIMARY KEY (video_id, actor_id)
+);
+
+CREATE TABLE user_ratings (
+  user_id    UUID NOT NULL,
+  video_id   UUID NOT NULL,
+  rating     INTEGER CHECK(rating BETWEEN 1 AND 5),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (user_id, video_id)
+);
+```
+
+### Serving the Catalog
+
+The catalog service uses a cache-aside pattern. When a user browses the homepage, the service first checks Redis. If the data is not in cache, it queries the PostgreSQL read replica, populates the cache with a TTL of 5 minutes, and returns the result.
+
+For search queries (e.g., "sci-fi movies from 2023"), the service routes to Elasticsearch, which indexes every field including genres, cast names, and descriptions.
+
+At Netflix scale, the junction tables (video_genres, video_actors) are denormalized into Redis as a single JSON blob per video. A typical cache entry looks like:
+
+```json
+{
+  "video_id": "abc-123",
+  "title": "Stranger Things",
+  "genres": ["Sci-Fi", "Horror"],
+  "actors": [
+    {"name": "Millie Bobby Brown", "role": "Eleven"},
+    {"name": "David Harbour", "role": "Hopper"}
+  ],
+  "year": 2016,
+  "rating": "TV-MA"
+}
+```
+
+<ContentCatalogDemo client:visible />
+
+## Playback Service and Resume Playback
+
+The playback service is the orchestrator that turns a "play" request into a streaming session. When a user taps play, the service:
+
+1. Validates the user's profile and device capabilities
+2. Checks for existing session (for resume)
+3. Generates a personalized HLS/DASH manifest with DRM license URLs
+4. Assigns the nearest Open Connect CDN endpoint
+5. Creates a tracking session for QoS monitoring
+
+### Resume Playback
+
+Resume playback is one of those features that seems simple but requires careful design. Every few seconds during playback, the client sends a heartbeat with the current playback position:
+
+```python
+POST /api/playback/heartbeat
+{
+  "session_id": "sess_abc123",
+  "profile_id": "p_xyz",
+  "video_id": "v_stranger_things_s5e1",
+  "timestamp_ms": 1254000,
+  "duration_ms": 3120000,
+  "bitrate_kbps": 8000,
+  "buffering_count": 0
+}
+```
+
+The watch service stores these heartbeats in Cassandra (chosen for high write throughput) keyed by (profile_id, video_id, session_id). When the user returns, the service queries:
+
+```sql
+SELECT profile_id, video_id, timestamp_ms, progress_ms
+FROM watch_sessions
+WHERE profile_id = 'p_abc123'
+  AND status IN ('active', 'paused')
+ORDER BY updated_at DESC
+LIMIT 20;
+```
+
+The "Continue Watching" row on the homepage is populated from this query. Entries with progress above 95% are filtered out (considered completed). Entries with progress below 5% are also filtered (user barely started).
+
+<WatchHistoryDemo client:visible />
+
+## Recommendation Engine
+
+The recommendation engine is arguably Netflix's most valuable intellectual property. It is the reason users spend 80% of their time on content discovered through recommendations rather than search.
+
+### Two Approaches
+
+**Collaborative Filtering** finds users with similar taste and recommends what they liked. If Alice and Bob both rated _Stranger Things_ and _The Witcher_ highly, and Alice loved _Black Mirror_, the system recommends _Black Mirror_ to Bob.
+
+**Content-Based Filtering** recommends titles similar to what you already liked, based on shared attributes (genres, actors, directors, mood). If you loved _Wednesday_, the system notes you like Comedy + Fantasy and recommends _The Good Place_.
+
+### Hybrid Architecture
+
+Netflix uses a hybrid approach with three tiers:
+
+1. **Tier 1: Collaborative (offline).** Daily batch jobs compute user-item similarity matrices using Apache Spark. Thousands of features are extracted: what you watched, when you watched, how long you watched, what you rated, what you searched for.
+
+2. **Tier 2: Content-based (nearline).** Real-time feature extraction as soon as you finish a title. The system immediately finds similar titles based on shared tags.
+
+3. **Tier 3: Contextual (online).** Time-of-day, day-of-week, device type, and current trends. Suggesting a comedy on Friday night on your TV is different from suggesting a documentary on Tuesday morning on your phone.
+
+The final recommendation is a weighted blend of all three tiers, with the weights learned through A/B testing.
+
+<RecommendationEngineDemo client:visible />
+
+## DRM and Content Protection
+
+Digital Rights Management (DRM) is how Netflix prevents unauthorized copying of copyrighted content. Every segment delivered to the client is encrypted, and the client must obtain a license to decrypt it.
+
+### DRM Schemes
+
+Netflix supports three DRM systems to cover every device:
+
+- **Widevine** (Google) -- Android, Chrome, Chromecast
+- **FairPlay** (Apple) -- iOS, iPadOS, macOS, Safari
+- **PlayReady** (Microsoft) -- Xbox, Windows, Edge, Smart TVs
+
+### License Acquisition Flow
+
+When the client receives the manifest, each segment URL includes a license challenge URL:
+
+```json
+{
+  "license_url": "https://license.netflix.com/v1/license",
+  "challenge": "base64_encoded_challenge_data",
+  "scheme": "widevine"
+}
+```
+
+The client sends the challenge to Netflix's license server, which returns a decryption key. The key is wrapped using the device's hardware attestation -- on modern devices, the key is stored in a trusted execution environment (TEE) and the video is decrypted in hardware.
+
+### Security Levels
+
+Netflix enforces four security levels (SL3000 being the highest). SL3000 requires a hardware TEE with HDCP 2.2 output protection -- this is required for 4K content. SL2000 uses software encryption but requires secure output. SL1000 is software-only, limited to 720p.
+
+This is why 4K Netflix requires specific hardware -- it is a DRM constraint, not a bandwidth constraint.
+
+## Offline Downloads
+
+Offline downloads allow mobile users to watch without an internet connection. This introduces a unique challenge: how do you deliver DRM-protected content that can play offline for up to 30 days?
+
+### Download Architecture
+
+When a user downloads a title:
+
+1. The client requests a download manifest (a subset of the full manifest for a single rendition)
+2. All segments for the selected rendition are downloaded and stored in the app's sandboxed storage
+3. A persistent license with an expiry timestamp is stored in the device's TEE
+4. The license includes a 30-day expiry clock -- the user must connect to the internet at least once every 30 days to renew licenses
+
+### Storage Efficiency
+
+Offline downloads use the most efficient codec available on the device (usually H.265 or AV1) and the lowest acceptable resolution (usually 720p or 480p). A typical 2-hour movie download consumes about 2-4 GB.
+
+```python
+def get_offline_rendition(device_capabilities):
+    codec = detect_best_codec(device_capabilities)
+    storage = get_available_storage()
+    if codec == 'av1' and storage > 3000:
+        return {'codec': 'av1', 'resolution': '720p', 'bitrate': 3000}
+    elif codec == 'hevc' and storage > 2000:
+        return {'codec': 'hevc', 'resolution': '480p', 'bitrate': 2000}
+    else:
+        return {'codec': 'h264', 'resolution': '480p', 'bitrate': 1500}
+```
+
+## Open Connect: Netflix's Custom CDN
+
+The most innovative part of Netflix's infrastructure is Open Connect, a CDN built and operated by Netflix inside ISP networks. This is the primary reason Netflix can deliver 150 exabytes per month at reasonable cost.
+
+### Architecture
+
+Open Connect appliances are custom Linux servers deployed in over 1,000 locations worldwide. Each appliance contains:
+
+- 100+ TB of NVMe SSD storage
+- 100 Gbps network interface
+- Custom caching software (FreeBSD-based for early versions, now Linux-based)
+- Hardware monitoring and remote management
+
+### Pre-positioning
+
+The key to Open Connect's efficiency is pre-positioning. Netflix knows what content will be popular before it is released. Days before a new season drops, the content is pushed to all Open Connect appliances during off-peak hours (when ISP traffic is low). This means:
+
+- The first viewer gets a cache hit (no "thundering herd" for new releases)
+- Peak traffic is shifted from expensive daytime bandwidth to cheap nighttime bandwidth
+- ISP peering costs are minimized because traffic stays within the ISP's network
+
+### ISP Partnership
+
+Netflix provides Open Connect appliances to ISPs for free. In exchange, the ISP provides rack space, power, and connectivity. Both sides win: Netflix saves on CDN costs, and the ISP keeps Netflix traffic off expensive upstream links.
+
+As of 2026, Open Connect handles over 95% of Netflix's total traffic. The remaining 5% is served from AWS CloudFront for long-tail content that is not worth pre-positioning.
+
+## Full Architecture
+
+Putting it all together, here is the complete Netflix architecture:
+
+**Client layer:** Web, mobile, TV, and console apps with built-in HLS/DASH players, ABR logic, and DRM clients.
+
+**CDN layer:** Open Connect appliances at ISP peering points, regional cache hubs, and AWS origin for cache misses.
+
+**API gateway:** Zuul-based gateway handling authentication, routing, rate limiting, and request logging.
+
+**Microservices:**
+- **Catalog Service** -- content metadata, search, browse (PostgreSQL + Redis + Elasticsearch)
+- **Playback Service** -- streaming session management, manifest generation, CDN assignment
+- **Recommendation Engine** -- collaborative and content-based filtering with A/B testing
+- **User Service** -- profiles, auth, watch history (Cassandra), billing (PostgreSQL)
+- **Encoding Service** -- distributed transcoding, packaging, DRM encryption
+
+**Data stores:** Cassandra, PostgreSQL, S3, Elasticsearch, Redis, DynamoDB -- each chosen for specific workload characteristics.
+
+**Event pipeline:** Apache Kafka streams clickstream events, QoS telemetry, and playback heartbeats to analytics and ML pipelines.
+
+When you tap play, the entire chain fires in under 500ms: client to API gateway to playback service to catalog lookup to manifest generation to CDN assignment to stream URL delivery. The first segment arrives at the client within 1-2 seconds, and the ABR engine continuously adapts quality to match your network conditions.
+
+<NetflixArchitectureDemo client:visible />
+
+## Summary
+
+Designing Netflix means stitching together a dozen subsystems, each of which is itself a deep systems design problem. The key takeaways:
+
+- **ABR streaming** is the foundation -- short segments, multiple renditions, client-side adaptation
+- **CDN strategy** makes or breaks the economics -- building your own CDN (Open Connect) saves billions
+- **Encoding is compute-intensive** -- per-title optimization and distributed transcoding are necessary
+- **Recommendations are the UI** -- 80% of what users watch comes from recommendations, not search
+- **Resume playback** requires careful session management -- Cassandra handles the write-heavy heartbeat workload
+- **DRM is a necessary evil** -- hardware-backed encryption protects content but adds complexity for offline
+
+This system processes 150 exabytes per month, supports 250 million subscribers across 190 countries, and starts playing a video in under 2 seconds. It is the result of fifteen years of continuous evolution from a DVD-by-mail company to the world's largest streaming platform.
