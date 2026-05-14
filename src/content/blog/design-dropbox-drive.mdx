@@ -1,0 +1,466 @@
+---
+title: "Design Dropbox & Google Drive: Cloud File Storage at Scale"
+description: "A complete system design walkthrough for cloud file storage — file chunking, delta sync, conflict resolution, upload/download architecture, and scaling to exabytes."
+date: 2026-05-15T01:00:00
+tags: ["system-design", "interview", "dropbox", "file-storage", "design-problem"]
+---
+
+import FileStorageRequirementsDemo from '../../components/demos/FileStorageRequirementsDemo'
+import FileChunkingDemo from '../../components/demos/FileChunkingDemo'
+import DeltaSyncDemo from '../../components/demos/DeltaSyncDemo'
+import ConflictResolutionDemo from '../../components/demos/ConflictResolutionDemo'
+import UploadPipelineDemo from '../../components/demos/UploadPipelineDemo'
+import DownloadSyncDemo from '../../components/demos/DownloadSyncDemo'
+import FileMetadataDbDemo from '../../components/demos/FileMetadataDbDemo'
+import FileStorageArchitectureDemo from '../../components/demos/FileStorageArchitectureDemo'
+
+Think about your Dropbox folder right now. Every file you drop in it appears on your laptop, your phone, your work computer, and the web. Make an edit on one device and the change propagates everywhere in seconds. Share a folder with a colleague and they see updates in real time. Accidentally delete something and you have 30 days to restore it.
+
+How does this work? The naive answer is "upload everything to a server and download it back." But the naive answer breaks at exabyte scale. You cannot store the same file 500 million times. You cannot upload the entire file every time someone changes a single byte. You cannot have two people editing the same document and silently overwrite each other's work.
+
+Cloud file storage is a masterclass in distributed systems engineering. Every piece — chunking, deduplication, delta sync, conflict resolution, metadata sharding, tiered blob storage — solves a specific scaling problem. By the end of this post you will understand how to design a system that stores billions of files, syncs across devices in seconds, and never loses data.
+
+## Understanding the Problem
+
+What is cloud file storage? Picture a filing cabinet that exists everywhere at once. Every device you own is a door into the same cabinet. When you put a file in through one door, it appears at every other door automatically. The cabinet never overflows — it just grows. And the cabinet keeps every version of every document you have ever filed away.
+
+The key insight is that we are not just building storage. We are building a synchronization engine. Storage is easy. Sync is hard.
+
+Dropbox, Google Drive, iCloud, and OneDrive all solve the same fundamental problem: keep a set of files consistent across N devices and N users, over an unreliable network, with offline periods, competing edits, and data sizes ranging from a few kilobytes to hundreds of gigabytes.
+
+## Requirements Gathering
+
+Before designing anything, we need to know what the system must do. In a system design interview, you start by asking clarifying questions and categorizing requirements.
+
+<FileStorageRequirementsDemo client:visible />
+
+### Functional Requirements
+
+1. **Upload files** — any file type, up to 100GB per file, via web, desktop, and mobile clients
+2. **Download files** — stream files on demand to any authorized device
+3. **Cross-device sync** — changes on one device propagate to all connected devices
+4. **File sharing** — share files or folders via links with view/edit permissions
+5. **Version history** — retain previous versions for a configurable window (default 30 days)
+6. **Conflict resolution** — handle simultaneous edits from multiple devices
+7. **Offline support** — edit files while disconnected, sync when connectivity returns
+
+### Non-Functional Requirements
+
+1. **High availability** — 99.9% uptime; no single point of failure
+2. **Durability** — zero data loss; multiple replicas across regions
+3. **Scalability** — 500M+ users, exabytes of total storage
+4. **Low latency sync** — changes propagate within seconds (p99 < 5s)
+5. **Bandwidth efficiency** — minimize data transfer; delta sync, deduplication
+6. **End-to-end encryption** — data encrypted at rest (AES-256) and in transit (TLS)
+7. **Global reach** — serve users worldwide with acceptable latency
+
+### Out of Scope
+
+For this design we explicitly skip: real-time collaborative editing (Google Docs-style), email integration, OCR/image recognition, antivirus scanning, and custom branding. These are important features but do not affect the core storage architecture.
+
+## System Entities & API Design
+
+Cloud file storage has a small set of core entities:
+
+- **User** — owns files and folders, has a storage quota
+- **File** — a named blob of data within a folder hierarchy
+- **Folder** — a container for files and other folders (prefix-based, not a physical object)
+- **FileVersion** — a snapshot of a file's content at a point in time
+- **Chunk** — a 4MB block of file data, identified by its SHA-256 hash
+- **ChunkAssignment** — maps a chunk to a position within a file version
+- **ShareLink** — a permission-granting token for shared access
+
+The API follows REST conventions with a focus on content-addressable storage:
+
+```bash
+# Upload a file (or new version)
+PUT /api/files/{namespace}/{path}
+Content-Type: application/octet-stream
+Authorization: Bearer <token>
+
+# Client sends file metadata + chunk references
+{
+  "name": "report.pdf",
+  "mime_type": "application/pdf",
+  "chunks": [
+    {"hash": "a7ffc6f8...", "size": 4194304},
+    {"hash": "3b9c2b9b...", "size": 4194304}
+  ]
+}
+```
+
+```bash
+# Download a file
+GET /api/files/{namespace}/{path}
+Accept: application/octet-stream
+
+# Response: file content streamed as chunks
+```
+
+```bash
+# Get sync manifest (list files + their latest version)
+GET /api/sync?cursor=<opaque_cursor>
+
+# Response: files changed since cursor
+{
+  "entries": [
+    {"path": "/docs/report.pdf", "version": 3, "size": 23000000, "chunks": 6},
+    {"path": "/photos/vacation.jpg", "version": 1, "size": 4200000, "chunks": 2}
+  ],
+  "cursor": "next_page_token"
+}
+```
+
+```bash
+# Create share link
+POST /api/share
+{
+  "path": "/docs/report.pdf",
+  "permission": "view",
+  "expires_in_days": 7
+}
+```
+
+The sync API is the most important endpoint. Clients poll it periodically (or keep a long-lived connection) to learn what has changed. The server returns a manifest of files and their latest version numbers. The client compares this against its local state and downloads only what is missing.
+
+## Capacity Estimation
+
+We need to ground our design in numbers. Let us estimate for a Dropbox-scale system: 500 million users.
+
+**Assumptions:**
+
+- Average storage per user: 1 TB (including shared files)
+- Average file size: 1 MB (most files are small documents, photos, configs)
+- Active users per day: 200 million
+- Files uploaded per day per active user: 3
+- Files downloaded per day per active user: 30
+- Read-to-write ratio: 10:1
+- Chunk size: 4 MB
+- Dedup savings: 5x on average (many users share identical files, OS files, libraries)
+- Compression savings: 30% average
+
+**Calculations:**
+
+Raw storage needed: 500M users x 1 TB = 500 exabytes
+
+With dedup at 5x: 500 EB / 5 = 100 EB physical storage
+
+With compression at 30%: 100 EB x 0.7 = 70 EB physical storage
+
+Upload QPS: (200M users x 3 files) / 86,400 sec = ~6,950 files/sec
+
+Assuming average 5 chunks per file: 6,950 x 5 = ~34,750 chunk writes/sec
+
+Download QPS: 6,950 x 10 = ~69,500 files/sec (~350K chunk reads/sec)
+
+Bandwidth: 350K reads/s x 4 MB = ~1.4 TB/s read bandwidth
+
+Metadata DB writes: 6,950 files/sec x ~5 rows (file_versions + chunks) = ~35K writes/sec
+
+Metadata DB reads: 69,500 files/sec x 1 query = ~70K reads/sec
+
+**What these numbers tell us:**
+
+Chunk reads dominate at 350K QPS — we need aggressive caching and read-optimized blob storage. Metadata operations are modest (100K QPS total) and a well-sharded PostgreSQL cluster can handle that easily. The real challenge is blob storage throughput: 1.4 TB/s requires multiple regional blob stores with CDN caching.
+
+## File Chunking
+
+The fundamental building block of cloud storage is the chunk. Files are not stored as monolithic blobs. They are split into fixed-size blocks (typically 4 MB), and each block is stored independently, identified by its SHA-256 content hash.
+
+Why 4 MB? The trade-off is between granularity and overhead. Smaller chunks mean better dedup and delta sync (fewer bytes transferred on small edits) but more metadata to manage (more rows in the chunk_assignments table). Dropbox originally used 4 MB. Google Drive uses a similar block-based approach internally.
+
+<FileChunkingDemo client:visible />
+
+### Content-Addressable Storage
+
+Each chunk is stored at a path derived from its hash: `s3://bucket/chunks/a7/ff/c6/f8/a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a`. This is called content-addressed storage. The chunk's hash IS its address. If two files have identical chunks (same hash), they share the same physical storage. This is how deduplication works at the chunk level.
+
+```python
+import hashlib
+import os
+
+CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
+
+def chunk_file(filepath):
+    chunks = []
+    with open(filepath, 'rb') as f:
+        while True:
+            data = f.read(CHUNK_SIZE)
+            if not data:
+                break
+            content_hash = hashlib.sha256(data).hexdigest()
+            chunks.append({
+                'hash': content_hash,
+                'size': len(data),
+                'data': data,
+            })
+    return chunks
+```
+
+### Deduplication at Scale
+
+When a chunk arrives at the server, the chunk service checks a distributed cache (Redis/Memcached) for the hash. If the hash exists, the chunk already lives in blob storage and we skip the upload — just increment a reference counter. If the hash is new, we store the chunk and populate the cache.
+
+The reference counter is critical. When a file is deleted, we decrement the ref count. Only when ref_count reaches zero do we garbage-collect the chunk from blob storage. This prevents prematurely deleting chunks that are shared across files.
+
+## Delta Sync
+
+Delta sync is the optimization that makes cloud storage feel instant. If you edit a 100 MB video project file by changing one line of metadata, delta sync detects exactly which chunks changed and uploads only those.
+
+<DeltaSyncDemo client:visible />
+
+### How It Works
+
+The client keeps a local database of chunk hashes for each file. When a file is saved, the client re-chunks the file and compares the new hashes against the stored hashes. Chunks whose hashes match are skipped. Only chunks with new hashes are uploaded.
+
+For a text file with a single-line change, typically 1-2 chunks change out of dozens. The delta sync savings compound over time — a file edited 100 times might transfer the equivalent of only 5 full copies.
+
+### Rolling Checksums for Efficient Diffing
+
+For large files, computing SHA-256 on every chunk on every save is expensive. Clients optimize by using a rolling checksum (rsync-style) to identify which regions of the file actually changed. The algorithm works in two passes:
+
+1. Compute weak rolling checksums (Adler-32) on the server's version at fixed intervals
+2. The client slides the same checksum over its local version; matching checksums identify unchanged regions
+
+Only regions without a checksum match need SHA-256 hashing and upload. This reduces CPU usage by 10-100x for large files with small edits.
+
+## Conflict Resolution
+
+The hardest problem in sync is conflict resolution. Two devices go offline. Both edit the same file. When they come back online, what does the server do?
+
+There are two cases.
+
+### Non-Overlapping Edits (Auto-Merge)
+
+If Device 1 changed line 10 and Device 2 changed line 30, the edits do not conflict. The server can merge them automatically. Both changes are preserved. This works well for text files with distinct edit regions.
+
+### Overlapping Edits (Conflict Copy)
+
+If both devices changed the same region, auto-merge is impossible. The server cannot know which version is "correct." It keeps both versions as conflict copies. The user must manually resolve the conflict by choosing which version to keep.
+
+<ConflictResolutionDemo client:visible />
+
+### Dropbox's Strategy
+
+Dropbox uses a simple rule: the first version the server sees wins. When Device 1 syncs its edit, the server records version B. When Device 2 tries to sync its edit, the server detects the conflict (both edits branched from version A). It creates a conflict copy named `file (Device 2's conflicted copy 2026-05-15).pdf` and keeps Device 1's version as the latest.
+
+This is not perfect. The user must manually clean up conflict copies. But it is predictable, deterministic, and never loses data. The alternatives — locking files, auto-merging blindly, or showing diffs in the UI — are complex and error-prone.
+
+### CRDTs for Collaborative Editing
+
+For real-time collaborative editing (Google Docs, Notion), conflict resolution uses Conflict-Free Replicated Data Types (CRDTs). These are specialized data structures that guarantee all replicas converge to the same state without coordination. CRDTs are fascinating but outside our scope — they require application-level awareness (character positions in a document) that general file storage cannot assume.
+
+## Upload Pipeline
+
+Now we put it all together. When a client uploads a file, the data flows through an 8-stage pipeline:
+
+<UploadPipelineDemo client:visible />
+
+### Stage-by-Stage Breakdown
+
+**1. Chunk** — The client splits the file into 4 MB blocks. The last block may be smaller. Each block is a discrete unit for upload, dedup, and storage.
+
+**2. Hash** — Each chunk gets a SHA-256 hash. This is the content address. Two chunks with the same hash are guaranteed identical.
+
+**3. Dedup** — The server checks the dedup cache (Redis). If the hash exists, the chunk is already stored. Server responds "skip, ref_count++". If missing, the chunk proceeds.
+
+**4. Compress** — New chunks are gzip-compressed before storage. Compression ratios vary by content type: text files can compress 5-10x, already-compressed files (JPEG, MP4) compress very little. The compressed size is stored alongside the chunk metadata.
+
+**5. Encrypt** — Each chunk is encrypted with AES-256-GCM using a per-file key. The file key is itself encrypted with a master key and stored in the metadata database. This ensures that even if blob storage is compromised, data remains confidential.
+
+**6. Store** — Encrypted, compressed chunks are written to blob storage (S3, GCS, Azure Blob). The storage path is derived from the hash: `s3://bucket/chunks/{hash[:2]}/{hash[2:4]}/{hash}`.
+
+**7. Metadata** — A new file_version row is created with the list of chunk IDs and their ordering. The file's latest version pointer is updated. The chunk_assignments table records the mapping.
+
+**8. Notify** — A push notification is sent to all connected devices for the affected namespace. The notification contains the changed file path and new version number. Receiving devices pull the updated manifest and download missing chunks.
+
+### Upload Resume
+
+Large files (100 GB) cannot be uploaded in a single request. The client uses resumable uploads: send chunks independently with upload IDs. If the connection drops, only the in-flight chunks need retransmission. The server reassembles chunks into the complete file once all chunks are received.
+
+```python
+import requests
+
+def upload_chunk(upload_url, chunk_data, chunk_index, upload_id):
+    resp = requests.put(
+        f"{upload_url}/{upload_id}/chunks/{chunk_index}",
+        data=chunk_data,
+        headers={"Content-Range": f"bytes {chunk_index * CHUNK_SIZE}-..."}
+    )
+    return resp.status_code == 200
+```
+
+## Download & Sync Pipeline
+
+Downloading is the reverse of uploading, with an additional comparison step.
+
+<DownloadSyncDemo client:visible />
+
+### Sync Protocol Details
+
+1. **Client requests manifest** — The client sends `GET /api/sync?cursor=<cursor>` to the sync API. The cursor is an opaque token representing the client's last known state. The server returns all files that changed since that cursor.
+
+2. **Server computes diff** — The manifest service queries the metadata DB for file_versions whose `created_at` exceeds the cursor timestamp. It returns the current version number and chunk list for each changed file.
+
+3. **Client compares** — The client checks each file in the manifest against its local database. If the local version matches the server version, the file is skipped. If different, the client walks through the chunk list and identifies which chunks it already has locally (from previous versions or synced from other devices).
+
+4. **Download missing chunks** — Chunks that are not in the local cache are downloaded from blob storage. The client can request chunks in parallel (typically 4-8 concurrent connections). Blob storage supports range requests, so a partial chunk can be resumed if the download is interrupted.
+
+5. **Reassemble** — As chunks arrive, they are decrypted (per-file key), decompressed, and written to disk in the correct order. The file is not exposed to the user until all chunks are verified and assembled.
+
+### Client-Side Cache
+
+Each device maintains a local SQLite database containing:
+
+- The file tree with version numbers
+- The list of chunk hashes per file version
+- The chunk cache (decrypted chunks stored on disk for fast access)
+
+This cache is critical for offline support. When the device is disconnected, it can still browse, open, and edit files that are fully cached locally. When connectivity returns, the sync pipeline picks up the changes.
+
+## Metadata Database Schema
+
+The metadata database is the brain of the system. It tracks every file, every version, every chunk, and every sharing relationship.
+
+<FileMetadataDbDemo client:visible />
+
+### Schema Design Principles
+
+**Files table** — Uses a soft-delete pattern (`is_deleted` flag). Deleting a file just flips the flag. The actual data is garbage-collected later. The `parent_folder_id` is self-referential (a file can be in a folder). Folders are just files with `is_folder = true`.
+
+**file_versions table** — Immutable once written. Each insert creates a new version. The version_num increments monotonically per file. The `content_hash` is the hash of the entire file (not individual chunks) — useful for quick equality checks without reassembling.
+
+**chunks table** — The heart of deduplication. The `sha256` column has a UNIQUE index. The `ref_count` tracks how many versions reference this chunk. A background garbage collector periodically deletes chunks with `ref_count = 0`.
+
+**chunk_assignments table** — A join table mapping versions to chunks. The `chunk_index` ensures chunks are reassembled in the correct order. The primary key is a composite of (version_id, chunk_index).
+
+### Sharding Strategy
+
+The metadata DB will not fit on a single machine. We shard by `user_id` (hash-mod). All tables except `chunks` are sharded per user. The `chunks` table is global — dedup is global across all users. It uses its own sharding by `sha256` prefix.
+
+### Caching the Hot Path
+
+The sync manifest query is the most frequent read. We cache it aggressively:
+
+- L1: Client-side (the local SQLite DB)
+- L2: CDN edge cache for public shared files
+- L3: Redis cluster caching the file tree for active users
+- L4: Database (with read replicas)
+
+The L3 cache reduces database reads by ~80%. For most users, their file tree changes infrequently. A TTL of 30 seconds with cache invalidation on write is sufficient.
+
+## Encryption
+
+Security is non-negotiable for cloud file storage. Data must be protected both at rest and in transit.
+
+### Encryption in Transit
+
+All API traffic uses TLS 1.3. Between internal services (API servers, metadata DB, blob storage), we use mutual TLS with service-to-service authentication.
+
+### Encryption at Rest
+
+We use a three-tier key hierarchy:
+
+1. **Master key** — stored in a hardware security module (HSM) or key management service (KMS). Rotated annually.
+2. **File keys** — one AES-256 key per file, encrypted with the master key and stored alongside file metadata.
+3. **Chunk keys** — each chunk is encrypted with AES-256-GCM using the file key. A random nonce is prepended to each chunk before storage.
+
+When a user downloads a file, the metadata service decrypts the file key (using the master key), returns it to the client over TLS, and the client decrypts each chunk locally. This ensures the server never holds plaintext data in memory for longer than necessary.
+
+### End-to-End Encryption
+
+Services like Tresorit offer end-to-end encryption where the server never has access to the encryption keys. The client encrypts with a user-provided password before uploading. The server stores ciphertext only. This prevents even the service provider from reading user data. The trade-off is that server-side features like thumbnails, previews, and full-text search become impossible without client-side processing.
+
+## Full Architecture
+
+Here is the complete system architecture showing all components and the flow of a single file upload.
+
+<FileStorageArchitectureDemo client:visible />
+
+### Component Breakdown
+
+**Client applications** — Desktop (Electron/C++), mobile, and web clients that handle file system watching, chunking, local caching, and encryption. Each client maintains a local SQLite database tracking the sync state.
+
+**CDN (Cloudflare/Akamai)** — Caches file downloads and share link previews at edge locations. Large files (>10 MB) bypass the CDN and use direct S3 signed URLs for streaming.
+
+**Load balancer** — Layer 7 load balancer (ALB/HAProxy) routing API requests by path. Routes `/api/sync` requests to the sync service, `/api/files` to the file service, `/api/share` to the sharing service.
+
+**API servers** — Stateless Go/Java services. Handle authentication, request validation, rate limiting, and coordination between downstream services. Scale horizontally behind the load balancer.
+
+**Metadata service** — Manages the file tree, version history, and sharing permissions. Reads from cache first, falls back to the metadata DB. Write-through cache for updates.
+
+**Metadata DB** — Sharded PostgreSQL cluster. The `chunks` table is globally sharded by hash prefix. All other tables are sharded by `user_id`. Read replicas in each region for low-latency manifest queries.
+
+**Dedup cache** — Redis cluster storing all known chunk hashes. A Bloom filter sits in front of Redis to avoid cache misses for non-existent chunks. The Bloom filter is rebuilt daily from a snapshot of the chunks table.
+
+**Chunk service** — Coordinates chunk storage: dedup check, compression, encryption, and writing to blob storage. Uses a worker pool pattern with backpressure handling.
+
+**Blob store (S3/GCS)** — Primary storage for compressed, encrypted chunks. Objects are immutable once written (the hash is the key). Lifecycle policies move cold data to cheaper storage tiers (S3 Glacier, GCS Nearline).
+
+**Notification service** — Maintains WebSocket connections (or SSE streams) to all active clients. When a file changes, publishes a sync event with the affected namespace. Clients respond by fetching the latest manifest.
+
+## Scaling & Advanced Topics
+
+### Hot vs Cold Storage
+
+Most cloud storage access patterns follow a power law: 90% of reads hit 10% of files. Recent files are hot. Old files are cold.
+
+We use a tiered storage strategy:
+
+| Tier | Storage | Latency | Cost/GB/Month | Data |
+|------|---------|---------|---------------|------|
+| Hot | SSD-backed (S3 Standard) | < 10ms | $0.023 | Files accessed in last 30 days |
+| Warm | HDD-backed (S3 Standard-IA) | < 50ms | $0.0125 | Files accessed in last 90 days |
+| Cold | Tape/Archive (S3 Glacier) | < 12h retrieval | $0.001 | Files accessed in last year |
+
+A lifecycle policy automatically moves chunks between tiers based on last-access timestamps. When a cold file is requested, the system asynchronously restores it to hot storage and notifies the client when ready.
+
+### Offline Sync
+
+Offline support is what separates Dropbox from a simple file upload service. The client uses a local SQLite database and file system watcher (inotify on Linux, FSEvents on macOS, ReadDirectoryChanges on Windows) to track changes.
+
+When the client detects a network disconnection:
+1. Local edits are queued in a write-ahead log (WAL)
+2. The client continues watching the file system for changes
+3. When connectivity returns, the client replays the WAL: chunk changed files, compare hashes, upload deltas
+
+The WAL is essential. If the client crashes before replaying, the changes are still on disk and can be replayed on restart.
+
+### LAN Sync
+
+Dropbox famously uses LAN sync — when multiple devices on the same local network need the same file, they transfer it peer-to-peer instead of downloading from the cloud. This reduces bandwidth costs and improves speed.
+
+The discovery protocol uses mDNS (Bonjour/Avahi) to find peers on the local network. Once discovered, devices exchange chunk hashes and transfer missing chunks over HTTP. The cloud API provides a list of peers for each file.
+
+LAN sync can saturate a gigabit Ethernet link (100+ MB/s), far faster than most internet connections.
+
+### Cross-Region Replication
+
+A single-region deployment risks data loss and high latency for remote users. We deploy to 3+ regions with active blob storage replication:
+
+- Writes go to the primary region
+- Blob storage asynchronously replicates to secondary regions
+- Metadata DB uses synchronous replication within a region and async cross-region
+- DNS-based routing (geo-LB) sends users to the nearest region
+
+The trade-off is that cross-region replication introduces a few seconds of delay before a file uploaded in US-East appears in EU-West. For most users this is acceptable.
+
+## Self-Check
+
+Before walking into an interview, make sure you can answer all of these:
+
+- [ ] Can you explain the filing cabinet analogy for cloud file storage?
+- [ ] Can you estimate capacity for 500 million users at 1 TB each?
+- [ ] Can you explain why 4 MB is a reasonable chunk size?
+- [ ] Can you trace the full upload pipeline from client to notification?
+- [ ] Can you draw the six metadata tables and their relationships?
+- [ ] Can you explain how content-addressed storage enables deduplication?
+- [ ] Can you describe delta sync and why it saves bandwidth?
+- [ ] Can you explain the two types of conflict resolution (auto-merge vs conflict copy)?
+- [ ] Can you describe the cursor-based sync protocol?
+- [ ] Can you explain the three-tier encryption hierarchy?
+- [ ] Can you draw the full architecture diagram with all components?
+- [ ] Can you describe how the system handles offline edits and reconnection?
+- [ ] Can you explain tiered storage and when data moves between tiers?
+- [ ] Can you explain how LAN sync discovers peers and transfers files?
+- [ ] Can you handle follow-up questions about CRDTs, Bloom filters, and cross-region replication?
