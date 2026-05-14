@@ -1,0 +1,659 @@
+---
+title: "Docker & Containers: From Development to Production"
+description: "A complete guide to containers — images and layers, the build process, namespaces and cgroups for isolation, networking, volumes, multi-stage builds, and production best practices."
+date: 2026-05-15T01:00:00
+tags: ["docker", "containers", "devops", "infrastructure"]
+---
+
+import ContainerVsVmDemo from '../../components/demos/ContainerVsVmDemo'
+import LayerBuilderDemo from '../../components/demos/LayerBuilderDemo'
+import LayerCacheDemo from '../../components/demos/LayerCacheDemo'
+import UnionFsDemo from '../../components/demos/UnionFsDemo'
+import ImageLayerExplorerDemo from '../../components/demos/ImageLayerExplorerDemo'
+import NamespaceDemo from '../../components/demos/NamespaceDemo'
+import CgroupDemo from '../../components/demos/CgroupDemo'
+import ContainerNetworkDemo from '../../components/demos/ContainerNetworkDemo'
+import VolumeDemo from '../../components/demos/VolumeDemo'
+import MultiStageDemo from '../../components/demos/MultiStageDemo'
+import DockerComposeDemo from '../../components/demos/DockerComposeDemo'
+import RegistryPullDemo from '../../components/demos/RegistryPullDemo'
+import SecurityCapsDemo from '../../components/demos/SecurityCapsDemo'
+import ImageOptimizeDemo from '../../components/demos/ImageOptimizeDemo'
+
+Imagine you are moving into a new city. You could buy a house — foundation, walls, roof, plumbing, electrical — all built from scratch for you. That takes time and money, and the house is completely separate from every other house. Each house has its own foundation dug into the earth, its own separate pipes connected to the main water line, its own electrical panel.
+
+Now imagine an apartment building instead. The building already has plumbing, electricity, and structural support shared by every unit. You just rent one apartment. Your walls are thin — they isolate your space from your neighbors, but everyone shares the same building infrastructure. You do not need to install a water heater; the building has one. You do not need to wire electricity; the building is already connected to the grid.
+
+Virtual machines are houses. Containers are apartments.
+
+## What is a Container?
+
+A container is a running process that is isolated from the rest of the system. It shares the host's operating system kernel but has its own view of the filesystem, network, and process tree.
+
+This is the fundamental difference from a virtual machine. A VM runs a full guest operating system on top of a hypervisor, with its own kernel, drivers, and system libraries. A container runs directly on the host kernel, using Linux features to wall off the process from everything else.
+
+The apartment building analogy maps directly:
+
+- **Building (Host OS)** — the Linux kernel. Every apartment shares it.
+- **Apartment (Container)** — a confined space with its own view of the world.
+- **Walls (Namespaces)** — what the container can see.
+- **HVAC limits (Cgroups)** — what the container can use (CPU, memory).
+
+A container does not need to boot an OS. It starts in milliseconds, not minutes. A container does not need its own kernel — it reuses the host's, which means it uses far less memory and disk than a VM.
+
+<ContainerVsVmDemo client:visible />
+
+The demo above lets you compare resource usage side by side. Notice that a container shares the host kernel while a VM virtualizes everything from the CPU up. This is why containers are lightweight but also why they cannot run a different OS — a Linux container cannot run on a Windows host without a VM layer.
+
+## Images vs Containers
+
+An **image** is a blueprint. A **container** is a running instance of that blueprint.
+
+Think of an image like a recipe for a cake. The recipe lists ingredients (base OS, application code, dependencies) and instructions (install packages, copy files, set environment variables). You can share the recipe with anyone, and they can follow it to bake the exact same cake.
+
+A container is the actual cake. It is the recipe executed. You can have multiple cakes from the same recipe running at the same time, and each one is independent. If one cake burns, the others are fine.
+
+Images are read-only. When Docker starts a container from an image, it creates a thin writable layer on top of the image layers. This is called the **container layer**. Any changes the container makes — writing logs, creating files, modifying configuration — happen in this writable layer. When the container is deleted, the writable layer is discarded (unless you use volumes, which we cover later).
+
+Here is the lifecycle:
+
+```
+Image (read-only layers) + Container Layer (writable) = Running Container
+```
+
+```
+docker pull ubuntu:22.04    # Download the image (blueprint)
+docker run ubuntu:22.04     # Create and start a container (baked cake)
+docker stop my_container    # Stop it (cake goes back in the fridge)
+docker rm my_container      # Delete it (throw away the cake)
+docker rmi ubuntu:22.04     # Delete the image (lose the recipe)
+```
+
+You can create a container from an image, start and stop it, and the underlying image is never affected. The separation between immutable image and mutable container is one of Docker's most important design decisions.
+
+<ContainerVsVmDemo client:visible />
+
+## Dockerfile Basics
+
+A Dockerfile is a recipe file that tells Docker how to build an image. Each instruction in a Dockerfile creates a new layer.
+
+```dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY package.json .
+RUN npm install
+
+COPY src/ .
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
+```
+
+Let us walk through each instruction:
+
+- **FROM** — sets the base image. Everything starts from here. Alpine variants are popular because they are tiny (5 MB). This is always the first instruction.
+- **WORKDIR** — sets the working directory for subsequent instructions. Creates the directory if it does not exist. Like `cd` but permanent.
+- **COPY** — copies files from your host (build context) into the image. `COPY package.json .` copies the local `package.json` into the current working directory.
+- **RUN** — executes a command inside the image during build. `RUN npm install` runs inside the container environment, installing dependencies into the image layer.
+- **EXPOSE** — documents which port the container listens on. This is metadata only — it does not actually publish the port.
+- **CMD** — provides the default command when the container starts. Can be overridden. There can be only one `CMD` (or `ENTRYPOINT` semantics apply).
+
+Each instruction produces a layer. Layers are cached. If a layer has not changed, Docker reuses the cached version from a previous build. This is why we copy `package.json` first, run `npm install`, and *then* copy the source code. Source code changes frequently; dependencies change rarely. By ordering instructions from least-changing to most-changing, we maximize cache reuse.
+
+<LayerBuilderDemo client:visible />
+
+The demo above visualizes how each Dockerfile instruction maps to a new layer. You can see the layer stack grow with each instruction.
+
+## Image Layers
+
+Images are made of stacked layers. Docker uses an overlay filesystem (overlay2 by default) to merge these layers into a single unified view.
+
+When you pull an image, you are downloading a set of tarballs, each representing one layer. When you run a container, Docker stacks these layers using overlay2 and adds a thin writable layer on top.
+
+```
+Container Layer (writable)
+Layer 4: CMD ["node", "server.js"]
+Layer 3: COPY src/ .
+Layer 2: RUN npm install
+Layer 1: COPY package.json .
+Layer 0: FROM node:20-alpine
+```
+
+The overlay filesystem works like tracing paper. Each layer is a transparent sheet. Multiple sheets stacked on top of each other create a complete picture. If a lower layer has a file and a higher layer also has a file with the same path, the higher layer's file is visible — the lower one is hidden, not modified.
+
+This is called **copy-on-write (CoW)** . When a container modifies a file from a lower layer, the file is copied up to the writable layer, and the modification happens there. The original layer is never changed. This means multiple containers sharing the same base image all read the same underlying layers from disk, using almost no additional space.
+
+<UnionFsDemo client:visible />
+
+The demo shows how layers merge. You can toggle visibility of individual layers and see how files from upper layers shadow files from lower ones.
+
+## Layer Caching
+
+Docker caches each layer after building it. On the next build, if the instruction and its context (the files copied, the command run) have not changed, Docker reuses the cached layer instead of rebuilding.
+
+This is why the order of instructions in a Dockerfile matters enormously.
+
+```dockerfile
+# BAD: cache invalidated on every source change
+FROM node:20-alpine
+COPY . .
+RUN npm install
+CMD ["node", "server.js"]
+```
+
+Every time you change a source file, the `COPY . .` layer changes, invalidating the `RUN npm install` layer too. You run `npm install` on every build even if your dependencies have not changed. For a large project, that is 30-60 seconds wasted on every iteration.
+
+```dockerfile
+# GOOD: dependencies cached until package.json changes
+FROM node:20-alpine
+COPY package.json .
+RUN npm install
+COPY . .
+CMD ["node", "server.js"]
+```
+
+Now `npm install` only runs when `package.json` changes. Source code changes skip the install step entirely. On a typical dev loop, this saves tens of seconds per build.
+
+The same principle applies to other ecosystems:
+
+```dockerfile
+# Python
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+
+# Go
+COPY go.mod go.sum .
+RUN go mod download
+COPY . .
+RUN go build -o /app .
+
+# Rust
+COPY Cargo.toml Cargo.lock .
+RUN cargo build --release
+COPY src/ .
+RUN cargo build --release
+```
+
+<LayerCacheDemo client:visible />
+
+The demo shows a side-by-side comparison of a well-ordered Dockerfile vs a poorly-ordered one. Watch the build timeline — the well-ordered one finishes faster because it skips cached layers.
+
+## The Image Tree
+
+Every image layer has a content-addressable hash (SHA256). Layers are identified by their digest, not by a name. When Docker pulls an image, it downloads the manifest, then fetches each layer by its digest.
+
+You can explore the layer history of any local image:
+
+```bash
+docker history nginx:latest
+```
+
+```
+IMAGE          CREATED       CREATED BY                                      SIZE
+a6b7c8d9e0f1   2 weeks ago   CMD ["nginx" "-g" "daemon off;"]                0B
+<missing>      2 weeks ago   STOPSIGNAL SIGQUIT                               0B
+<missing>      2 weeks ago   EXPOSE port 80                                   0B
+<missing>      2 weeks ago   ENTRYPOINT ["/docker-entrypoint.sh"]             0B
+<missing>      2 weeks ago   COPY 30-tune-worker-processes.sh /docker-ent…   157B
+<missing>      2 weeks ago   RUN /bin/sh -c set -x     && addgroup -g 101 …  59.7MB
+<missing>      2 weeks ago   ENV NGINX_VERSION=1.25.3                         0B
+<missing>      2 weeks ago   RUN /bin/sh -c apk add --no-cache --virtual …   4.26MB
+<missing>      2 weeks ago   COPY docker-entrypoint.sh /                      1.17kB
+<missing>      2 weeks ago   ADD http://.../nginx-1.25.3.tar.gz  /usr/src/   1.05MB
+```
+
+Each row is a layer. The `CREATED BY` column shows the instruction that created it. The `SIZE` column shows the layer size. Notice the layers that look empty — instructions like `CMD`, `EXPOSE`, and `ENV` are metadata that does not add filesystem content, but they still create layers in the image manifest.
+
+You can also inspect the layers of a remote image without pulling it:
+
+```bash
+docker manifest inspect nginx:latest
+```
+
+This returns the manifest list (for multi-architecture images) or the image manifest with layer digests.
+
+<ImageLayerExplorerDemo client:visible />
+
+The demo lets you explore any local image's layer tree. Click a layer to see its details — the command that created it, its size, and its digest.
+
+## Namespaces
+
+When you run a container, it looks like a full machine. It has its own process tree, its own network interfaces, its own filesystem. But it is all an illusion created by Linux namespaces.
+
+Namespaces control **what a process can see**. They partition kernel resources so that processes in one namespace cannot see processes in another namespace.
+
+There are several types of namespaces, each isolating a different resource:
+
+| Namespace | What it isolates |
+|-----------|-----------------|
+| PID | Process IDs — the container sees only its own processes |
+| Network | Network interfaces, routing tables, iptables rules |
+| Mount | Filesystem mount points |
+| User | User and group IDs — root in the container can be a regular user on the host |
+| UTS | Hostname and domain name |
+| IPC | Inter-process communication resources (shared memory, semaphores) |
+| Cgroup | Cgroup root (which cgroup the process belongs to) |
+
+When Docker starts a container, it creates a new set of namespaces for that container. The container's PID 1 is isolated from the host's PID 1. The container sees `eth0` as its network interface, but that interface is actually a virtual Ethernet pair (veth) connected to a Docker bridge on the host.
+
+This is the apartment analogy at work. Your apartment has walls (PID namespace) so you cannot see into your neighbor's living room. Your apartment has its own mailing address (network namespace) separate from the building's loading dock. Your apartment has its own door locks (user namespace) so the "root" key inside your unit does not open the manager's office.
+
+<NamespaceDemo client:visible />
+
+The demo shows a simulated process tree inside a container namespace vs the host namespace. Notice that PID 1 in the container is a specific process, not the host's init system.
+
+## Cgroups
+
+Namespaces control visibility. **Cgroups (control groups)** control usage. While namespaces answer "what can you see?", cgroups answer "how much can you use?"
+
+Cgroups limit and account for resource usage. Docker uses cgroups v2 (on modern Linux) to enforce limits on:
+
+- **CPU** — how many CPU cores or shares of CPU time the container gets
+- **Memory** — maximum RAM the container can use
+- **Block I/O** — read/write bandwidth to disk
+- **PID count** — maximum number of processes inside the container
+
+Without cgroups, a container could consume 100% of the host's CPU and memory. One runaway process could starve every other container on the machine.
+
+```bash
+# Run with 512 MB memory limit and 0.5 CPU
+docker run -d --name my-app \
+  --memory="512m" \
+  --cpus="0.5" \
+  nginx:latest
+
+# Verify limits at runtime
+docker inspect my-app --format '{{.HostConfig.Memory}}'
+docker stats my-app
+```
+
+The `docker stats` command shows real-time resource usage per container:
+
+```
+CONTAINER ID   CPU %     MEM USAGE / LIMIT    MEM %
+abc123         45.2%     128MB / 512MB        25.0%
+```
+
+When a container exceeds its memory limit, the kernel's OOM (out-of-memory) killer terminates processes inside that container. The container may exit with code 137 (SIGKILL). This is why setting appropriate limits is critical — without them, one container can bring down the entire host.
+
+Cgroups are also hierarchical. A container's cgroup is a child of the Docker engine's cgroup, which is a child of the system's root cgroup. This hierarchy lets you set global policies (e.g., "all Docker containers together can use at most 4 GB") as well as per-container limits.
+
+<CgroupDemo client:visible />
+
+The demo lets you adjust CPU and memory limits for a simulated container and see the effects — throttling when CPU is exceeded, OOM when memory is exceeded.
+
+## Container Networking
+
+Docker provides several networking modes. The most common is **bridge networking**, which creates a virtual network bridge (docker0) on the host and connects each container to it.
+
+When you run a container without specifying a network, Docker attaches it to the default bridge. Each container gets a virtual Ethernet interface (veth) — one end inside the container (as `eth0`), the other end connected to the bridge (as `vethXXXXXX` on the host).
+
+```
+Host Network:
+┌─────────────────────────────────────────┐
+│  docker0 bridge (172.17.0.1)            │
+│  ┌──────────┐    ┌──────────┐           │
+│  │ vethA     │    │ vethB     │          │
+│  └────┬─────┘    └────┬─────┘           │
+│       │               │                 │
+│  ┌────┴─────┐    ┌────┴─────┐           │
+│  │ Container A  │ │ Container B  │       │
+│  │ 172.17.0.2   │ │ 172.17.0.3   │      │
+│  └──────────┘    └──────────┘           │
+└─────────────────────────────────────────┘
+```
+
+Containers on the same bridge can communicate with each other by IP. To reach the outside world, Docker uses iptables to masquerade traffic (NAT) through the host's network interface.
+
+**Port mapping** exposes container ports to the host and beyond:
+
+```bash
+docker run -d -p 8080:80 nginx
+```
+
+This maps host port 8080 to container port 80. Traffic arriving at `host:8080` is forwarded (via iptables DNAT rules) to the container's port 80.
+
+Docker also supports **host networking** (container shares the host's network stack, no isolation), **none** (isolated with no network), and **overlay networks** (for multi-host communication in Swarm mode or with third-party plugins).
+
+<ContainerNetworkDemo client:visible />
+
+The demo visualizes the veth pair connection, the bridge, and how packets flow from the internet through port mapping into the container. You can trace a packet's path visually.
+
+## Volumes and Data
+
+Containers are ephemeral by design. When a container is removed, its writable layer is destroyed. Any data written there — logs, uploads, database files — is gone.
+
+**Volumes** are the solution. They mount a directory from the host filesystem into the container, bypassing the container's layered filesystem entirely. Data written to a volume persists beyond the container's lifetime.
+
+Docker supports three types of mounts:
+
+- **Volumes** — managed by Docker, stored in `/var/lib/docker/volumes/`. Preferred because Docker handles backup, migration, and permissions.
+- **Bind mounts** — directly maps a host directory into the container. Useful for development (mount your source code) but has permission issues.
+- **tmpfs mounts** — stored in memory only. Used for secrets or temporary data that must not touch disk.
+
+```bash
+# Named volume (Docker-managed)
+docker volume create my-data
+docker run -d -v my-data:/app/data nginx
+
+# Bind mount (development)
+docker run -d -v $(pwd)/src:/app/src nginx
+
+# tmpfs (in-memory)
+docker run -d --tmpfs /app/cache nginx
+```
+
+Volumes outlive containers. You can share a volume between multiple containers. You can back it up:
+
+```bash
+docker run --rm -v my-data:/data -v $(pwd):/backup alpine \
+  tar czf /backup/my-data.tar.gz -C /data .
+```
+
+**Important**: Never store database data in a container's writable layer. Always use a volume. Database containers (PostgreSQL, MySQL) define volumes in their Dockerfile, but you must ensure the volume is mounted to a persistent location.
+
+<VolumeDemo client:visible />
+
+The demo lets you explore different mount types, write data, delete the container, and see that data persists in volumes but is lost in the container layer.
+
+## Multi-Stage Builds
+
+A common problem: you need build tools (compilers, package managers, dev dependencies) to compile your application, but you do not want those tools in your production image. They add size, surface area for attacks, and unnecessary complexity.
+
+**Multi-stage builds** solve this with a single Dockerfile that uses multiple FROM statements. Each FROM starts a new stage. You can copy artifacts from earlier stages into later ones.
+
+```dockerfile
+# Stage 1: Build
+FROM golang:1.22 AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /app/server
+
+# Stage 2: Runtime
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
+WORKDIR /app
+COPY --from=builder /app/server .
+EXPOSE 8080
+CMD ["./server"]
+```
+
+The final image is based on Alpine, not the Go image. It contains only the compiled binary and CA certificates. The Go compiler, source code, and build cache from the builder stage are discarded.
+
+The result: a production image that is 15-20 MB instead of 1+ GB.
+
+Multi-stage builds work for any compiled language — Go, Rust, C/C++, Java (with the JDK stripped at runtime), and even frontend apps (build with Node, serve with Nginx):
+
+```dockerfile
+# Stage 1: Build frontend
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY package.json .
+RUN npm install
+COPY . .
+RUN npm run build
+
+# Stage 2: Serve with Nginx
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+```
+
+<MultiStageDemo client:visible />
+
+The demo shows a side-by-side comparison of a single-stage image and a multi-stage image. Watch the final size difference — the multi-stage image is dramatically smaller because build-time dependencies are not included.
+
+## Docker Compose
+
+A single container is rarely enough. A web app typically needs a web server, a database, a cache (Redis), and possibly a background worker. Managing these manually with `docker run` commands is cumbersome.
+
+Docker Compose lets you define and run multi-container applications with a single YAML file.
+
+```yaml
+# docker-compose.yml
+version: "3.9"
+
+services:
+  web:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgres://user:pass@db:5432/myapp
+      - REDIS_URL=redis://cache:6379
+    depends_on:
+      - db
+      - cache
+
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: pass
+
+  cache:
+    image: redis:7-alpine
+
+volumes:
+  pgdata:
+```
+
+Start everything with a single command:
+
+```bash
+docker compose up -d
+```
+
+Compose creates a dedicated network for all services. Services find each other by their service name — `db` resolves to the database container's IP, `cache` resolves to the Redis container's IP.
+
+Key Compose features:
+
+- **depends_on** — controls startup order. Docker starts dependencies first, but it does not wait for them to be ready. You need a health check or wait script for that.
+- **volumes** — persistent storage defined at the top level and referenced by services.
+- **environment** — inject configuration without rebuilding the image.
+- **networks** — you can define multiple networks for isolation (frontend vs backend tier).
+- **healthcheck** — Docker checks if the service is actually responding.
+
+```yaml
+  web:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+```
+
+<DockerComposeDemo client:visible />
+
+The demo visualizes a multi-service architecture. Click a service to see its dependencies and details. Start and stop services to see how they interact.
+
+## Registry and Distribution
+
+Images are stored in registries. Docker Hub is the default public registry, but you can use any OCI-compatible registry — Amazon ECR, Google Artifact Registry, GitHub Container Registry, or a self-hosted one.
+
+When you run `docker pull nginx:latest`, Docker does the following:
+
+1. Connects to `registry-1.docker.io` (Docker Hub).
+2. Fetches the **manifest** for `nginx:latest`. The manifest contains the image configuration (architecture, OS) and a list of layer digests.
+3. Checks each layer digest against the local cache. Missing layers are downloaded as compressed tarballs.
+4. Extracts and assembles the layers using overlayfs.
+
+The manifest format (Docker v2 or OCI) looks like:
+
+```json
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+  "config": {
+    "mediaType": "application/vnd.docker.container.image.v1+json",
+    "size": 7023,
+    "digest": "sha256:abc123..."
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+      "size": 32615845,
+      "digest": "sha256:def456..."
+    },
+    {
+      "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+      "size": 54321,
+      "digest": "sha256:789abc..."
+    }
+  ]
+}
+```
+
+**Multi-architecture images** use a manifest list (or OCI index). The list references multiple manifests, one per platform:
+
+```json
+{
+  "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+  "manifests": [
+    {
+      "digest": "sha256:aaa...",
+      "platform": { "architecture": "amd64", "os": "linux" }
+    },
+    {
+      "digest": "sha256:bbb...",
+      "platform": { "architecture": "arm64", "os": "linux" }
+    }
+  ]
+}
+```
+
+When you pull an image on an ARM Mac, Docker automatically selects the ARM64 manifest and downloads only those layers. This is how a single tag works across different machines.
+
+<RegistryPullDemo client:visible />
+
+The demo simulates the pull process. Watch each step — manifest fetch, layer download, extraction — as the image is assembled.
+
+## Container Security
+
+Containers share the host kernel. A vulnerability in the kernel or a misconfiguration can let a container escape to the host. Security is not optional.
+
+**Rootless mode** runs the Docker daemon and containers without root privileges. The container's processes run under the user's UID, not UID 0. This eliminates a whole class of privilege escalation attacks.
+
+**Linux capabilities** are fine-grained permissions. By default, Docker drops most capabilities from containers, keeping only a safe subset. You can add or remove capabilities:
+
+```bash
+docker run --cap-drop=ALL --cap-add=NET_BIND_SERVICE nginx
+```
+
+This drops every capability except binding to privileged ports (< 1024). The container cannot perform any privileged operation — no `ptrace`, no `dac_override`, no `sys_admin`.
+
+**Seccomp** filters restrict the system calls a container can make. Docker ships with a default seccomp profile that blocks around 44 dangerous syscalls (out of 300+). You can create custom profiles:
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "syscalls": [
+    { "names": ["accept", "bind", "listen", "read", "write", "open", "close", "fstat", "exit", "exit_group"], "action": "SCMP_ACT_ALLOW" }
+  ]
+}
+```
+
+```bash
+docker run --security-opt seccomp=custom-profile.json nginx
+```
+
+**Other security best practices:**
+
+- Never run containers as root. Use `USER` in your Dockerfile.
+- Set `readonly` root filesystem: `docker run --read-only nginx`
+- Use `--security-opt no-new-privileges:true` to prevent privilege escalation.
+- Scan images for vulnerabilities with `docker scout`.
+- Keep the host kernel updated — kernel exploits are the most common container escape vector.
+- Use minimal base images (Alpine, distroless, scratch) to reduce attack surface.
+
+<SecurityCapsDemo client:visible />
+
+The demo shows a container with different capability sets. Toggle capabilities on and off and see which operations succeed or fail.
+
+## Image Optimization
+
+Small images are faster to pull, faster to scan, and have fewer vulnerabilities. Optimization is a skill worth mastering.
+
+**Use minimal base images:**
+
+- `alpine` — ~5 MB. Uses musl libc instead of glibc. Most software works, but some native extensions fail.
+- `distroless` — Google's minimal images. Contains only the runtime (e.g., java, python, node) and nothing else — no shell, no package manager, no utilities.
+- `scratch` — truly empty. You need a statically linked binary. Common for Go and Rust deployments.
+
+```dockerfile
+# Node on distroless
+FROM node:20-distroless
+WORKDIR /app
+COPY --from=builder /app/dist .
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+**Use .dockerignore** to exclude unnecessary files from the build context:
+
+```
+node_modules
+.git
+*.md
+Dockerfile
+.dockerignore
+.gitignore
+.env
+dist
+```
+
+This prevents large, irrelevant files from being sent to the Docker daemon during build.
+
+**Layer count matters less than layer size.** Docker used to have a hard limit of 127 layers, but modern versions have a much higher limit. The real concern is the total size of changed layers between builds. Merge RUN commands when they produce temporary files:
+
+```dockerfile
+# BAD: two layers, first one contains the package cache
+RUN apt-get update
+RUN apt-get install -y curl && apt-get clean
+
+# GOOD: single layer, no leftover cache
+RUN apt-get update && apt-get install -y curl \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+**Multi-stage builds** (covered in section 11) are the single most effective optimization for compiled languages.
+
+**Compress assets** in your build steps. Minify JS and CSS, compress images, strip debug symbols from binaries. Every byte saved is pull time saved.
+
+<ImageOptimizeDemo client:visible />
+
+The demo compares image sizes across different base images and optimization strategies. Toggle options to see the effect on final image size.
+
+## Self-Check
+
+Before you close this page, make sure you can answer these questions:
+
+- [ ] Can you explain the difference between an image and a container using the blueprint/house analogy?
+- [ ] Why does `COPY package.json .` before `RUN npm install` improve build performance?
+- [ ] What is the difference between namespaces (what a container can see) and cgroups (what it can use)?
+- [ ] How do veth pairs connect a container to the Docker bridge network?
+- [ ] Why does data in a container's writable layer disappear when the container is removed?
+- [ ] How do multi-stage builds reduce final image size?
+- [ ] What does the `depends_on` field do in Docker Compose?
+- [ ] When you pull an ARM image from Docker Hub, how does Docker know which layers to download?
+- [ ] Why is running containers as root a security risk? What capabilities does `--cap-drop=ALL` protect against?
+- [ ] **Challenge**: Given the following Dockerfile, identify the caching issue and rewrite it for maximum cache efficiency:
+
+```dockerfile
+FROM node:20-alpine
+COPY . .
+RUN npm install
+RUN npm run build
+CMD ["node", "dist/server.js"]
+```
+
+(Hint: which files change the most often? Which layers should be cached as long as possible? How would you use multi-stage builds here?)
+
+If you got them all, you understand Docker and containers. If not, revisit the demos above — each one illustrates a specific concept that builds on the previous ones.
