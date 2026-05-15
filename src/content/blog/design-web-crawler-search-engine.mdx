@@ -1,0 +1,953 @@
+---
+title: "Design a Web Crawler & Search Engine: Crawling, Indexing, and Ranking"
+description: "A complete system design walkthrough for a web crawler and search engine — URL frontier, politeness policies, deduplication with Bloom filters, inverted index, PageRank, and query serving at scale."
+date: 2026-05-15T01:00:00
+tags: ["system-design", "interview", "search-engine", "web-crawler", "design-problem"]
+---
+
+import CrawlerRequirementsDemo from '../../components/demos/CrawlerRequirementsDemo'
+import UrlFrontierDemo from '../../components/demos/UrlFrontierDemo'
+import BloomFilterDedupDemo from '../../components/demos/BloomFilterDedupDemo'
+import InvertedIndexDemo from '../../components/demos/InvertedIndexDemo'
+import PageRankDemo from '../../components/demos/PageRankDemo'
+import QueryServingDemo from '../../components/demos/QueryServingDemo'
+import SearchArchitectureDemo from '../../components/demos/SearchArchitectureDemo'
+
+You type a query into your search bar. Before you finish typing, suggestions populate. You press Enter, and in under 300 milliseconds, Google returns a list of pages ranked by relevance and authority, served from an index of over 60 trillion pages. How does that work? This is the single most ambitious system design question you can face in an interview: design a web crawler and search engine from scratch.
+
+This walkthrough covers the complete pipeline — crawling billions of pages without overwhelming servers, indexing their content into a queryable data structure, ranking results by relevance and authority, and serving queries at global scale. By the end, you will understand every component between a raw URL and a ranked search result page.
+
+## Understanding the Problem
+
+A web search engine has three distinct phases that run asynchronously from each other.
+
+**Crawling** discovers pages on the web and downloads their content. The crawler starts with a seed set of URLs, fetches each page, extracts all hyperlinks, and adds new URLs to the crawl frontier. This repeats continuously because the web changes — pages appear, disappear, and get updated.
+
+**Indexing** takes downloaded page content and transforms it into a data structure that supports fast keyword lookup. The core structure is an inverted index: a mapping from every word to the list of documents that contain it, along with positional information for ranking.
+
+**Serving** takes a user's query, parses it, looks up matching documents in the inverted index, scores them by relevance, and returns the top results. This must happen in a few hundred milliseconds even though the index spans billions of pages.
+
+Let us use a concrete example throughout this walkthrough. We crawl a small blog called "Alice's Kitchen." The page contains: "Alice bakes sourdough bread with organic flour." This one sentence will appear in our crawling queue, get fetched, get indexed under every word except stop words ("a," "the," "with"), and become searchable by anyone who types "sourdough bread recipe."
+
+## Requirements Gathering
+
+In an interview, the first question is always: what are we building, and what are the constraints?
+
+### Functional Requirements
+
+1. **Crawl** billions of pages from the web, respecting robots.txt and crawl-delay directives
+2. **Store** downloaded page content and metadata (title, URL, fetch time, content hash)
+3. **Index** page content into an inverted index supporting full-text search
+4. **Rank** results by relevance (TF-IDF, BM25) and authority (PageRank)
+5. **Serve** queries with under 300ms p99 latency
+6. **Freshness** re-crawl important pages daily, less important pages weekly
+7. **Deduplication** detect near-duplicate content (spam, boilerplate) and index only unique pages
+
+### Non-Functional Requirements
+
+1. **Scalability** handle 60+ trillion pages and tens of thousands of queries per second
+2. **Politeness** never overload a single server with too many requests
+3. **Availability** 99.99% uptime for the serving layer (crawling can tolerate downtime)
+4. **Correctness** no stale or broken results in the top 10
+5. **Spam resistance** demote link farms, keyword stuffing, and other manipulation
+
+### Scale Numbers
+
+- **Pages to crawl**: 60+ trillion (Google's index as of 2024)
+- **New pages per day**: ~500 million
+- **Average page size**: ~500KB text + HTML
+- **Crawl bandwidth**: ~200-500 TB/day
+- **Queries per second**: ~100,000 peak
+- **Index size**: ~100 PB after compression
+
+### Out of Scope
+
+Personalized search, image/video search, news search, real-time index updates, spell correction, query autocomplete, and ads ranking. These are important features but out of scope for a focused system design interview.
+
+<CrawlerRequirementsDemo client:visible />
+
+## URL Structure and HTTP Basics
+
+Before we design the crawler, we need to understand what we are fetching. Every crawl starts with a URL.
+
+### Anatomy of a URL
+
+```
+https://alice-kitchen.blog/recipes/sourdough?page=2#tips
+|______| |_______________| |_______/ |____| |__|
+scheme       hostname        path    query  fragment
+```
+
+- **Scheme**: `https` — the protocol for the request
+- **Hostname**: `alice-kitchen.blog` — resolved to an IP via DNS
+- **Path**: `/recipes/sourdough` — the resource on the server
+- **Query**: `?page=2` — parameters sent to the server
+- **Fragment**: `#tips` — not sent to the server, used client-side
+
+A URL is a string that identifies a resource and tells the client how to access it. The hostname is the most critical part for politeness — it determines which server we are hitting. All URLs with the same hostname share the same rate limit.
+
+### HTTP Request-Response Lifecycle
+
+When the crawler fetches `https://alice-kitchen.blog/recipes/sourdough`, this happens:
+
+1. DNS resolution: `alice-kitchen.blog` → `203.0.113.42` (cached to avoid repeated lookups)
+2. TCP handshake: SYN → SYN-ACK → ACK (reused via keep-alive)
+3. TLS handshake if HTTPS: certificate exchange, key agreement
+4. HTTP request: `GET /recipes/sourdough HTTP/2`
+5. Server responds with HTML content and headers:
+   - `Content-Type: text/html; charset=utf-8`
+   - `Content-Length: 45820`
+   - `Last-Modified: Tue, 14 May 2026 14:30:00 GMT`
+   - `ETag: "abc123def"`
+6. The crawler stores the raw HTML and extracts metadata from headers
+
+```python
+import requests
+
+resp = requests.get(
+    "https://alice-kitchen.blog/recipes/sourdough",
+    headers={"User-Agent": "MyCrawler/1.0 (bot; contact@example.com)"},
+    timeout=10,
+)
+
+print(f"Status: {resp.status_code}")
+print(f"Last-Modified: {resp.headers.get('Last-Modified')}")
+print(f"Content length: {len(resp.text)} bytes")
+```
+
+The crawler logs the HTTP status code. A `200` means the page was fetched successfully. A `301` or `302` means the page moved — the crawler follows the redirect (up to a max of 5 hops to prevent redirect loops). A `404` means the page is gone — it gets removed from the index. A `503` means the server is overloaded — we back off and retry later.
+
+## Capacity Estimation
+
+We estimate storage, bandwidth, and computational resources using back-of-the-napkin math.
+
+### Assumptions
+
+We design for a crawl rate of 20 billion pages per month with a target re-crawl frequency of 30 days for average pages and 1 day for high-importance pages (such as news sites).
+
+**Crawl rate:** 20B pages / 30 days / 86,400 sec/day = ~7,700 pages/sec sustained. Peak is 3x that for burst crawl capacity: ~23,000 pages/sec.
+
+**Bandwidth:** Average page size of 500KB yields 7,700 pages/sec x 500KB = ~3.85 GB/sec = ~333 TB/day.
+
+**Storage for page content:** 20 billion pages x 500KB = ~10 PB per month. With compression (3:1 ratio on text), this drops to ~3.3 PB per month. We retain raw content for ~6 months (20 PB total) and compressed content indefinitely (~40 PB per year).
+
+**Storage for index:** The inverted index is about 10-20% of the raw content size after compression. With 60 trillion pages and aggressive compression (variable-byte encoding, delta encoding, bit-packing), the index is roughly 100 PB.
+
+**Query load:** 100,000 queries per second peak. Each query searches the index and returns the top 10 results. If each query scans ~10,000 posting list entries and scores them, that is 1 billion posting list lookups per second.
+
+These numbers tell us one thing: brute force does not work. You cannot linear-scan 60 trillion pages per query. The entire system is an exercise in pre-computation, partitioning, and caching.
+
+## URL Frontier
+
+The URL frontier is the data structure that holds URLs waiting to be crawled. It is the crawler's work queue, and its design determines the crawl's efficiency, freshness, and politeness.
+
+### Why Not a Simple FIFO Queue?
+
+A first-in-first-out queue would fail for three reasons. First, priority matters. A breaking news article should be crawled within minutes, while an archived forum post can wait a week. Second, politeness requires per-domain delays — pulling URLs from a global FIFO makes it impossible to enforce gaps between requests to the same server. Third, a uniform queue ignores the diminishing returns of crawling certain domains too deeply — we want breadth before depth.
+
+### Priority Queue by Host
+
+The frontier uses a priority queue keyed by hostname. Each domain has its own sub-queue. A scheduler dequeues URLs by selecting the highest-priority domain that is not currently in its cooldown period.
+
+```
+Crawl Frontier
+├── nytimes.com (priority: 1.0, last_fetch: 12:00:00)
+│   ├── /world/article1
+│   ├── /politics/article2
+│   └── /tech/article3
+├── alice-kitchen.blog (priority: 0.3, last_fetch: 08:00:00)
+│   ├── /recipes/sourdough
+│   └── /about
+├── random-forum.com (priority: 0.1, last_fetch: never)
+│   └── /post/12345
+```
+
+The priority is a score derived from:
+- **PageRank** of known URLs from this domain (higher = more important)
+- **Update frequency** inferred from historical crawl data
+- **Domain authority** measured by external links pointing to it
+- **Manual boost** for news sources, Wikipedia, government sites
+
+<UrlFrontierDemo client:visible />
+
+### Frontier Algorithm
+
+The scheduler runs a tight loop:
+
+1. Select the domain with the highest priority whose cooldown timer has expired
+2. Dequeue one URL from that domain's sub-queue
+3. Dispatch the fetch to a worker thread
+4. Reset the cooldown timer for that domain (typically 1-10 seconds)
+5. On fetch completion, extract new URLs and enqueue them into the appropriate domain sub-queues
+
+```python
+import heapq
+import time
+
+class UrlFrontier:
+    def __init__(self):
+        self.domains = {}
+        self.heap = []
+
+    def enqueue(self, url, priority=0.5):
+        domain = url.hostname
+        if domain not in self.domains:
+            self.domains[domain] = DomainQueue(domain, priority)
+            heapq.heappush(self.heap, (-priority, domain))
+        self.domains[domain].add(url)
+
+    def dequeue(self):
+        while self.heap:
+            neg_prio, domain = heapq.heappop(self.heap)
+            dq = self.domains[domain]
+            if dq.can_fetch():
+                url = dq.pop()
+                heapq.heappush(self.heap, (-dq.priority, domain))
+                return url
+            heapq.heappush(self.heap, (-dq.priority, domain))
+            time.sleep(0.1)
+        return None
+```
+
+### Distributed Frontier
+
+At Google scale, the frontier is distributed across hundreds of machines. Each machine owns a subset of domains (sharded by hashed hostname). A coordination service (like Borg or Kubernetes) assigns domain ranges to frontier workers and rebalances on failure. No two machines hold the same domain, so the per-domain politeness logic is trivially enforced without distributed locks.
+
+## Crawl Politeness Policy
+
+The politeness policy is what separates a good crawler from a denial-of-service attack. A misconfigured crawler can take down a small blog by firing 1,000 concurrent requests at it. Polite crawlers are the reason the web works for everyone.
+
+### Per-Domain Delay
+
+The fundamental rule: never fetch two pages from the same domain faster than a configured minimum delay. For most sites, 5-10 seconds is respectful. For large sites like Wikipedia or GitHub, the crawl-delay is negotiated via robots.txt and can be as low as 1 second.
+
+```python
+class DomainQueue:
+    def __init__(self, domain, priority):
+        self.domain = domain
+        self.priority = priority
+        self.urls = []
+        self.last_fetch = 0
+        self.min_delay = 5  # seconds
+
+    def can_fetch(self):
+        return time.time() - self.last_fetch >= self.min_delay
+
+    def pop(self):
+        self.last_fetch = time.time()
+        return self.urls.pop(0)
+```
+
+### Crawl-Delay Header
+
+The server can tell the crawler to slow down by returning a `Retry-After` header or by including a `Crawl-Delay` directive in robots.txt:
+
+```
+User-agent: *
+Crawl-delay: 10
+```
+
+The crawler respects this by setting `min_delay = 10` for that domain. If the server returns HTTP 429 (Too Many Requests), the crawler exponentially backs off.
+
+### Concurrent Connections Per Domain
+
+Many browsers and HTTP libraries let you open 6 concurrent connections to a single host. A polite crawler limits this to 1 or 2. More connections means faster crawling of a single site but higher load on the server. The standard practice is:
+
+- Small/unknown sites: 1 connection, 10s delay
+- Medium sites: 2 connections, 5s delay
+- Large sites (Wikipedia, GitHub): 4 connections, 1-2s delay
+- CDN-backed sites: 6 connections, no artificial delay (the CDN is designed for this)
+
+### Robot Exclusion Protocol
+
+Every polite crawler reads `robots.txt` before crawling a domain. The file lives at the root of the domain:
+
+```
+https://alice-kitchen.blog/robots.txt
+```
+
+```
+User-agent: *
+Disallow: /admin/
+Disallow: /private/
+Allow: /recipes/
+Crawl-delay: 5
+
+Sitemap: https://alice-kitchen.blog/sitemap.xml
+```
+
+The crawler fetches robots.txt once per domain (cached for 24 hours) and checks every URL against the rules before fetching. Disallowed URLs are dropped from the frontier. The sitemap URL is added to the frontier as a high-priority URL (sitemaps list all pages the site wants crawled).
+
+## Deduplication with Bloom Filters
+
+The web recycles content constantly. The same page might be reachable from multiple URLs (`example.com/page`, `example.com/page?ref=twitter`, `example.com/page#section`). The same article might be syndicated across ten different news sites. Crawling duplicates wastes bandwidth, storage, and indexing capacity. We must detect and discard them.
+
+### Content Hashing
+
+The simplest deduplication is by content hash. When a page is fetched, we compute its SHA-256 hash and store it in a lookup table. If a new page has the same hash, it is a near-certain duplicate.
+
+```python
+import hashlib
+
+def content_hash(html: str) -> str:
+    return hashlib.sha256(html.encode("utf-8")).hexdigest()
+```
+
+But storing every hash for 60 trillion pages in a hash table would require hundreds of terabytes of memory. Even a disk-based lookup would be too slow for the 7,700 pages/sec crawl rate.
+
+### Bloom Filters to the Rescue
+
+A Bloom filter is a probabilistic data structure that answers "have I seen this element before?" with zero false negatives and a tunable false positive rate. It uses a bit array and multiple hash functions.
+
+**How it works:**
+
+1. Start with an array of `m` bits, all set to 0
+2. To add an element, hash it with `k` different hash functions; set the bits at all `k` positions to 1
+3. To check for membership, hash the element with the same `k` functions; if any bit is 0, the element is definitely new. If all bits are 1, the element is probably a duplicate.
+
+**False positives are possible** (two different elements might hash to the same set of bit positions), but false negatives are not (if we added it, every check will find all bits set). The false positive rate is controlled by `m` (array size) and `k` (number of hash functions).
+
+**For our crawler:** We use a Bloom filter with `m = 10` bits per URL and `k = 7` hash functions for 60 trillion URLs — that is about 75 TB of memory, which fits on a cluster of ~20 machines with 4 TB of RAM each.
+
+```python
+import mmh3
+import math
+
+class BloomFilter:
+    def __init__(self, capacity: int, error_rate: float = 0.001):
+        self.size = int(-capacity * math.log(error_rate) / (math.log(2) ** 2))
+        self.num_hashes = int((self.size / capacity) * math.log(2))
+        self.bits = bytearray(self.size // 8 + 1)
+
+    def _hashes(self, item: str):
+        h1 = mmh3.hash128(item, 0)
+        h2 = mmh3.hash128(item, 1)
+        return [(h1 + i * h2) % self.size for i in range(self.num_hashes)]
+
+    def add(self, item: str):
+        for pos in self._hashes(item):
+            self.bits[pos // 8] |= 1 << (pos % 8)
+
+    def contains(self, item: str) -> bool:
+        for pos in self._hashes(item):
+            if not (self.bits[pos // 8] & (1 << (pos % 8))):
+                return False
+        return True
+```
+
+### URL Normalization Before Hashing
+
+Before checking the Bloom filter, we normalize URLs. Normalization collapses URLs that point to the same content but have different string representations:
+
+```python
+from urllib.parse import urlparse, urlunparse
+
+def normalize(url: str) -> str:
+    parsed = urlparse(url)
+    # lowercase scheme and host
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    # remove default ports
+    if netloc.endswith(":80") and scheme == "http":
+        netloc = netloc[:-3]
+    if netloc.endswith(":443") and scheme == "https":
+        netloc = netloc[:-4]
+    # strip fragment
+    return urlunparse((scheme, netloc, parsed.path, parsed.params, parsed.query, ""))
+```
+
+Normalization catches canonical duplicates like `HTTP://Example.com:80/Page#ref` → `http://example.com/Page`.
+
+### Near-Duplicate Detection
+
+Exact content hashing misses near-duplicates — pages with the same article but different ads, different layouts, or boilerplate. For near-duplicate detection, we use SimHash (from Google's seminal paper), which generates fingerprints such that similar documents have similar fingerprints. Two documents whose SimHash fingerprints differ by fewer than `k` bits are likely near-duplicates.
+
+<BloomFilterDedupDemo client:visible />
+
+### SimHash in 30 Seconds
+
+SimHash works by hashing each term in the document into a 64-bit fingerprint, then weighting each bit position by the term frequency. If the bit is 1 in the term's hash, add the weight. If 0, subtract. At the end, each position that is positive becomes a 1 in the final fingerprint.
+
+Two documents that are textually similar will have most of their substantial terms in common, so their 64-bit fingerprints will agree on most bit positions. Pages that are within 3 bits of each other by Hamming distance are treated as near-duplicates and only one is indexed.
+
+## Inverted Index Construction
+
+The inverted index is the heart of the search engine. It maps every distinct word (token) to the list of documents containing that word, plus the positions within each document where the word appears. This is the data structure that makes search possible in milliseconds instead of hours.
+
+### Forward Index vs. Inverted Index
+
+When we crawl a page, we store it as a **forward index**: document ID → list of terms. The forward index is the raw data. But to answer "which documents contain 'sourdough'?" we need the reverse mapping. That is the **inverted index**: term → list of document IDs.
+
+```
+Forward Index:
+Doc 1: "Alice bakes sourdough bread with organic flour"
+Doc 2: "Sourdough starter made with organic grapes"
+Doc 3: "Bread recipe with simple ingredients"
+
+Inverted Index (simplified):
+"alice"     → [1]
+"bakes"     → [1]
+"sourdough" → [1, 2]
+"bread"     → [1, 3]
+"organic"   → [1, 2]
+"flour"     → [1]
+"starter"   → [2]
+"grapes"    → [2]
+"recipe"    → [3]
+"ingredients" → [3]
+```
+
+### Indexing Pipeline
+
+The indexing pipeline processes crawled pages in batches:
+
+1. **Tokenization**: Split the HTML text into tokens (words) by whitespace and punctuation
+2. **Normalization**: Lowercase all tokens, strip diacritics
+3. **Stop word removal**: Filter common words ("the", "a", "is", "at") that carry no search value
+4. **Stemming**: Reduce words to their root form ("baking" → "bake", "sourdoughs" → "sourdough")
+5. **Position recording**: Record the position of each term within the document for proximity scoring
+6. **Document frequency**: Count how many documents contain each term (used for IDF weighting)
+7. **Posting list construction**: Build the inverted list for each term — a sorted list of (doc_id, [positions])
+
+<InvertedIndexDemo client:visible />
+
+### Posting List Storage
+
+Each posting list is stored as a sorted array of document IDs with their position lists. Storage is optimized with:
+
+**Delta encoding:** Instead of storing absolute document IDs, store the difference from the previous ID. `[42, 100, 103]` becomes `[42, 58, 3]`. Since document IDs are assigned sequentially and documents touching the same term tend to cluster, deltas are small.
+
+**Variable-byte encoding:** Small integers use fewer bytes. The value `3` fits in one byte, `1,000` fits in two bytes. For posting lists with millions of entries, most deltas are in the range 1-127, so the average is under 1.5 bytes per entry.
+
+**Bit-packing:** For very dense posting lists (common terms like "the"), we pack multiple entries into a single machine word using a fixed number of bits per entry.
+
+### Positional Index
+
+We also store positions within each document for each occurrence of the term:
+
+```
+"sourdough" → [(doc_1, pos_3), (doc_2, pos_1)]
+```
+
+Positions enable phrase search. The query `"sourdough bread"` requires the index to find documents where "sourdough" and "bread" appear with adjacent positions. Positional indexes triple the index size but enable proximity scoring and phrase matching.
+
+### Building the Index at Scale
+
+The index is built on a MapReduce-style pipeline:
+
+1. **Map phase**: Each mapper reads a batch of documents, tokenizes them, and emits `(term, doc_id, position)` tuples
+2. **Shuffle phase**: All tuples with the same term are routed to the same reducer
+3. **Reduce phase**: Each reducer sorts the tuples by doc_id, builds the delta-encoded posting list, and writes it to the index segment
+
+Index segments are immutable files. Every few hours, a new segment is created. Periodically, segments are merged into larger segments (compaction) to keep the number of segments manageable. This is the same approach used in LSM trees and Lucene.
+
+## PageRank Algorithm
+
+PageRank is the algorithm that made Google better than every search engine that came before it. While keyword matching tells you whether a page is relevant, PageRank tells you whether a page is authoritative. The fundamental insight: a link from page A to page B is a vote of confidence. The more high-quality votes a page receives, the more authoritative it is.
+
+### The Intuition
+
+Imagine a random web surfer. They start on a random page. At each step, they either click a random link on the current page (probability `d`, typically 0.85), or they get bored and jump to a completely random page (probability `1 - d`, the damping factor).
+
+The PageRank of a page is the probability that our random surfer is on that page at any given moment. Pages with many incoming links from other important pages have high PageRank. Pages with no incoming links have negligible PageRank.
+
+### The Formula
+
+For a page `A` with incoming links from pages `B_1, B_2, ..., B_n`:
+
+```
+PR(A) = (1 - d) + d * (PR(B_1)/C(B_1) + PR(B_2)/C(B_2) + ... + PR(B_n)/C(B_n))
+```
+
+Where:
+- `PR(A)` is the PageRank of page A
+- `d` is the damping factor (typically 0.85)
+- `PR(B_i)` is the PageRank of page B_i (which links to A)
+- `C(B_i)` is the total number of outbound links from page B_i
+
+PageRank is distributed equally across all outbound links from a page. If Wikipedia links to your page from a page that has 200 outbound links, you get 1/200 of Wikipedia's PageRank. That is still far more valuable than a link from a random blog with ten outbound links.
+
+### Iterative Computation
+
+PageRank is computed iteratively. Start with all pages at rank 1/N (N = total pages). In each iteration, redistribute rank according to the formula. The algorithm converges after about 50-100 iterations.
+
+```python
+def pagerank(graph, damping=0.85, iterations=50):
+    n = len(graph)
+    pr = {page: 1.0 / n for page in graph}
+
+    for _ in range(iterations):
+        new_pr = {}
+        for page in graph:
+            rank_sum = 0.0
+            for incoming in graph[page].incoming_links:
+                rank_sum += pr[incoming] / len(graph[incoming].outgoing_links)
+            new_pr[page] = (1 - damping) + damping * rank_sum
+        pr = new_pr
+
+    return pr
+```
+
+In practice, the computation is run on a distributed system (MapReduce or a Pregel-style graph processor). The web graph is partitioned across machines. Each iteration requires a shuffle phase where every page sends its rank contribution to all pages it links to. For a web graph of 60 trillion edges, each iteration takes several hours on thousands of machines.
+
+### PageRank in Practice at Google
+
+Google does not compute PageRank on the entire web every day. The computation is incremental: new pages are seeded with a baseline rank derived from the host's existing rank. The full PageRank is recomputed periodically (every few weeks) while incremental updates keep day-to-day results fresh.
+
+{/* 12: start mastery layer */}
+
+<PageRankDemo client:visible />
+
+### Personalization and Spam
+
+Raw PageRank is vulnerable to manipulation. Link farms — networks of pages that all link to each other — artificially inflate rank. Google's refinements include:
+
+- **Topic-sensitive PageRank**: Separate rank vectors per topic category; multiply by query relevance
+- **TrustRank**: Seed with a set of manually verified high-trust pages (universities, government sites), propagate trust outward. Spam sites have short trust distances
+- **Spam mass**: Pages whose PageRank comes disproportionately from suspicious sources are flagged and demoted
+
+## Query Serving Pipeline
+
+When you type "sourdough bread recipe" and press Enter, a complex pipeline executes within 300 milliseconds.
+
+### Step 1: Parse
+
+The query string is tokenized, normalized, and stemmed just like documents were during indexing:
+
+```
+"sourdough bread recipe"
+  → ["sourdough", "bread", "recipe"]        # tokenize
+  → ["sourdough", "bread", "recipe"]        # already canonical
+  → ["sourdough", "bread", "recip"]         # stem (Porter stemmer)
+```
+
+Stop words are retained in queries (unlike indexing) because they might be meaningful for phrase search — "to be or not to be" should match exactly.
+
+### Step 2: Look Up in the Inverted Index
+
+Each query term is looked up in the inverted index to retrieve its posting list:
+
+```
+"sourdough" → [doc_1(pos_3), doc_2(pos_1)]
+"bread"     → [doc_1(pos_4), doc_3(pos_2)]
+"recip"     → [doc_3(pos_3)]
+```
+
+The posting lists are compressed (delta-encoded, variable-byte) and must be decompressed on the fly. Since the index is sharded across hundreds of machines, lookup requires a scatter-gather: each shard receives the query terms, retrieves its local posting lists, and returns partial results.
+
+### Step 3: Score
+
+Each candidate document is scored using a combination of signals:
+
+**BM25 (term frequency weighting):**
+```
+BM25_score = sum over query terms:
+  log((N - df + 0.5) / (df + 0.5)) *
+  (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (dl / avgdl)))
+```
+
+Where:
+- `N` = total number of documents
+- `df` = document frequency of the term (how many docs contain it)
+- `tf` = term frequency in the document (how many times the term appears)
+- `dl` = document length
+- `avgdl` = average document length across the corpus
+- `k1`, `b` = tuning parameters (typically k1=1.2, b=0.75)
+
+BM25 is the modern replacement for TF-IDF. It handles document length normalization better — a 1,000-word page that mentions "sourdough" three times is more relevant for that query than a 10,000-word page that mentions it three times.
+
+**Score components in practice:**
+
+- BM25 text match score (title matches weighted 5x, body matches 1x)
+- PageRank authority score (log-scaled)
+- URL quality (shorter URLs, fewer path segments, relevant keywords in URL)
+- Freshness boost (pages updated within the last week get a 10% multiplier)
+- Spam penalty (sites on the spam blacklist are demoted)
+
+```python
+from math import log
+
+def bm25(
+    term: str,
+    doc_freq: int,          # df: how many docs contain this term
+    term_freq: int,          # tf: how many times in this doc
+    doc_len: int,            # document length in words
+    avg_doc_len: float,      # average doc length across corpus
+    total_docs: int,         # N
+    k1: float = 1.2,
+    b: float = 0.75,
+) -> float:
+    idf = log((total_docs - doc_freq + 0.5) / (doc_freq + 0.5) + 1.0)
+    tf_norm = (term_freq * (k1 + 1)) / (term_freq + k1 * (1 - b + b * (doc_len / avg_doc_len)))
+    return idf * tf_norm
+
+def rank_documents(query_terms, candidate_docs, index_stats):
+    scored = []
+    for doc_id, doc_info in candidate_docs.items():
+        score = 0.0
+        for term in query_terms:
+            if term in doc_info.postings:
+                score += bm25(term, **doc_info.postings[term], **index_stats)
+        score += doc_info.pagerank * 0.15  # authority component
+        score *= doc_info.freshness_multiplier
+        scored.append((doc_id, score))
+    scored.sort(key=lambda x: -x[1])
+    return scored[:10]
+```
+
+<QueryServingDemo client:visible />
+
+### Step 4: Generate Snippets
+
+The top 10 results need snippets — a few lines of context showing why this page matches the query. Snippet generation extracts the text around the first occurrence of each query term in the document, highlighting the matched terms. Google stores positional index data specifically for this purpose. The snippet is extracted from the cached page content, not the live web.
+
+### Step 5: Return
+
+The search results page is constructed as an HTML or JSON response containing the URL, title, snippet, and metadata for each of the top 10 results. The response is cached at the CDN and edge layers for popular queries. Google estimates that 30-40% of queries have been seen before — they come from the cache without touching the index.
+
+### Serving Infrastructure
+
+To achieve 300ms p99 latency at 100,000 QPS, the serving tier uses:
+
+- **Replicated index shards**: The index is replicated across multiple data centers. A query is routed to the nearest data center by geoDNS.
+- **Two-tier lookup**: First check a small, fast "early termination" index (top documents per term). If the early results have high confidence scores from cached signals, skip the full index lookup.
+- **Result cache**: Redis clusters cache results for popular queries. Cache hit rate is 30-40% for tail queries and 80%+ for head queries.
+- **Precomputed top-10 lists**: For common single-term queries ("Facebook," "YouTube"), we precompute the top 10 results so the query server returns them without index access.
+
+## High-Level Architecture
+
+Putting it all together, the search engine architecture has four layers:
+
+### Crawling Layer
+
+```
+[Seed URLs] → [URL Frontier] → [Fetcher Workers] → [Content Store]
+                   ↑                                      |
+                   |                   [Link Extractor] ←─┘
+                   |                        |
+                   +←─── [New URLs] ←──────+
+                                        |
+                                   [Bloom Filter]
+                                        |
+                                   [Dedup Check]
+                                        |
+                                   [URL Frontier]
+```
+
+The fetcher workers are a pool of ~10,000 machines, each maintaining persistent HTTP connections to thousands of domains. The fetcher pool is managed by a cluster scheduler. When a domain becomes slow (high latency, packet loss), the fetcher migrates those connections to a different worker.
+
+### Indexing Layer
+
+```
+[Content Store] → [Document Processor] → [Token Stream] → [Indexer Workers]
+                      |                        |
+                 [HTML Parser]          [Map: term→(doc,pos)]
+                      |                        |
+                 [Text Extraction]        [Shuffle by term]
+                      |                        |
+                 [SimHash Check]          [Reduce: build posting list]
+                      |                        |
+                 [Near-Dup Reject]        [Index Segment Writer]
+                                              |
+                                         [Segment Store]
+                                              |
+                                         [Merged Index]
+```
+
+### Serving Layer
+
+```
+[Client]
+   |
+[Load Balancer] → [Query Server] → [Query Parser]
+                       |                |
+                  [Result Cache]   [Scatter-Gather]
+                       |                |
+                       |          [Index Shards]
+                       |                |
+                       |          [Score Workers]
+                       |                |
+                       +───[Top-K Merge]──+
+                            |
+                       [Snippet Generator]
+                            |
+                       [Response Builder]
+                            |
+                       [CDN Cache]
+```
+
+### Storage Layer
+
+```
+Raw Content (S3 / HDFS)
+  ├── Uncompressed: ~20 PB (last 6 months)
+  └── Compressed: ~40 PB/year (archived indefinitely)
+
+Compressed Index (distributed file system)
+  ├── Posting lists: ~100 PB
+  ├── Document metadata: ~10 PB
+  └── PageRank scores: ~500 GB
+
+Cache Tier (Redis / Memcached)
+  ├── Result cache: ~10 TB
+  ├── Top-100 per term: ~5 TB
+  └── Snippet cache: ~2 TB
+
+Metadata Databases (Bigtable / Spanner)
+  ├── robots.txt cache
+  ├── Crawl history and priorities
+  └── URL→doc_id mapping
+```
+
+<SearchArchitectureDemo client:visible />
+
+## Incremental Crawling and Freshness
+
+The web is not static. Pages change, move, and disappear. A one-time crawl is useless within days. The challenge is deciding what to re-crawl, how often, and in what order.
+
+### Freshness vs. Age
+
+A page's "freshness" is how well the crawled version matches the live version. A page's "age" is how long since it was last crawled. The goal is to keep freshness high and age low for important pages while not wasting resources on static content.
+
+### ChangeRate Estimation
+
+The crawler estimates each page's change rate from historical crawl data. If a page has changed on 3 of the last 4 crawls, the change rate is 0.75. Pages with high change rates and high PageRank are re-crawled frequently.
+
+```python
+def next_crawl_time(page, now):
+    change_rate = page.changes_seen / page.total_crawls
+    importance = page.pagerank * page.domain_authority
+    # High change rate + high importance = crawl every few hours
+    # Low change rate + low importance = crawl every few weeks
+    interval_hours = max(1, (12 / (change_rate * importance + 0.01)))
+    return page.last_crawled + timedelta(hours=interval_hours)
+```
+
+### Prioritized Re-Crawl Queue
+
+The re-crawl queue is a priority queue ordered by `next_crawl_time`. A background scheduler continuously picks the page with the earliest `next_crawl_time`, re-fetches it, compares content hash with the stored version, and updates the index if the content changed. If the content is unchanged, the `next_crawl_time` is extended (the page is more static than we thought). If the content changed and we missed a change, the `next_crawl_time` is shortened.
+
+### Deep vs. Shallow Crawl
+
+Not all pages from the same domain need the same frequency. A blog's homepage (linked from everywhere) might be crawled daily, while an archived post from 2012 might be crawled quarterly. The depth-aware frontier tracks the URL path depth:
+
+- **Depth 0-1 (homepage, about, contact)**: High urgency crawl every 1-7 days
+- **Depth 2-3 (recent articles, category pages)**: Medium urgency crawl every 7-30 days
+- **Depth 4+ (archived posts, old pages)**: Low urgency crawl every 30-90 days
+
+### Sitemap-Driven Crawling
+
+Sitemaps tell the crawler exactly what a site considers important:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://alice-kitchen.blog/recipes/sourdough</loc>
+    <lastmod>2026-05-14</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://alice-kitchen.blog/about</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.3</priority>
+  </url>
+</urlset>
+```
+
+The crawler uses `priority`, `changefreq`, and `lastmod` from the sitemap as initial values, then adjusts based on observed behavior. A site that claims `weekly` changefreq but has not changed in 6 months gets automatically downgraded.
+
+## Crawling at Google Scale
+
+Google's crawler (Googlebot) runs at a scale that is hard to comprehend. Here are the real engineering decisions that make it work.
+
+### The Scale
+
+- **60 trillion pages** in the index, growing by ~500 million pages per day
+- **Bandwidth**: Hundreds of TB per day consumed by crawling
+- **Hardware**: Tens of thousands of machines dedicated to crawling
+- **Crawl queue**: Stored in a distributed system similar to Borg or Kubernetes, with automatic resharding when machines fail
+
+### Dedicated Crawler Infrastructure
+
+Googlebot is not a single process running on a single machine. It is a distributed system of:
+
+**DNS resolvers**: Dedicated machines that resolve hostnames to IP addresses. Caching is aggressive — a DNS result for a popular domain might be cached for 5 minutes, saving millions of lookups per day. The resolver handles 10M+ DNS queries per minute.
+
+**Fetcher pools**: Groups of machines that handle HTTP requests. Each fetcher maintains persistent connections (HTTP/2 multiplexing) to minimize TCP/TLS overhead. A single fetcher can handle ~10,000 concurrent connections.
+
+**Link extraction and dedup farms**: Machines that parse fetched HTML, extract links, normalize URLs, check against Bloom filters, and enqueue new URLs. This is CPU-bound work, so it is offloaded to dedicated machines.
+
+### Handling Popular Sites
+
+Sites like Wikipedia, GitHub, and Reddit get special treatment. Instead of crawling them like everyone else, Google uses:
+
+**Pull-based content APIs**: Wikipedia provides a dump of all articles. GitHub provides an API for repositories. These are accessed instead of scraping raw HTML, which is more efficient and more polite.
+
+**Priority scheduling**: When breaking news hits, CNN's homepage is crawled every 30 seconds. The crawler detects the temporal urgency from the rate of new links appearing in the social graph.
+
+### Avoiding the "Slashdot Effect"
+
+When Googlebot crawls a small blog for the first time, it starts with a single slow request. If the blog responds quickly (within 200ms), the crawler slightly ramps up. If the blog responds slowly or returns errors, the crawler backs off. This prevents Google from accidentally DDoS-ing a site that has never been crawled before.
+
+### Crawl Budget
+
+Every domain has a "crawl budget" — the maximum number of pages Google will crawl from that domain in a given time period. The budget is determined by:
+
+- **Crawl rate limit**: From robots.txt `Crawl-delay` directive
+- **Server responsiveness**: A fast server gets a higher budget
+- **Content value**: A site with unique, high-quality content gets a higher budget
+- **Total size of the site**: Google limits the budget so it does not spend all its resources on a single domain
+
+## Ranking Signals
+
+BM25 and PageRank are the foundation, but modern search engines use hundreds of signals to determine the final ranking. Here are the most important categories.
+
+### Content Signals
+
+- **Title match**: Does the query appear in the `<title>` tag? Weighted 5x over body match
+- **URL match**: Does the query appear in the URL path? Weighted 3x over body match
+- **Heading match**: Does the query appear in `<h1>` or `<h2>` tags? Weighted 2x
+- **Keyword density**: Natural usage vs. keyword stuffing (excessive density is a negative signal)
+- **Content length**: Very short pages (under 200 words) are less likely to be comprehensive
+- **Freshness**: Recent updates get a temporal boost (higher for time-sensitive queries)
+- **Page structure**: Clean HTML, proper use of semantic tags, valid schema.org markup
+
+### Link Signals
+
+- **PageRank**: Authority from incoming links (described above)
+- **Link text (anchor text)**: If 1,000 sites link to a page with the anchor text "sourdough bread recipe," that page is probably about sourdough bread recipes regardless of its own content
+- **Link diversity**: Links from many different domains are stronger than many links from the same domain
+- **Link velocity**: A sudden spike in links to a page indicates either a viral hit (positive) or a link-buying campaign (negative — flagged for manual review)
+- **Nofollow ratio**: A high percentage of `rel="nofollow"` links suggests low editorial trust
+
+### User Interaction Signals
+
+- **Click-through rate (CTR)**: What fraction of users who see this result click it?
+- **Dwell time**: How long does a user stay on the page after clicking? A 30-second dwell suggests the page answered the query. A 3-second dwell suggests it was not what the user wanted.
+- **Bounce rate**: Do users return to the search results immediately? High bounce rates signal low satisfaction.
+- **Pogo-sticking**: Users repeatedly click and return to results (click result A, back, click result B, back). This strongly indicates the top results are not answering the query.
+
+### Site-Level Signals
+
+- **Domain age**: Older domains tend to be more trustworthy (but this is a weak signal)
+- **HTTPS**: SSL/TLS is a positive ranking signal
+- **Mobile-friendliness**: Google ranks mobile-friendly pages higher for mobile searches
+- **Page speed**: Faster pages get a ranking boost (Core Web Vitals: LCP < 2.5s, FID < 100ms, CLS < 0.1)
+- **Sitemap freshness**: A regularly updated sitemap signals an active, maintained site
+
+### Spam Detection
+
+Google uses machine learning models (particularly RankBrain and SpamBrain) to detect manipulative patterns:
+
+- **Keyword stuffing**: Pages that repeat a keyword unnaturally (e.g., "buy cheap shoes, best cheap shoes, discount cheap shoes") are demoted
+- **Cloaking**: Serving different content to the crawler than to users — strong negative signal, often manual action
+- **Link schemes**: Paid links, link exchanges, link networks — detected by pattern analysis of linking domains
+- **Content farms**: Large-scale production of low-quality, AI-generated content with minimal human value
+- **Parasite hosting**: Low-quality content hosted on high-authority domains (e.g., a university subdomain with payday loan articles)
+
+### How Signals Are Combined
+
+Ranking is not a simple weighted sum. Google uses a machine-learned model (LambdaMART, a tree-based ranking model) trained on millions of human-rated query-result pairs. Engineers continuously add new features to the model, and the model learns the optimal weighting for each signal.
+
+```python
+# Simplified representation of a learned ranking model
+def predict_rank(features):
+    # Features: bm25, pagerank, freshness, ctr, dwell_time,
+    #            domain_authority, spam_score, etc.
+    # This is a gradient-boosted decision tree in production
+    score = (
+        0.35 * features.bm25_score
+        + 0.20 * log(features.pagerank + 1)
+        + 0.10 * features.title_match
+        + 0.08 * features.ctr
+        + 0.07 * features.dwell_time
+        + 0.05 * features.freshness
+        + 0.05 * features.domain_authority
+        + 0.05 * features.url_match
+        + 0.03 * features.page_quality
+        + 0.02 * features.mobile_friendly
+        - features.spam_penalty * 100
+    )
+    return max(0, score)
+```
+
+The actual Google ranking system uses hundreds of features in a neural network (RankBrain) that learns how to weigh and combine signals for each specific query. This is why a query like "apple" returns different results than "apple pie recipe" — the model understands the intent difference and adjusts signal weights accordingly.
+
+## Trade-offs and Follow-up Questions
+
+Every design decision has a trade-off. Here is how to answer the common follow-up questions in an interview.
+
+### Why use BM25 instead of TF-IDF?
+
+TF-IDF does not normalize for document length. A 10,000-word article that mentions "sourdough" five times might be less relevant than a 200-word recipe that mentions it twice. BM25's length normalization (`b` parameter) handles this. BM25 also has a term frequency saturation parameter (`k1`) — the 100th mention of "sourdough" adds less marginal value than the first mention.
+
+### Why Bloom filters instead of a hash set?
+
+A hash set storing 60 trillion URL hashes would require hundreds of terabytes of RAM. A Bloom filter achieves the same deduplication with ~75 TB and zero false negatives. The false positive rate of ~0.1% means 1 in 1,000 unique URLs gets incorrectly skipped — an acceptable cost.
+
+### What if the Bloom filter fills up?
+
+Bloom filters do not support deletion of elements. When the filter reaches capacity (bits are mostly 1s), we create a new filter and switch over. The old filter is kept for a grace period to catch duplicates that were already seen, then discarded. This is called a "rolling Bloom filter" — maintain two filters: the current one and the previous one. New URLs are checked against both; new entries go into the current one.
+
+### How do you handle JavaScript-rendered pages?
+
+Modern web pages are often SPAs (single-page applications) that render content via JavaScript. A traditional crawler that only fetches static HTML will miss most of the content. Solutions:
+
+- Use a headless browser (Chrome in headless mode) for rendering — Google does this for critical pages
+- Cache rendered snapshots and share them across crawls
+- Prioritize server-side rendered pages for crawling efficiency
+
+### How fresh does the index need to be?
+
+It depends on the query. A query for "US election results" expects minute-level freshness. A query for "how to bake sourdough" can tolerate week-old results. Google addresses this with tiered indexing:
+
+- **Real-time index**: Breaking news, social media, freshly published pages — updated within minutes
+- **Fresh index**: Pages crawled within the last 24 hours
+- **Main index**: The full index with pages crawled within the last few weeks
+
+### How do you detect and handle spam?
+
+Spam detection runs at every stage of the pipeline:
+
+1. **Crawl time**: Known spam domains are blocked from crawling (domain blacklist)
+2. **Index time**: Content analysis flags keyword stuffing, cloaking, hidden text
+3. **Query time**: The ranking model applies learned spam penalties
+4. **Post-hoc**: User feedback (bounces, manual reports) triggers re-evaluation
+
+Google's SpamBrain is a neural network trained to detect spam patterns. It catches ~99% of spam before it ever reaches the index.
+
+### How does Google handle personalized search?
+
+Personalization affects ranking in targeted ways:
+
+- **Location**: A query for "pizza" returns different results for users in New York vs. Tokyo
+- **Search history**: If you have clicked on "Alice's Kitchen" results in the past, that site gets a personal boost
+- **Language**: Results in the user's preferred language are weighted higher
+- **Device**: Mobile vs. desktop results are optimized for the device context
+
+Personalization is implemented at query time by modifying the ranking score with user-specific multipliers. The core index and PageRank are not personalized — only the final scoring step is.
+
+## Self-Check
+
+Before walking into an interview, make sure you can answer all of these without looking:
+
+- [ ] Can you explain the three phases of a search engine (crawl, index, serve)?
+- [ ] Can you estimate crawl bandwidth given billions of pages per day?
+- [ ] Can you draw the URL frontier data structure and explain priority scheduling?
+- [ ] Can you explain why Bloom filters are used instead of hash sets for deduplication?
+- [ ] Can you compute the Bloom filter false positive rate given m, n, and k?
+- [ ] Can you describe how SimHash detects near-duplicate content?
+- [ ] Can you explain the inverted index data structure and why it needs positional information?
+- [ ] Can you write BM25 scoring from memory?
+- [ ] Can you explain PageRank iteration with the damping factor?
+- [ ] Can you draw the query serving pipeline from parsing to result rendering?
+- [ ] Can you explain how Google achieves 300ms p99 latency at 100K QPS?
+- [ ] Can you describe incremental crawling and how change rate affects re-crawl frequency?
+- [ ] Can you name five ranking signals beyond BM25 and PageRank?
+- [ ] Can you explain how Google handles JavaScript-rendered pages?
+- [ ] Can you describe the spam detection pipeline (crawl → index → query → post-hoc)?
+- [ ] Can you explain the trade-offs between TF-IDF, BM25, and learned ranking models?
+- [ ] Can you describe how sitemaps and robots.txt interact with the crawl scheduler?
+- [ ] Can you explain what a crawl budget is and how it is calculated?
