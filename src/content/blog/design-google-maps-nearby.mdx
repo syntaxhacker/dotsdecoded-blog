@@ -1,0 +1,799 @@
+---
+title: "Design Google Maps: Geospatial Indexing, Routing, and Nearby Services"
+description: "A complete system design walkthrough for maps and location-based services — geohashing and quadtrees for spatial indexing, A* routing with traffic, reverse geocoding, and serving billions of location queries."
+date: 2026-05-16T01:00:00
+tags: ["system-design", "interview", "google-maps", "geospatial", "design-problem"]
+---
+
+import MapsRequirementsDemo from '../../components/demos/MapsRequirementsDemo'
+import GeohashDemo from '../../components/demos/GeohashDemo'
+import QuadTreeDemo from '../../components/demos/QuadTreeDemo'
+import RoutingDemo from '../../components/demos/RoutingDemo'
+import ReverseGeocodingDemo from '../../components/demos/ReverseGeocodingDemo'
+import MapsArchitectureDemo from '../../components/demos/MapsArchitectureDemo'
+
+## What Are We Building?
+
+Google Maps is not a single app. It is a constellation of services — tile rendering, geocoding, routing, traffic prediction, place search, Street View, turn-by-turn navigation — each with its own data pipeline and storage engine. Every day, Maps serves **1+ billion users**, processes **25+ petabytes of map data**, and answers **100+ million navigation requests**. A single tap on your phone triggers lookups across geohash indices, quadtrees, road graphs, POI inverted indices, and tile caches spread across the globe.
+
+We are designing a system that must:
+
+| Requirement | Scale |
+|---|---|
+| Serve map tiles at 20+ zoom levels | 10+ PB tile dataset |
+| Geocode 50M+ place queries / day | < 100 ms p99 |
+| Route between any two points globally | 1B+ edges road graph |
+| Support real-time traffic updates | 100M+ GPS data points / hour |
+| Reverse geocode 10M+ lat/lng lookups / day | 50 ms p99 |
+| Serve Street View panoramas | 200+ PB imagery |
+
+<MapsRequirementsDemo client:visible />
+
+## Map Basics: Tiles, Zoom Levels, and Coordinate Systems
+
+Before we can build, we need to understand how digital maps work. A flat map is a lie — the earth is a sphere (oblate spheroid, but close enough). To display it on a phone screen, we must project 3D coordinates onto 2D, chop the result into tiles, and serve only the tiles the user can see.
+
+### Web Mercator Projection (EPSG:3857)
+
+Google Maps uses the Web Mercator projection, which treats the world as a square:
+
+$$x = \text{tile\_size} \cdot \frac{\text{lng} + 180}{360} \cdot 2^{\text{zoom}}$$
+
+$$y = \text{tile\_size} \cdot \frac{1 - \ln(\tan(\text{lat}) + \sec(\text{lat})) / \pi}{2} \cdot 2^{\text{zoom}}$$
+
+The key insight: at zoom level 0, the entire world is a single 256x256 tile. At zoom level 1, it splits into 4 tiles (2x2). At zoom level 2, 16 tiles (4x4). At zoom level z, there are $2^z \times 2^z = 2^{2z}$ tiles.
+
+```
+Zoom 0: 1 tile        Zoom 1: 4 tiles      Zoom 2: 16 tiles
++-----------+          +-----+-----+        +--+--+--+--+
+|  world    |          |  0  |  1  |        |00|01|02|03|
+|  (256px)  |          +-----+-----+        +--+--+--+--+
++-----------+          |  2  |  3  |        |10|11|12|13|
+                       +-----+-----+        +--+--+--+--+
+                                             ...
+```
+
+Total tiles across all zoom levels: $\sum_{z=0}^{20} 4^z \approx 1.5 \times 10^{12}$ tiles. That is **1.5 trillion** possible tiles, though only a fraction (land areas) need storage.
+
+### Tile Coordinate System
+
+Each tile is identified by `(z, x, y)`:
+- `z` = zoom level (0-20+)
+- `x` = column index (0 to $2^z - 1$)
+- `y` = row index (0 to $2^z - 1$)
+
+A tile at `(15, 11234, 26789)` can be fetched via URL: `https://tile.example.com/15/11234/26789.png`. This is what your phone requests when you pan around — hundreds of tiny PNG requests per minute.
+
+Tiles are pre-rendered and cached aggressively. Google stores tiles in a hierarchical file system on CDN edge nodes: `/z/x/y.png`. The CDN handles global distribution, keeping popular tiles (downtown Manhattan, central Tokyo) hot at multiple edges.
+
+## Capacity Estimation
+
+Let us size the system for serving 1 billion users.
+
+**Tile Serving:**
+
+```
+Daily active users:  500M map views / day
+Tiles per user view: 20 tiles (visible viewport)
+Daily tile requests: 500M x 20 = 10B tiles / day
+Peak QPS:            ~300K (10B / 86400 * 2.5 for diurnal peak)
+Average tile size:   25 KB (PNG, varying by complexity)
+Tile bandwidth:      10B x 25 KB = 250 TB / day = ~23 Gbps sustained
+```
+
+**Routing:**
+
+```
+Daily route requests:    100M
+Edges traversed per req: 10K avg (A* exploration)
+Total edge traversals:   1T / day
+Route response time:     < 500 ms p95
+Route graph size:        1B+ edges (global road graph)
+Graph storage:           1B edges * (64+64+32+16 bytes) ≈ 200 GB (in memory)
+```
+
+**Place Search:**
+
+```
+Places indexed:          150M+ POIs
+Search queries / day:    1B
+Inverted index size:     500 GB (terms + postings)
+Query latency:           < 100 ms p99
+```
+
+**Geocoding:**
+
+```
+Geocode requests / day:  50M (address → lat/lng)
+Reverse geocode / day:   10M (lat/lng → address)
+Spatial index size:      50 GB (quadtree nodes + polygon shapes)
+```
+
+Storage totals:
+
+| Dataset | Size | Storage |
+|---|---|---|
+| Map tiles | 10+ PB | S3 / CDN edge cache |
+| Road graph | 200 GB | RAM (in-memory graph servers) |
+| Place index | 500 GB | SSD + RAM cache |
+| Spatial index | 50 GB | SSD + RAM cache |
+| Traffic data | 10 TB / day | Time-series DB (Bigtable) |
+| Street View | 200+ PB | Cold blob storage + CDN |
+
+## Geohashing: Encoding Location as a String
+
+A geohash is a hierarchical spatial data structure that subdivides the world into a grid of rectangles. Each geohash character adds precision by dividing the previous cell into 32 sub-cells (5 bits per character).
+
+### How Geohashing Works
+
+The algorithm alternates between longitude and longitude bits:
+
+```python
+BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz'
+
+def geohash_encode(lat, lon, precision=8):
+    lat_range = [-90, 90]
+    lon_range = [-180, 180]
+    bits = 0
+    combined = 0
+    hash_chars = []
+
+    for i in range(precision * 5):
+        if i % 2 == 0:  # even bits: longitude
+            mid = (lon_range[0] + lon_range[1]) / 2
+            if lon >= mid:
+                combined = combined * 2 + 1
+                lon_range[0] = mid
+            else:
+                combined = combined * 2
+                lon_range[1] = mid
+        else:  # odd bits: latitude
+            mid = (lat_range[0] + lat_range[1]) / 2
+            if lat >= mid:
+                combined = combined * 2 + 1
+                lat_range[0] = mid
+            else:
+                combined = combined * 2
+                lat_range[1] = mid
+
+        bits += 1
+        if bits == 5:
+            hash_chars.append(BASE32[combined])
+            bits = 0
+            combined = 0
+
+    return ''.join(hash_chars)
+```
+
+Each character encodes 5 bits (32 possible values). Two characters give 10 bits of precision, four characters give 20 bits. At 8 characters, the cell is roughly 40m x 20m — enough to distinguish houses on a street.
+
+### Why Geohashes Work for Proximity
+
+Two locations that share a longer common prefix are physically closer. `9q8yyk` and `9q8yz` share 5 characters → their cells are neighbors. `9q8yyk` and `abcd` share nothing → opposite sides of the world.
+
+This makes geohashes ideal for **prefix-based proximity search**:
+
+```sql
+-- Find all places within ~1km of a point whose geohash is '9q8yyk'
+-- At precision 4, cells are ~20km x 20km
+SELECT * FROM places
+WHERE geohash LIKE '9q8y%'
+  AND ABS(lat - 37.7749) < 0.01
+  AND ABS(lon - (-122.4194)) < 0.01;
+```
+
+The geohash index prunes the search space from 150M places to a few thousand in one B-tree lookup.
+
+### Trade-Offs
+
+Geohashes have a subtle problem: cells near poles and at cell boundaries. Two points can be physically adjacent but in different geohash cells (they straddle a boundary). The fix: **search 8 neighboring cells** (the cell itself plus its 8-connected neighbors).
+
+```python
+def nearby_cells(geohash):
+    # Get the 8-connected neighbor geohashes
+    neighbors = [geohash]
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            if dx == 0 and dy == 0:
+                continue
+            neighbors.append(shift_cell(geohash, dx, dy))
+    return neighbors
+```
+
+<GeohashDemo client:visible />
+
+## Quadtrees: Tree-Based Spatial Indexing
+
+While geohashes encode space into linear strings for B-tree lookups, quadtrees organize space hierarchically as a tree in memory. Each node represents a rectangular region. When a node exceeds its capacity (e.g., 4 points), it splits into 4 children (NW, NE, SW, SE).
+
+### Anatomy of a QuadTree
+
+```
+Root covers the world (lat: -90 to 90, lon: -180 to 180)
+├── NW quadrant (lat: 0-90, lon: -180-0)
+│   ├── NW sub-quadrant (lat: 45-90, lon: -180--90)
+│   │   ├── Point A (San Francisco)
+│   │   └── Point B (Oakland)
+│   ├── NE sub-quadrant (lat: 45-90, lon: -90-0)
+│   └── ...
+├── NE quadrant (lat: 0-90, lon: 0-180)
+├── SW quadrant (lat: -90-0, lon: -180-0)
+└── SE quadrant (lat: -90-0, lon: 0-180)
+```
+
+```python
+class QuadTreeNode:
+    def __init__(self, bounds, capacity=4):
+        self.bounds = bounds  # (min_lat, max_lat, min_lon, max_lon)
+        self.capacity = capacity
+        self.points = []
+        self.children = None  # NW, NE, SW, SE
+
+    def insert(self, lat, lon, data):
+        if not self.contains(lat, lon):
+            return False
+
+        if self.children is None and len(self.points) < self.capacity:
+            self.points.append((lat, lon, data))
+            return True
+
+        if self.children is None:
+            self.subdivide()
+
+        for child in self.children:
+            if child.insert(lat, lon, data):
+                return True
+
+    def subdivide(self):
+        min_lat, max_lat, min_lon, max_lon = self.bounds
+        mid_lat = (min_lat + max_lat) / 2
+        mid_lon = (min_lon + max_lon) / 2
+
+        self.children = [
+            QuadTreeNode((mid_lat, max_lat, min_lon, mid_lon)),  # NW
+            QuadTreeNode((mid_lat, max_lat, mid_lon, max_lon)),  # NE
+            QuadTreeNode((min_lat, mid_lat, min_lon, mid_lon)),  # SW
+            QuadTreeNode((min_lat, mid_lat, mid_lon, max_lon)),  # SE
+        ]
+
+    def query_range(self, bounds):
+        """Find all points within a rectangular bounding box."""
+        if not self.intersects(bounds):
+            return []
+
+        result = []
+        for pt in self.points:
+            if point_in_bounds(pt, bounds):
+                result.append(pt)
+
+        if self.children:
+            for child in self.children:
+                result.extend(child.query_range(bounds))
+
+        return result
+```
+
+### Geohash vs QuadTree
+
+| Property | Geohash | QuadTree |
+|---|---|---|
+| Storage | B-tree on disk | In-memory tree |
+| Proximity search | Prefix match on string index | Range query on tree |
+| Grid boundary issue | Points near cell edges need neighbor search | Natural (tree can traverse across splits) |
+| Write volume | Append-friendly (sequential IDs) | Rebalancing needed on inserts |
+| Use case | Point-of-interest index, database storage | In-memory driver location, nearest-neighbor |
+| Precision control | Vary string length | Vary tree depth |
+
+<QuadTreeDemo client:visible />
+
+## Map Tile Serving Architecture
+
+Serving map tiles at global scale requires aggressive caching and pre-rendering. Here is what happens when a user pans the map:
+
+1. **Client** determines visible viewport bounds at current zoom level.
+2. **Client** computes which tile coordinates are visible: `tiles = [(z, x, y) for x in x_range for y in y_range]`.
+3. **Client** checks its local tile cache (LRU cache on device, ~500 MB max).
+4. **Client** requests missing tiles from `tile.example.com/z/x/y.png` via HTTP.
+5. **CDN** (Cloudflare, Akamai) checks edge cache. Hit rate: ~95% for popular areas.
+6. **CDN miss** → request forwarded to origin tile server.
+7. **Tile server** loads from fast SSD cache (miss) or renders from vector data on the fly.
+8. Tile is returned, cached at CDN edge, and displayed.
+
+Google uses **vector tiles** internally — not pre-rendered PNGs. Vector tiles contain raw geometry (roads, buildings, parks) as protobuf data. The client renders them to screen. This gives:
+- Smaller payloads (5-10 KB vs 25 KB for PNG)
+- Smooth zooming with no "tile fracture"
+- Dynamic styling (night mode, satellite hybrid)
+- Client-side 3D buildings rendering
+
+### Tile Storage Design
+
+```
+Tile Storage (S3/GCS):
+  bucket/tiles/{z}/{x}/{y}.pbf       ← vector tiles
+  bucket/tiles/{z}/{x}/{y}.png        ← raster fallback
+  bucket/tiles/{z}/{x}/{y}@2x.png     ← retina tiles
+
+Tile CDN Cache:
+  edge: ttl 7 days
+  stale-while-revalidate: 30 days
+
+Hot tile set (~10% of tiles serve 90% of traffic):
+  Manhattan, Tokyo, London, etc.
+  Pre-warmed in CDN on deploy
+```
+
+## A* Routing with Traffic
+
+Routes are computed on a **road graph**: an edge-weighted directed graph where nodes are intersections and edges are road segments.
+
+```
+Edge: intersection A → intersection B
+  weight: travel time (seconds)
+  features: road class, speed limit, length, one-way, turn restrictions
+```
+
+### The Road Graph Data Structure
+
+```python
+ROAD_GRAPH = {
+    node_id: {
+        'lat': 37.7749,
+        'lon': -122.4194,
+        'edges': [
+            {'to': 1002, 'length_m': 500, 'speed_kph': 50,
+             'time_s': 36, 'road_class': 'residential'},
+            {'to': 1003, 'length_m': 200, 'speed_kph': 30,
+             'time_s': 24, 'road_class': 'service'},
+        ]
+    },
+    ...
+}
+```
+
+### A* Search Algorithm
+
+A* finds the shortest path from origin to destination using a heuristic (straight-line distance / max speed) to guide exploration:
+
+$$f(n) = g(n) + h(n)$$
+
+Where $g(n)$ is the cost from start to node n and $h(n)$ is the estimated cost from n to goal.
+
+```python
+import heapq
+import math
+
+EARTH_RADIUS_M = 6371000
+
+def haversine(lat1, lon1, lat2, lon2):
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * \
+        math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return EARTH_RADIUS_M * c
+
+def a_star(graph, start, end, max_speed_kph=120):
+    max_speed_mps = max_speed_kph * 1000 / 3600
+
+    def heuristic(node):
+        return haversine(
+            graph[node]['lat'], graph[node]['lon'],
+            graph[end]['lat'], graph[end]['lon']
+        ) / max_speed_mps
+
+    open_set = [(0, start)]
+    g_score = {start: 0}
+    came_from = {}
+
+    while open_set:
+        _, current = heapq.heappop(open_set)
+
+        if current == end:
+            return reconstruct_path(came_from, current)
+
+        for edge in graph[current]['edges']:
+            neighbor = edge['to']
+            tentative_g = g_score[current] + edge['time_s']
+
+            if neighbor not in g_score or tentative_g < g_score[neighbor]:
+                g_score[neighbor] = tentative_g
+                f_score = tentative_g + heuristic(neighbor)
+                heapq.heappush(open_set, (f_score, neighbor))
+                came_from[neighbor] = current
+
+    return None
+```
+
+### Traffic-Aware Routing
+
+Traffic data is ingested as real-time speed multipliers on edges:
+
+```python
+traffic_multiplier = {
+    edge_id: 2.5,  # heavy traffic = 2.5x normal travel time
+}
+
+def traffic_weight(edge, multipliers):
+    base_time = edge['time_s']
+    multiplier = multipliers.get(edge['id'], 1.0)
+    return base_time * multiplier
+```
+
+When traffic updates arrive (e.g., Waze reports slowdown on I-95), the router re-evaluates affected routes:
+
+1. Traffic service publishes speed deltas to Kafka.
+2. Route servers subscribe to traffic topics for their shard of the road graph.
+3. Route cache entries containing affected edges are invalidated.
+4. Active navigation sessions get push notifications with reroute suggestions.
+
+<RoutingDemo client:visible />
+
+## Geocoding and Reverse Geocoding
+
+Geocoding converts "1600 Amphitheatre Parkway, Mountain View, CA" into `(37.422, -122.084)`. Reverse geocoding does the opposite: `(37.422, -122.084)` → "1600 Amphitheatre Parkway, Mountain View, CA 94043".
+
+### Forward Geocoding Pipeline
+
+Forward geocoding is essentially a **text search over spatial entities**:
+
+```
+Query: "1600 Amphitheatre Parkway, Mountain View, CA"
+ 1. Tokenize & normalize: ["1600", "amphitheatre", "parkway", "mountain", "view", "ca"]
+ 2. N-gram matching against address index:
+    "1600 amphitheatre" → address record #849201
+    "mountain view" → city record #18274
+    "ca" → state record #5
+ 3. Score candidates by address completeness, parse quality
+ 4. Return best match: {lat: 37.422, lon: -122.084, confidence: 0.95}
+```
+
+The address index is a **trie of geohash-prefixed n-grams**, stored in Bigtable:
+
+```sql
+CREATE TABLE address_index (
+    ngram_hash VARCHAR(64) PRIMARY KEY,
+    geohash_prefix CHAR(8),
+    address_ids BLOB,  -- protobuf: list of matching address IDs
+    INDEX (geohash_prefix)
+);
+```
+
+### Reverse Geocoding: Spatial Polygon Containment
+
+Reverse geocoding requires finding which administrative polygon (country, state, city, neighborhood, street address) contains a given point. This is a **point-in-polygon** query powered by a quadtree spatial index.
+
+```python
+def reverse_geocode(lat, lon):
+    # 1. Convert point to geohash
+    hash = geohash_encode(lat, lon, 8)
+
+    # 2. Query quadtree for containing polygons
+    #    (prune search to cells that contain our point)
+    candidates = spatial_index.query_range((lat-0.01, lat+0.01, lon-0.01, lon+0.01))
+
+    # 3. Ray-cast point-in-polygon for each candidate
+    for polygon in sorted(candidates, key=lambda p: p.level, reverse=True):
+        if point_in_polygon(lat, lon, polygon.boundary):
+            return {
+                'street': polygon.street,
+                'city': polygon.city,
+                'state': polygon.state,
+                'postal_code': polygon.postal_code,
+                'country': polygon.country,
+            }
+
+    return None  # middle of the ocean
+```
+
+### Point-in-Polygon (Ray Casting)
+
+```python
+def point_in_polygon(lat, lon, polygon):
+    inside = False
+    n = len(polygon)
+    j = n - 1
+    for i in range(n):
+        yi, xi = polygon[i]
+        yj, xj = polygon[j]
+        if ((yi > lat) != (yj > lat)) and \
+           (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+```
+
+<ReverseGeocodingDemo client:visible />
+
+## POI Search and Nearby Discovery
+
+Places of Interest (POIs) — restaurants, gas stations, museums, parks — are indexed using a **geohash + inverted index** hybrid.
+
+### POI Index Structure
+
+```
+POI Document:
+  id: "ChIJ...W9M"
+  name: "The French Laundry"
+  lat: 38.3934
+  lon: -122.3627
+  geohash: "9q8yyk2p"
+  tags: ["restaurant", "french", "michelin-star", "fine-dining"]
+  categories: ["food", "dining"]
+  features: ["reservation_required", "wheelchair_accessible"]
+  popularity_score: 0.92
+```
+
+### Nearby Search Query
+
+```python
+def nearby_search(lat, lon, radius_m, category, limit=20):
+    # 1. Compute geohash precision from radius
+    precision = precision_for_radius(radius_m)  # ~5 for 1km
+
+    # 2. Get the query cell + 8 neighbors
+    center_hash = geohash_encode(lat, lon, precision)
+    cells = [center_hash] + neighbors(center_hash)
+
+    # 3. Query POI index by geohash prefix + category filter
+    results = []
+    for cell in cells:
+        results.extend(
+            db.query(f"""
+                SELECT id, name, lat, lon, popularity_score,
+                       ST_Distance(point, ST_Point({lat}, {lon})) AS dist
+                FROM pois
+                WHERE geohash LIKE '{cell}%'
+                  AND categories @> ARRAY['{category}']
+                  AND ST_DWithin(point, ST_Point({lat}, {lon}), {radius_m})
+                ORDER BY popularity_score DESC
+                LIMIT {limit}
+            """)
+        )
+
+    # 4. Deduplicate and sort by distance + popularity
+    return sorted(
+        deduplicate(results),
+        key=lambda p: (p.dist / 1000) / (p.popularity_score + 0.1)
+    )[:limit]
+```
+
+### Performance
+
+| Index Type | Query Time | Precision |
+|---|---|---|
+| Full table scan | 5-30 seconds | Exact |
+| Geohash prefix index | 5-50 ms | Approximate (+ edge correction) |
+| Quadtree spatial index | 2-20 ms | Exact |
+| Geohash + neighbor correction | 10-80 ms | Exact (>99.9%) |
+
+Google uses a **multi-tiered approach**: geohash prefix for first-pass pruning, then exact distance filtering on the reduced set.
+
+## Real-Time Traffic Data Pipeline
+
+Traffic data comes from three primary sources:
+1. **GPS probes**: Anonymous location pings from Android phones, Waze, and third-party apps.
+2. **Road sensors**: Inductive loop detectors embedded in roadways.
+3. **Historical patterns**: Time-of-day models for roads with no live data.
+
+### Data Flow
+
+```
+GPS Probe (phone)
+  → Location Service (WebSocket / HTTPS endpoint)
+  → Kafka topic: "gps-probes" (partitioned by geohash)
+  → Traffic Ingestion Service (Spark Streaming, 1-minute windows)
+    → Map-match probes to road segments (Hidden Markov Model)
+    → Compute average speed per segment
+    → Aggregate into "traffic tiles" (256px tiles at zoom 14)
+  → Traffic Tile Service
+    → Overlay tiles on map (red/yellow/green coloring)
+    → Publish speed deltas to Route Service via Kafka
+  → Bigtable (time-series traffic history)
+    Row key: road_segment_id + date_hour
+    Value: protobuf of 5-minute speed averages
+```
+
+### Map Matching (Hidden Markov Model)
+
+Raw GPS points are noisy (±10m accuracy). Map matching snaps probes to the road graph using a Hidden Markov Model:
+
+1. For each GPS point, find candidate road segments within 50m.
+2. Assign emission probabilities (how likely is this GPS reading given the segment).
+3. Assign transition probabilities (how likely is it to move from segment A to segment B given the distance).
+4. Run Viterbi to find the most likely path through the road graph.
+
+```python
+def map_match(gps_points, road_graph):
+    viterbi = Viterbi(road_graph)
+    path = viterbi.decode(
+        observations=gps_points,
+        emission_fn=emission_probability,
+        transition_fn=transition_probability,
+    )
+    return path  # list of road segment IDs
+```
+
+## Turn-by-Turn Navigation
+
+Navigation goes beyond routing — it must provide real-time guidance with audio, visual cues, and lane recommendations.
+
+### Navigation Pipeline
+
+1. **Route computed**: A* returns optimal path as a list of road segments.
+2. **Route is "sliced"** into maneuvers: "Turn left on Market St in 500m", "Keep right onto US-101".
+3. **ETAs are continuously updated** from live traffic.
+4. **Rerouting**: If speed drops below a threshold (or user deviates), compute an alternative.
+5. **Voice guidance**: Text-to-speech from maneuver instructions ("In 200 meters, turn left").
+6. **Visual overlay**: Highlight the route on the map, draw turn arrows, show lane markers.
+
+```
+Maneuver: {
+  instruction: "Turn left onto Market Street",
+  distance_from_prev_m: 500,
+  turn_angle: -90,
+  road_name: "Market St",
+  road_class: "primary",
+  lane_recommendation: "left-most lane",
+  signpost_text: "US-101 South / San Jose",
+  speed_before: 50_kph,
+  speed_after: 35_kph,
+}
+```
+
+### ETA Prediction
+
+ETA is not simply sum(segment_time). Google uses a **machine learning model** trained on historical traffic patterns:
+
+$$ETA = \sum_{segment} base\_time(segment) \times traffic\_mult(segment) \times model\_bias(segment, hour, day, weather, events)$$
+
+Features:
+- Time of day, day of week, holiday calendar
+- Current traffic speed (live + historical blend)
+- Weather conditions (rain adds 10-20% to travel time)
+- Local events (concerts, sports games → 2-3x slowdown within 1km)
+- Driver behavior (aggressive vs. conservative acceleration profiles)
+
+Google reports ETA with a **confidence band**: "Arriving in 15-20 minutes" — the model is calibrated to be accurate 95% of the time within that range.
+
+## Offline Maps
+
+Users in areas with poor connectivity (subways, tunnels, developing countries) need offline maps. Google Maps allows users to download regions for offline use.
+
+### Offline Data Packaging
+
+When a user downloads "San Francisco", the system:
+
+1. Defines the bounding box of the city.
+2. Exports vector tiles at zoom levels 10-16 for the bounding box (about 500-2000 tiles for a city).
+3. Exports POI data for the area (name, lat/lon, category, address — no reviews, no photos).
+4. Packages into a SQLite database (~200 MB for a major city).
+5. Ships to the client: route data for A* on-device routing (no traffic).
+
+```
+offline_package/
+  metadata.json           { region, bounds, tile_count, created_at }
+  tiles/                  vector tiles as .mvt files
+  pois.sqlite             { place_id, name, lat, lon, category, geohash }
+  routing.sqlite          { nodes, edges, restricted_turns }
+  index.sqlite            { geohash_index, spatial_index }
+```
+
+### On-Device Routing
+
+Without server connectivity, the phone runs A* locally on the downloaded road graph:
+
+```python
+def offline_route(origin, dest, package):
+    graph = load_graph(package / "routing.sqlite")
+    # Use historical speed data (no live traffic)
+    path = a_star(graph, origin, dest)
+
+    # Compensate for no traffic: add 20% buffer
+    eta = sum(segment.time_s for segment in path) * 1.2
+    return path, eta
+```
+
+Offline mode covers ~95% of navigation use cases. Real-time traffic rerouting, alternate routes, and transit schedules require a network connection.
+
+## Street View Infrastructure
+
+Street View is a separate infrastructure layer. A fleet of 5,000+ cars with 360-degree cameras drives public roads, capturing imagery every 10-20 meters.
+
+### Imagery Pipeline
+
+```
+Car Camera (8x 16MP fisheye lenses per car)
+  → On-car SSD (raw imagery)
+  → Upload station (Wi-Fi at garage, 50 TB per car per day)
+  → Image Processing Pipeline (at Google data centers)
+    → Stitch 8 fisheye images into equirectangular panorama
+    → Blur faces and license plates (ML model)
+    → Compress to JPEG (12 MB per panorama, down from 200 MB raw)
+    → Compute depth maps (structure from motion)
+    → Store in Street View panorama database
+  → CDN (edge cache for most-requested panoramas)
+
+Client Request:
+  Panorama ID (from map click)
+  → CDN lookup: /streetview/v1/{panoid}.jpg?zoom={z}&x={x}&y={y}
+  → Client tiles the panorama (16 tiles per panorama for fast loading)
+  → Three.js renderer: sphere mapped with panorama texture
+```
+
+### Street View Index
+
+Panoramas are indexed by location using a quadtree:
+
+```python
+class StreetViewIndex:
+    def find_nearest_panorama(self, lat, lon, max_distance_m=50):
+        # 1. Find quad cell containing (lat, lon)
+        cell = self.quadtree.find_cell(lat, lon)
+
+        # 2. Get all panoramas in cell + neighboring cells
+        candidates = self.quadtree.query_range(
+            cell.expanded(0.01)  # expand by ~1km
+        )
+
+        # 3. Find nearest within max distance
+        nearest = min(
+            candidates,
+            key=lambda p: haversine(lat, lon, p.lat, p.lon),
+            default=None
+        )
+
+        if nearest and haversine(lat, lon, nearest.lat, nearest.lon) <= max_distance_m:
+            return nearest.panorama_id
+
+        return None
+```
+
+## System Architecture
+
+Bringing it all together, here is how a single navigation request flows through the system:
+
+1. **Mobile Client** sends `GET /api/directions?origin=37.7749,-122.4194&destination=37.7849,-122.4094&traffic=enabled`.
+2. **Load Balancer** (Google Front End / GFE) terminates TLS, forwards to the nearest API gateway.
+3. **API Gateway** authenticates (OAuth2 token), rate-limits (bucket per user), and routes to the **Routing Service**.
+4. **Routing Service** loads the road graph shard from memory (Cassandra for persistence, RAM for hot data).
+5. **Traffic Service** provides current speed multipliers (read from Bigtable, updated every 2 minutes).
+6. **A* search** runs across the road graph with traffic-weighted edges (~50-200ms for a city route).
+7. **Maneuver Slicing Service** converts the raw segment list into human-readable instructions.
+8. **ETA Model** scores the route with ML features.
+9. **Route is returned** as JSON to the client.
+10. **Client renders** the route overlay (vector tiles already cached locally).
+11. **Navigation session** starts: GPS tracking sends periodic updates via WebSocket.
+12. **Traffic Service** pushes speed changes. If ETA degrades by >20%, **Reroute Service** computes alternatives and pushes a notification.
+
+### Data Store Map
+
+| Service | Primary Store | Cache | Characteristics |
+|---|---|---|---|
+| Tile Service | GCS (blob) | CDN + in-memory LRU | Read-heavy, immutable objects |
+| Routing | Cassandra (road graph) + RAM | Redis (route cache TTL 5min) | Latency-sensitive, compute-heavy |
+| Geocoding | Bigtable (address index) | Redis (LRU, TTL 1hr) | Write-once, read-many |
+| Places | Bigtable (POI index) | Redis (popular POIs) | Point lookups + range scans |
+| Traffic | Bigtable (time-series) | Redis (current speed, TTL 2min) | High write volume, low read latency |
+| Street View | GCS (panoramas) | CDN | Immutable blobs, low access frequency per item |
+
+<MapsArchitectureDemo client:visible />
+
+## Self-Check Questions
+
+Test your understanding of this design:
+
+1. Why does geohashing use alternating longitude/latitude bits instead of packing all longitude bits first?
+2. What happens to quadtree query performance when all points cluster in a small region (e.g., Manhattan)?
+3. How would you modify A* to handle turn restrictions (no left turns, U-turn prohibitions)?
+4. Why does offline routing add a 20% buffer to ETA even with historical data?
+5. Street View panoramas are ~12 MB each. How would you serve them to a mobile client without blowing the data budget?
+6. What data structure would you use to find the nearest gas station along a computed route (not as-the-crow-flies)?
+
+### Answers
+
+1. Alternating ensures both latitude and longitude contribute equally to each prefix character. Packing all longitude bits first would create cells that are wide longitude strips — terrible for proximity search.
+2. The quadtree becomes deep and unbalanced in dense regions. Google uses a **loose quadtree** (child cells overlap slightly) and sets a minimum cell size to prevent infinite subdivision.
+3. Model turn restrictions as edges between edges (not between nodes). An edge `A→B` can have a follow-up restriction: `A→B → B→C` is forbidden if `B→C` requires a U-turn. The A* state becomes `(current_node, incoming_edge)`.
+4. The 20% buffer accounts for traffic, traffic lights, stop signs, and driver variance. Without live traffic data, statistical padding is needed to set realistic expectations.
+5. Use progressive loading: load the lowest zoom (1 tile) first for immediate feedback, then stream higher zoom tiles as the user looks around. Cache recently viewed panoramas locally. Prefetch adjacent panoramas based on heading direction.
+6. **Route corridor search**: buffer the route geometry by 1km on each side, query the POI quadtree for gas stations within that corridor polygon. Sort by the shortest network distance from the route (not straight-line).
