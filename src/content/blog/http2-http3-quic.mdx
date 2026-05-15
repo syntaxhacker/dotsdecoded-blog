@@ -1,0 +1,369 @@
+---
+title: "HTTP/2, HTTP/3, and QUIC: Modern Web Protocols Explained"
+description: "A deep dive into modern web protocols — HTTP/2 multiplexing and HPACK, HTTP/3 and QUIC (0-RTT, connection migration), protocol negotiation (ALPN), and how these protocols make the web faster."
+date: 2026-05-20T01:00:00
+tags: ["http", "networking", "protocols", "performance", "quic"]
+---
+
+import Http2MultiplexDemo from '../../components/demos/Http2MultiplexDemo'
+import HpackDemo from '../../components/demos/HpackDemo'
+import Http2ServerPushDemo from '../../components/demos/Http2ServerPushDemo'
+import QuicHandshakeDemo from '../../components/demos/QuicHandshakeDemo'
+import QuicMigrationDemo from '../../components/demos/QuicMigrationDemo'
+import Http3ArchitectureDemo from '../../components/demos/Http3ArchitectureDemo'
+
+Every time you load a web page, a series of protocol negotiations happens in milliseconds. The browser and server agree on which version of HTTP to use -- HTTP/1.1, HTTP/2, or HTTP/3. Each version brought fundamental changes to how data moves across the internet.
+
+HTTP/1.1 served the web for over a decade. It is simple, text-based, and easy to debug. But as pages grew from a few kilobytes to megabytes with dozens of resources (scripts, stylesheets, fonts, images), its limitations became bottlenecks.
+
+HTTP/2 addressed these bottlenecks with multiplexing, header compression, and server push. HTTP/3 goes further by replacing TCP with QUIC, a transport protocol built on UDP that eliminates head-of-line blocking at the transport layer and supports connection migration.
+
+This deep dive covers all three protocols: the problems each solves, the mechanisms they use, and how they work together in the modern web.
+
+## The Problem: HTTP/1.1 Bottlenecks
+
+Think of HTTP/1.1 as a single-lane road with a strict convoy system. Each lane carries exactly one package at a time, and packages must be fully delivered before the next one starts. To move more packages faster, we add more lanes -- more TCP connections. Browsers open up to 6 parallel connections per domain.
+
+**Head-of-line blocking**: If connection 1 is downloading a large image, connection 2 wants to fetch a small CSS file, but connection 2 must wait until connection 1 finishes on its lane. Meanwhile, connections 3-6 sit idle or handle other requests.
+
+**Redundant headers**: Every HTTP request carries headers like `User-Agent`, `Accept`, `Cookie`, and `Authorization`. These are hundreds of bytes repeated verbatim on every request. For a page with 100 resources, that is tens of kilobytes of redundant data.
+
+**No server initiative**: The server cannot send resources until the client asks for them. The browser must download HTML, parse it, discover `<link>` and `<script>` tags, and request each one. This adds round trips.
+
+These problems are not academic. On a 50ms RTT connection (typical for a coastal US user hitting a European server), each additional round trip costs 50ms. Six sequential discoveries cost 300ms before any bytes of the resource even arrive.
+
+## HTTP/2: Frames, Streams, and Multiplexing
+
+HTTP/2 breaks the request-response model into frames. A single TCP connection carries multiple streams, each stream carrying a sequence of frames. Streams are independent -- a slow stream does not block a fast one.
+
+**Frames**: The smallest unit of communication. Types include `DATA` (payload bytes), `HEADERS` (HTTP headers), `SETTINGS` (protocol configuration), `PUSH_PROMISE` (server intends to push), `RST_STREAM` (cancel a stream), and `GOAWAY` (graceful shutdown).
+
+**Streams**: Each HTTP request-response pair gets a unique stream ID. The client and server interleave frames from different streams over the same TCP connection.
+
+The demo below shows the difference. HTTP/1.1 uses 6 separate connections, one per file. HTTP/2 uses a single connection with 6 multiplexed streams.
+
+<Http2MultiplexDemo client:visible />
+
+In HTTP/1.1 mode, each connection carries one file from start to finish. Six connections handle six files simultaneously. In HTTP/2 mode, a single connection carries all six files as interleaved streams. The total time is roughly the same when all files are small, but HTTP/2 avoids the connection overhead (TCP handshake per connection, slow start per connection).
+
+The real win appears under lossy conditions. If a packet is lost on one HTTP/1.1 connection, only that connection is blocked. But if all six connections share a single bottleneck (common on mobile), all six can stall. With HTTP/2, the single connection's loss recovery blocks ALL streams -- a problem that HTTP/3 solves.
+
+### Stream Prioritization
+
+HTTP/2 allows the client to assign priority to streams. The server uses this to allocate bandwidth. High-priority streams (render-blocking CSS) get more bandwidth than low-priority ones (analytics scripts). Priorities are expressed as a dependency tree with weights.
+
+A typical priority tree:
+```
+:root (weight 256)
+  +-- render blocking CSS (weight 200)
+  +-- body HTML (weight 100)
+  +-- images (weight 1)
+  +-- scripts (weight 50)
+```
+
+The server interleaves frames respecting these weights. This means the browser gets critical resources first, improving perceived performance.
+
+### Flow Control
+
+Each stream has a flow control window. The receiver advertises how many bytes it is willing to receive. The sender cannot exceed this window. This prevents a fast sender from overwhelming a slow receiver. Flow control operates at both the stream level and the connection level.
+
+## HPACK: Header Compression
+
+Headers are repetitive. The `:authority`, `cookie`, and `user-agent` headers change rarely between requests but are sent on every one. HPACK solves this with two tables.
+
+**Static table**: 61 predefined header entries (like `:method`: GET, `:scheme`: https). These are always available and never change.
+
+**Dynamic table**: Built dynamically as headers are exchanged. Common headers from previous requests are added here. Subsequent requests refer to them by index.
+
+The demo below shows the byte savings. Toggle compression on and off, and watch the wire format change from full text to compact index references.
+
+<HpackDemo client:visible />
+
+After the first request, the dynamic table learns headers like `:authority`, `cookie`, and `user-agent`. On subsequent requests, these are encoded as a single byte index reference (e.g., `[idx 62]`) instead of the full `:authority: example.com` string. The savings compound as the dynamic table grows.
+
+Start with Request 1 (all headers sent literally), then switch to Request 2 or 3. With compression enabled, the byte count drops dramatically -- from 158 bytes to 16 bytes in the best case. HPACK uses Huffman coding for literal values and differential indexing to minimize the encoded size.
+
+### HPACK vs QPACK
+
+HPACK relies on ordered delivery (TCP guarantees order). If a header table update is lost, it is retransmitted in order. This is fine over TCP but problematic over QUIC, where streams are independent. HTTP/3 uses QPACK instead, which decouples encoder/decoder state updates from request streams using separate unidirectional streams.
+
+## Server Push
+
+Server push allows the server to send resources before the client asks for them. When the client requests `index.html`, the server can push `style.css` and `app.js` along with the response, anticipating that the browser will need them.
+
+The server sends a `PUSH_PROMISE` frame first -- a commitment to push. Then it sends the pushed resource data. The client can decline pushed resources by sending `RST_STREAM`.
+
+### Cache-Aware Push
+
+Modern browsers track which resources are already in cache. If the client has `style.css` cached, the server should not push it. Push is most effective for uncached, early-critical resources.
+
+The demo below shows both scenarios.
+
+<Http2ServerPushDemo client:visible />
+
+Server push was controversial. Many implementations pushed too aggressively, wasting bandwidth. Chrome deprecated push in 2022, but the mechanism remains in the spec and is useful in controlled environments like HTTP/2-enabled CDNs with knowledge of the client's cache state. The more practical alternative is `103 Early Hints` -- a informational HTTP status code that hints resources the client should preload.
+
+## QUIC: The Transport Layer Revolution
+
+QUIC (Quick UDP Internet Connections) is a transport protocol designed by Google and standardized in RFC 9000. It replaces TCP+TLS with a single, encrypted transport on top of UDP.
+
+### Why UDP?
+
+TCP is baked into operating system kernels. Changing TCP requires updating every device in the path (client OS, server OS, routers, firewalls, middleboxes). QUIC runs in userspace over UDP, which is universally allowed through firewalls. Updates to QUIC deploy as application updates -- no kernel changes needed.
+
+### Built-in Encryption
+
+QUIC integrates TLS 1.3 directly. There is no cleartext QUIC -- every packet is encrypted. This eliminates the possibility of downgrade attacks and makes protocol ossification (where middleboxes hardcode wire format expectations) much harder.
+
+### Stream Multiplexing Without HoL Blocking
+
+TCP delivers bytes in order. If a TCP segment is lost, everything after it waits for retransmission, even if the data belongs to different HTTP/2 streams. QUIC treats each stream independently. A lost packet on stream 1 does not affect stream 2. This is called **independent stream delivery**.
+
+### 0-RTT Handshake
+
+If the client has connected to a server before, it can cache the connection parameters and send HTTP data in the very first packet of a new connection. Zero round trips. The demo below compares the TCP+TLS handshake (3 RTT) with QUIC (1-RTT and 0-RTT).
+
+<QuicHandshakeDemo client:visible />
+
+The difference is dramatic. TCP+TLS takes 3 round trips before any application data flows. QUIC 1-RTT takes 1. QUIC 0-RTT takes 0 -- data flies in the first packet. On a high-latency link (satellite: 600ms RTT), this means 1.8 seconds saved.
+
+0-RTT data is replayable -- an attacker who captures the initial packet can replay it. QUIC provides anti-replay mitigations through server-provided nonces, but applications should treat 0-RTT data as potentially replaysafe (idempotent requests only).
+
+### Connection Migration
+
+TCP identifies a connection by `(source IP, source port, destination IP, destination port)`. If any of these change -- the user switches from WiFi to cellular, or the device moves between networks -- the TCP connection breaks.
+
+QUIC identifies connections by a **Connection ID** (CID), a 64-bit opaque value chosen by each endpoint. The CID remains constant across network changes. When the client's IP or port changes, the server sees the same CID and continues the connection.
+
+The demo below shows a device moving from WiFi to cellular. The QUIC connection survives because the CID stays the same. TCP would break.
+
+<QuicMigrationDemo client:visible />
+
+Connection migration is automatic and transparent to the application. The server must validate the new path to prevent amplification attacks (a malicious client could spoof a CID and trick the server into sending data to a victim). QUIC uses path validation: the server sends a probe frame on the new path and waits for a response before sending data.
+
+## HTTP/3: HTTP Over QUIC
+
+HTTP/3 adapts HTTP semantics to QUIC. The core changes from HTTP/2:
+
+- **QPACK** replaces HPACK for header compression (avoids HoL on compression state)
+- **No server push in QUIC** (push was removed from the HTTP/3 spec at draft-29)
+- **Stream types**: requests use bidirectional streams, control data uses unidirectional streams
+- **Connection migration** is baked into the transport layer
+
+The protocol stack comparison shows the architectural difference.
+
+<Http3ArchitectureDemo client:visible />
+
+### QPACK: Header Compression for QUIC
+
+QPACK uses the same static/dynamic table concept as HPACK but with a critical difference: encoder and decoder communicate over separate, dedicated unidirectional streams. This means header compression state updates do not block request streams.
+
+- **Encoder stream**: Server sends table updates (new entries, duplicate entries)
+- **Decoder stream**: Client sends table acknowledgments and capacity changes
+
+A request can reference a table entry that has not yet arrived on the encoder stream. The decoder blocks only that stream, not all streams.
+
+### Protocol Negotiation
+
+How does a browser know a server supports HTTP/3? There are two mechanisms.
+
+**Alt-Svc header**: The server announces HTTP/3 support in an HTTP/1.1 or HTTP/2 response:
+
+```
+Alt-Svc: h3=":443"; ma=86400
+```
+
+The client caches this for the specified duration and uses HTTP/3 on subsequent connections.
+
+**DNS HTTPS record** (SVCB/HTTPS DNS resource record, RFC 9460): The DNS response includes protocol support information directly:
+
+```
+example.com. 3600 IN HTTPS 1 . alpn="h3,h2"
+```
+
+This is more efficient -- the client knows about HTTP/3 support before the first connection.
+
+**ALPN** (Application-Layer Protocol Negotiation): During the TLS handshake, the client sends a list of supported protocols (e.g., `h2`, `h3`). The server picks the best mutually supported one. This works for HTTP/2 over TLS and HTTP/3 during the QUIC handshake.
+
+## Implementation: Setting Up HTTP/2 and HTTP/3
+
+### Enabling HTTP/2 on a Server (nginx)
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name example.com;
+
+    ssl_certificate /etc/ssl/certs/example.com.pem;
+    ssl_certificate_key /etc/ssl/private/example.com.key;
+
+    # HTTP/2 stream prioritization
+    http2_streams_index_size 32;
+    http2_max_concurrent_streams 128;
+}
+```
+
+### Enabling HTTP/3 on nginx
+
+```nginx
+server {
+    # QUIC and HTTP/3
+    listen 443 quic reuseport;
+    listen 443 ssl http2;
+
+    ssl_certificate /etc/ssl/certs/example.com.pem;
+    ssl_certificate_key /etc/ssl/private/example.com.key;
+
+    # Advertise HTTP/3
+    add_header Alt-Svc 'h3=":443"; ma=86400';
+
+    # QUIC specific settings
+    quic_retry on;
+    quic_gso on;
+    quic_active_connection_id_limit 2;
+}
+```
+
+The `reuseport` directive allows multiple worker processes to accept QUIC connections on the same port. `quic_retry` enables address validation for new connections. Without `Alt-Svc`, clients will never know to try HTTP/3.
+
+### Python Client Library: aioquic
+
+```python
+import asyncio
+from aioquic.asyncio.client import connect
+from aioquic.h3.connection import H3Connection
+from aioquic.quic.configuration import QuicConfiguration
+
+async def fetch_http3(url: str) -> bytes:
+    configuration = QuicConfiguration(
+        alpn_protocols=H3Connection.ALPN_PROTOCOLS,
+        is_client=True,
+    )
+    # 0-RTT: provide session ticket from previous connection
+    configuration.session_ticket = load_cached_ticket(url)
+
+    async with connect(
+        url,
+        port=443,
+        configuration=configuration,
+        create_connection=H3Connection,
+    ) as http3:
+        response = await http3.get(url)
+        return response.read()
+
+result = asyncio.run(fetch_http3("https://example.com"))
+print(f"Received {len(result)} bytes via HTTP/3")
+```
+
+### Testing HTTP/3 with curl
+
+```bash
+# Check which HTTP versions a server supports
+curl --http3 -I https://example.com
+
+# Force HTTP/2
+curl --http2 -I https://example.com
+
+# See the Alt-Svc header
+curl -s -D - https://example.com 2>/dev/null | grep -i alt-svc
+
+# Check ALPN negotiation (requires openssl)
+openssl s_client -alpn h2,h3 -connect example.com:443 -servername example.com \
+  < /dev/null 2>/dev/null | grep -i alpn
+```
+
+### Testing HTTP/3 from Python with scapy
+
+```python
+# Check QUIC support via DNS HTTPS record
+import dns.resolver
+
+def check_quic_support(domain: str) -> list:
+    try:
+        answers = dns.resolver.resolve(domain, "HTTPS")
+        for rdata in answers:
+            for param in rdata.params:
+                if param.key == "alpn":
+                    return param.value
+    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+        return []
+    return []
+
+domains = ["google.com", "facebook.com", "example.com"]
+for domain in domains:
+    alpn = check_quic_support(domain)
+    if b"h3" in alpn:
+        print(f"{domain}: HTTP/3 supported ({alpn})")
+    else:
+        print(f"{domain}: HTTP/3 not advertised via DNS")
+```
+
+## Performance Impact and Adoption
+
+### Real-World Measurements
+
+| Metric | HTTP/1.1 | HTTP/2 | HTTP/3 |
+|--------|----------|--------|--------|
+| Connections per page | 30+ | 1 | 1 |
+| Avg header overhead | 600-800 bytes | 20-100 bytes | 20-100 bytes |
+| Handshake RTT | 3 (TCP+TLS) | 3 (TCP+TLS) | 0-1 (QUIC) |
+| HoL blocking | Per-connection | Connection-level | None |
+| Connection migration | No | No | Yes |
+| Browser support | Universal | 96%+ | 85%+ |
+
+### Where HTTP/3 Shines
+
+- **High packet loss**: QUIC's independent streams prevent one lost packet from blocking other streams. Akamai reported 15-30% faster page loads on 2%+ loss networks.
+- **Mobile networks**: Connection migration keeps connections alive when users switch between WiFi and cellular, or when the network changes IP during handoffs.
+- **High latency**: 0-RTT eliminates a full RTT on repeat connections. For satellite internet (500-800ms RTT), this saves nearly a second per page load.
+- **Early data**: QUIC's 0-RTT data works on the very first packet, making the web feel instant for returning visitors.
+
+### Where HTTP/2 Still Wins
+
+- **UDP blocking**: Some corporate firewalls and hotel networks block UDP entirely. In these environments, HTTP/3 falls back to HTTP/2 or HTTP/1.1.
+- **NAT timeouts**: Some NAT gateways have short UDP timeouts (30 seconds), causing idle QUIC connections to drop more aggressively than TCP.
+- **Server resource overhead**: QUIC servers consume more CPU than TCP servers due to userspace packet processing. Google reported 2-3x CPU overhead for QUIC vs TCP at equivalent throughput.
+
+### CDN Support
+
+All major CDNs support HTTP/3:
+
+- **Cloudflare**: HTTP/3 enabled by default on all plans since 2019
+- **Fastly**: HTTP/3 available, enabled via configuration
+- **Akamai**: HTTP/3 available on most plans
+- **CloudFront**: HTTP/3 support added in 2022
+- **Google Cloud CDN**: QUIC transport for Google services since 2013 (before standardization)
+
+Check your CDN:
+
+```bash
+# Cloudflare specific
+curl -s -I https://yourdomain.com | grep -i cf-ray
+
+# Check response headers for Alt-Svc
+curl -s -D - https://yourdomain.com 2>/dev/null | grep -i alt-svc
+```
+
+## Self-Check Questions
+
+1. What is head-of-line blocking and how does each protocol version address it?
+2. Why can HPACK be used over TCP but not directly over QUIC?
+3. How does QUIC connection migration work at the packet level?
+4. What are the security implications of 0-RTT data?
+5. Why does HTTP/3 use UDP instead of TCP?
+6. How does ALPN negotiate between HTTP/2 and HTTP/3?
+7. When should you use `Alt-Svc` vs DNS HTTPS records for protocol discovery?
+
+## Summary
+
+The evolution from HTTP/1.1 to HTTP/3 is a story of removing bottlenecks. HTTP/1.1 gave us the fundamental web protocol. HTTP/2 fixed the application-layer bottlenecks with multiplexing and compression. HTTP/3 fixed the transport-layer bottlenecks by replacing TCP with QUIC.
+
+For most web developers, the practical takeaways are:
+
+- HTTP/2 is the baseline -- enable it on your server for immediate gains
+- HTTP/3 is the future -- add `Alt-Svc` headers and configure QUIC support
+- Monitor UDP connectivity before migrating fully to HTTP/3
+- Use CDNs that support HTTP/3 -- they handle the complexity of QUIC connection management
+- Test with curl `--http3` and DNS HTTPS record queries to verify deployment
+
+The modern web protocols stack is faster, more resilient, and more secure than ever. Understanding how it works helps you debug performance issues, configure servers correctly, and build applications that perform well under real-world network conditions.
