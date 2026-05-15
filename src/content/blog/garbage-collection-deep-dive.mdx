@@ -1,0 +1,313 @@
+---
+title: "Garbage Collection: Mark-Sweep, Generational, and How Memory Management Actually Works"
+description: "A deep dive into garbage collection algorithms -- mark-sweep, mark-compact, generational collection, reference counting, tri-color marking, and how V8, Go, and Java GCs work."
+date: 2026-05-20T01:00:00
+tags: ["garbage-collection", "memory", "internals", "runtime", "performance"]
+---
+
+import GcMarkSweepDemo from '../../components/demos/GcMarkSweepDemo'
+import GcGenerationalDemo from '../../components/demos/GcGenerationalDemo'
+import GcTriColorDemo from '../../components/demos/GcTriColorDemo'
+import GcReferenceCountingDemo from '../../components/demos/GcReferenceCountingDemo'
+import GcComparisonDemo from '../../components/demos/GcComparisonDemo'
+
+## The Memory Kitchen: Stack vs Heap
+
+Imagine you are cooking. The **stack** is your cutting board -- you place ingredients there, use them, and clear them off in the exact reverse order you put them down. You cannot reach under the top item without moving everything above it. The **heap** is your pantry -- you grab items, use them anywhere in the kitchen, and put them back in any order. The pantry holds items for as long as you need them.
+
+In a running program, the stack stores function call frames -- local variables, return addresses, and parameters. Memory is allocated and freed in strict LIFO (last-in, first-out) order. When a function returns, its entire stack frame pops off automatically. The heap stores objects, data structures, and anything whose lifetime spans beyond a single function call. You allocate on the heap with `malloc` or `new`, and you must explicitly free it with `free` or `delete`.
+
+```python
+def compute():
+    # 'data' lives on the stack -- freed when compute() returns
+    data = [1, 2, 3]
+    # 'result' is a new list allocated on the heap
+    result = data + [4, 5]
+    return result
+```
+
+The stack is fast and deterministic. The heap is flexible but requires management. The question is: who decides when heap memory is no longer needed?
+
+## Automatic vs Manual: Why We Need GC
+
+Manual memory management looks like this in C:
+
+```c
+#include <stdlib.h>
+struct User* u = malloc(sizeof(struct User));
+u->id = 42;
+// ... use u ...
+free(u);
+```
+
+Three problems arise:
+
+1. **Use-after-free**: You free `u` but another pointer still references it. The program crashes or, worse, silently corrupts data.
+
+2. **Memory leaks**: You forget to call `free()`. The memory stays allocated until the process exits. Over hours or days, the program consumes all available RAM.
+
+3. **Double free**: You call `free()` twice on the same pointer. The heap allocator's internal data structures break, causing unpredictable crashes.
+
+Garbage collection solves these problems by automatically determining which heap objects are still reachable and reclaiming the rest. The core insight is simple: an object is alive if and only if a chain of references exists from a **root** to that object.
+
+## Reachability and GC Roots
+
+A **root** is a reference stored outside the heap that the program can directly access. Common roots:
+
+- Global and static variables
+- Local variables on the stack (including function arguments)
+- CPU registers holding object references
+- Thread-local storage
+
+Starting from these roots, the GC traces through every reference. All objects reachable from roots are **live**. Everything else is **garbage**.
+
+$$Reachable(o) = \exists r \in Roots: r \leadsto o$$
+
+The arrow $\leadsto$ means "there exists a path of references from r to o." This reachability definition is the foundation of every tracing GC.
+
+```bash
+# Visualizing heap reachability with a Python-like pseudocode:
+# Root set = [globals, stack_vars]
+# Mark phase: DFS from roots following references
+# Sweep phase: iterate heap, free unmarked blocks
+```
+
+## Stop-the-World vs Concurrent GC
+
+Early GCs paused the entire program (the **mutator**) while collection ran. These are called **stop-the-world** pauses. The program literally stops executing application code until the GC finishes.
+
+For interactive applications, pauses longer than ~16ms cause visible frame drops. Long pauses (100ms+) make applications feel unresponsive.
+
+Modern GCs use **concurrent** techniques: the GC runs in parallel with the mutator, either on separate threads or during safe points. This reduces pause times to a few milliseconds or less.
+
+| Approach | Pause Time | Throughput | Complexity |
+|----------|-----------|-----------|------------|
+| Stop-the-world | 10-100ms+ | High (no overhead between GCs) | Low |
+| Concurrent | < 1-5ms | Lower (barrier overhead) | High |
+
+The trade-off is throughput vs latency. Concurrent GC trades some throughput (CPU cycles spent on barriers and extra marking work) for much shorter pauses.
+
+## Mark-Sweep: The Foundation Algorithm
+
+The simplest tracing GC has two phases:
+
+1. **Mark**: Starting from roots, traverse the entire object graph. Mark every reachable object.
+2. **Sweep**: Iterate through the entire heap. Any unmarked object is garbage -- free its memory.
+
+<GcMarkSweepDemo client:visible />
+
+The mark phase uses a **worklist** (stack or queue). Initially, all root references are pushed onto the worklist. The algorithm repeatedly pops an object, marks it, and pushes all objects it references (that have not been marked yet). When the worklist is empty, all reachable objects are marked.
+
+```python
+def mark(roots):
+    worklist = list(roots)
+    while worklist:
+        obj = worklist.pop()
+        if not obj.marked:
+            obj.marked = True
+            for ref in obj.references:
+                if not ref.marked:
+                    worklist.append(ref)
+
+def sweep(heap):
+    for obj in heap:
+        if not obj.marked:
+            free(obj)
+        else:
+            obj.marked = False  # reset for next cycle
+```
+
+## Fragmentation and Mark-Compact
+
+Mark-sweep has a problem: **fragmentation**. When objects of different sizes are freed, the heap becomes a mosaic of used and free blocks. Over time, allocating a large object may fail even though enough total free memory exists -- it is split across many small gaps.
+
+**Mark-compact** solves this. After marking, the GC slides all live objects together, eliminating gaps. The heap becomes one contiguous block of live objects with all free space consolidated at the end.
+
+The compaction process updates every reference to each moved object, which is expensive but eliminates fragmentation entirely.
+
+```
+Before compact:  [objA][free][objB][free][free][objC]
+After compact:   [objA][objB][objC][free][free][free]
+```
+
+Modern GCs rarely compact the entire heap. Instead they use **generational** collection (young objects are cheap to move) or **region-based** collection (compact within small regions).
+
+## The Generational Hypothesis
+
+The **generational hypothesis** is an empirical observation: most objects die young.
+
+- In typical applications, 70-98% of allocated objects become unreachable within a few milliseconds.
+- Objects that survive one GC cycle are likely to survive many more.
+
+GCs exploit this by dividing the heap into **generations**:
+
+- **Young generation** (or **nursery**): fast allocation, frequently collected. Most objects never leave.
+- **Old generation**: infrequently collected. Only objects that survive multiple young GCs get promoted here.
+
+<GcGenerationalDemo client:visible />
+
+The young generation is further divided:
+
+- **Eden**: new objects are allocated here. When Eden fills, a **minor GC** triggers.
+- **Survivor spaces** (often two: S0 and S1): objects that survive a minor GC are copied here.
+
+During a minor GC, live objects in Eden are copied to a survivor space. Objects already in a survivor space are either copied to the other survivor space or promoted to the old generation if they have survived enough cycles (a configurable **tenuring threshold**).
+
+The key insight: minor GCs are fast because they only process a small amount of live data. The dead objects in Eden are simply abandoned -- the next allocation overwrites them.
+
+## Tri-Color Marking: Concurrent GC
+
+To run the GC concurrently with the mutator, we need a way to track which objects have been visited. The **tri-color marking** algorithm provides this:
+
+- **White**: not yet visited by the GC. Presumed garbage.
+- **Gray**: discovered (reachable from a root), but its children have not yet been scanned.
+- **Black**: scanned -- all children have been visited and added to the worklist. The object itself is definitely reachable.
+
+<GcTriColorDemo client:visible />
+
+The invariant that keeps the algorithm correct: **no black object points directly to a white object**. If a black object could reference a white object, the GC would miss that white object and free it incorrectly.
+
+The problem arises when the mutator modifies references during marking. Consider:
+
+1. The GC marks object A as black (scanned all its children).
+2. The mutator stores a reference from A to a new, white object B.
+3. If the GC never revisits A, B stays white and will be freed even though it is reachable.
+
+The **write barrier** prevents this.
+
+### The Write Barrier
+
+A write barrier is a small piece of code that runs every time the mutator writes a reference into a heap object. There are two main approaches:
+
+1. **Incremental Update (Dijkstra-style)**: When a black object is about to reference a white object, turn the white object gray (or turn the black object gray to be re-scanned).
+
+2. **SATB (Snapshot-at-the-Beginning, Yuasa-style)**: Before overwriting a reference field, record the old value. The GC assumes the old value is still reachable, preventing premature collection.
+
+```python
+# Dijkstra-style write barrier (incremental update)
+def write_barrier(field, new_value):
+    if is_black(field.owner) and is_white(new_value):
+        mark_gray(new_value)  # must be re-scanned
+    field.ref = new_value
+```
+
+The write barrier is the main source of overhead in concurrent GCs. Modern runtimes optimize it heavily, often reducing it to a single conditional branch.
+
+## Reference Counting and Cycle Detection
+
+Not all GCs use tracing. **Reference counting** tracks the number of references to each object. When an assignment creates a new reference, the object's count increments. When a reference is removed, the count decrements. If the count reaches zero, the object is freed immediately.
+
+<GcReferenceCountingDemo client:visible />
+
+Reference counting has attractive properties:
+
+- Memory is freed **immediately** when it becomes unreachable -- no pauses.
+- The work is spread across all pointer assignments, avoiding GC spikes.
+- It is simple to implement and understand.
+
+But it has a fatal flaw: **cycles**. Two objects that reference each other but have no external references both have a refcount of 1. Neither reaches zero, so neither is freed. This is a memory leak.
+
+```python
+class Node:
+    def __init__(self):
+        self.ref = None
+
+a = Node()
+b = Node()
+a.ref = b  # b.refCount = 1
+b.ref = a  # a.refCount = 1
+a = None   # a.refCount = 1 (still referenced by b)
+b = None   # b.refCount = 1 (still referenced by a)
+# Both a and b are leaked!
+```
+
+Python solves this with a **generational cycle detector** (also called a "garbage collector" in CPython). It runs periodically, uses a tracing algorithm on a subset of objects, and collects cycles missed by reference counting.
+
+Go and Java do not use reference counting at all -- they rely entirely on tracing GCs, which handle cycles naturally.
+
+## Real-World GC Strategies
+
+Different languages and runtimes make different trade-offs in their GC design.
+
+<GcComparisonDemo client:visible />
+
+### V8 (Chrome, Node.js)
+
+V8 uses a generational layout with two compacting collectors: **scavenge** for the young generation and **mark-sweep-compact** for the old generation. Young GC uses a semispace copy collector: Eden and one survivor space are active; during GC, live objects are evacuated to the other survivor space or promoted to old generation.
+
+Old generation GC uses concurrent tri-color marking with incremental update write barrier. After marking, it optionally compacts the old generation to fight fragmentation.
+
+V8 also implements **pointer compression** on 64-bit architectures: heap pointers are stored as 32-bit offsets from a base address, reducing memory usage and cache pressure.
+
+### Go
+
+Go deliberately chose a **non-generational** concurrent tri-color mark-sweep GC. The design prioritizes low and predictable latency over throughput. Go GC pauses are typically under 500 microseconds.
+
+The trade-off: Go's GC triggers more frequently as the heap grows. An allocation-heavy Go program may spend 10-25% of CPU time on GC. Go's write barrier is a hybrid (insertion + deletion barrier) that supports concurrent marking without needing a remembered set for generations.
+
+### Java G1
+
+Java's G1 GC divides the heap into equal-sized regions (typically 2048, each 1-32 MB). This enables incremental, **region-based** collection. G1 is generational: regions are dynamically assigned as young or old.
+
+Young collections evacuate all live objects from Eden and survivor regions into empty regions. Old collections use concurrent marking (SATB write barrier) followed by a **mixed collection** pause that evacuates a subset of old regions.
+
+G1's strength is predictable pause times. It selects which regions to collect based on how much garbage they contain, maximizing the benefit per millisecond of pause time.
+
+### Python (CPython)
+
+CPython uses reference counting as its primary GC with a supplemental generational cycle detector. Reference counting means objects are freed immediately when their count drops to zero, which is deterministic but adds overhead to every pointer operation.
+
+The cycle detector uses a **three-generation** scheme. Objects that survive a cycle detection scan are promoted to the next generation. Higher generations are scanned less frequently. The detector is stop-the-world but typically fast (under a few milliseconds).
+
+## GC Tuning and Allocation-Heavy Workloads
+
+GC behavior is heavily workload-dependent. Allocation-heavy code (message parsing, data transformations, server request handling) stresses the GC differently than code that allocates rarely.
+
+### GC Pacing
+
+Modern GCs use **pacing** -- they start GC work based on allocation rate, not just heap fullness. The GC tries to finish marking before the heap runs out of free space. If the mutator allocates faster than the GC can mark, the collector falls behind and must pause.
+
+```bash
+# Go: control GC pacing with GOGC
+GOGC=100 go run server.go   # default: GC triggers when heap doubles
+GOGC=200 go run server.go   # half as frequent, larger heap
+GOGC=50  go run server.go   # twice as frequent, smaller heap
+```
+
+A higher GOGC means fewer GCs but larger peak memory. A lower GOGC means more frequent GCs with smaller memory footprint.
+
+### Allocation Patterns That Hurt GC
+
+- **Allocating in hot loops**: Every iteration creates garbage.
+- **Large temporary objects**: They may bypass the young generation and land directly in old generation (pretenuring).
+- **Pointer-heavy data structures**: The GC must trace every pointer. Flat arrays of values are cheaper.
+- **Frequent string concatenation**: Creates many intermediate objects.
+
+```python
+# Bad: creates a new string for each iteration
+result = ""
+for item in items:
+    result += str(item)
+
+# Better: pre-allocate or use a list join
+parts = [str(item) for item in items]
+result = "".join(parts)
+```
+
+### Object Pooling
+
+One classic technique is **object pooling** -- reusing objects instead of allocating new ones. This works well for large, expensive objects (database connections, thread pools). For small, short-lived objects, pooling can actually hurt because the GC handles them efficiently already.
+
+The generational hypothesis exists for a reason: the GC is optimized for the common case (short-lived objects). Fighting the GC by pooling everything often backfires.
+
+### Self-Check Questions
+
+1. Why does reference counting alone fail to collect unreachable cycles?
+2. What problem does mark-compact solve that mark-sweep does not?
+3. Why do generational GCs have two survivor spaces instead of one?
+4. How does the write barrier prevent the GC from collecting a live object?
+5. Why does Go choose non-generational GC despite the generational hypothesis?
+
+---
+
+Garbage collection is one of the most impactful runtime features ever invented. It eliminates entire categories of bugs (use-after-free, double-free, memory leaks from forgotten frees) at the cost of some CPU and memory overhead. Understanding how GCs work -- mark-sweep, generational collection, tri-color marking, write barriers -- lets you write code that works with the GC rather than against it.
