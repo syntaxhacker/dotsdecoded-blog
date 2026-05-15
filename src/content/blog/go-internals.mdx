@@ -1,0 +1,686 @@
+---
+title: "Go Internals: Goroutines, Channels, and the GMP Scheduler"
+description: "A deep dive into Go's runtime — goroutines vs OS threads, the GMP scheduler (Goroutine, Machine, Processor), channel internals, memory model, and what makes Go concurrent by design."
+date: 2026-05-19T01:00:00
+tags: ["go", "golang", "concurrency", "internals", "runtime"]
+---
+
+import GoGoroutineDemo from '../../components/demos/GoGoroutineDemo'
+import GoGMPDemo from '../../components/demos/GoGMPDemo'
+import GoChannelDemo from '../../components/demos/GoChannelDemo'
+import GoSelectDemo from '../../components/demos/GoSelectDemo'
+import GoMemoryModelDemo from '../../components/demos/GoMemoryModelDemo'
+import GoArchitectureDemo from '../../components/demos/GoArchitectureDemo'
+
+## What Makes Go Concurrent
+
+Go is the only mainstream language that bakes concurrency into its syntax. The `go` keyword is not a library call — it is a language primitive that makes any function execute concurrently. Every Go program, even a trivial one-line script, starts with a main goroutine and has the full scheduler at its disposal.
+
+Most languages achieve concurrency through OS threads (Java, C++) or an event loop (Node.js, Python asyncio). Go does neither. Instead, it implements an **M:N scheduler** that multiplexes M goroutines across N OS threads. The runtime manages this entirely behind the scenes.
+
+The library catalog analogy: OS threads are like bookshelves — each one costs real space and you cannot have thousands of them in a room. Goroutines are like library index cards — cheap, plentiful, and the librarian (the Go scheduler) pulls out the right card when needed.
+
+<GoGoroutineDemo client:visible />
+
+## The GMP Scheduler
+
+The Go scheduler has three abstractions: G, M, and P.
+
+- **G (Goroutine)**: A lightweight thread of execution. Contains the stack, instruction pointer, and state (running, runnable, blocked).
+- **M (Machine)**: An OS thread. The runtime manages a pool of M's that execute G's. An M must be attached to a P to run goroutines.
+- **P (Processor)**: A scheduling context. Holds the local run queue of runnable G's. The number of P's is set by `GOMAXPROCS` (default: number of CPU cores).
+
+The critical insight: **P is not a physical processor**. It is a resource that bounds the amount of parallelism. At most `GOMAXPROCS` goroutines run simultaneously, because each running G needs a P, and there are only N P's.
+
+### Scheduling Loop
+
+Every M runs a scheduling loop:
+
+```go
+// Pseudocode of the scheduler loop
+func schedule(m *M) {
+    for {
+        // 1. Try local run queue of attached P
+        if g := m.p.localQueue.pop(); g != nil {
+            execute(g)
+            continue
+        }
+        // 2. Try global run queue
+        if g := globalQueue.pop(); g != nil {
+            execute(g)
+            continue
+        }
+        // 3. Try to steal from another P
+        if g := stealWork(m.p); g != nil {
+            execute(g)
+            continue
+        }
+        // 4. Park the M (idle)
+        park()
+    }
+}
+```
+
+When a goroutine makes a blocking call (channel operation, syscall, mutex lock), the scheduler parks that G and picks the next runnable one from the P's local queue. The M never blocks — only the G does.
+
+<GoGMPDemo client:visible />
+
+## Goroutine States
+
+A goroutine transitions through three primary states:
+
+```
+RUNNABLE → RUNNING → RUNNABLE  (preemption or yield)
+RUNNING  → BLOCKED   → RUNNABLE (channel/syscall/mutex → unblocked)
+```
+
+- **Running**: Actively executing on an M. At most GOMAXPROCS goroutines are in this state.
+- **Runnable**: Ready to run, waiting in a run queue (local or global).
+- **Blocked**: Waiting on a channel send/recv, mutex, syscall, or timer.
+
+The blocked state is what makes goroutines efficient. When a goroutine blocks on a channel, the runtime removes it from the P's local queue and parks it. The M picks the next goroutine without ever performing a blocking OS thread operation.
+
+### Goroutine Stack
+
+Each goroutine starts with a tiny 2 KB stack (compared to 1 MB+ for an OS thread). The stack is **dynamically growable** — when a goroutine needs more stack space, the runtime copies the entire stack to a larger buffer.
+
+```go
+// Stack growth is transparent
+func recursive(n int) int {
+    if n == 0 {
+        return 0
+    }
+    // Each call expands the stack as needed
+    return n + recursive(n-1)
+}
+```
+
+The stack copy mechanism:
+1. Runtime detects stack overflow via a guard page
+2. Allocates a new stack (2x the current size, minimum 2 KB, maximum 1 GB on 64-bit)
+3. Copies all stack frames using adjusted pointers
+4. Updates all pointers in the heap that point to the old stack (this is why Go has a garbage collector — it tracks pointers)
+
+## Cooperative Scheduling & Preemption
+
+Before Go 1.14, the scheduler was purely cooperative. A goroutine would run until it made a function call that triggered a scheduling point:
+
+- Channel send/recv
+- Mutex lock/unlock
+- `time.Sleep`
+- `runtime.Gosched()`
+- Memory allocation
+- System call
+
+The problem: a tight loop without any function calls could starve other goroutines:
+
+```go
+// Pre-Go 1.14: this loop never yields
+for i := 0; i < 1e9; i++ {
+    // No function calls — no scheduling point
+}
+```
+
+Go 1.14 introduced **async preemption**. The runtime's sysmon thread sends a SIGURG signal to a running M, causing the goroutine to yield at the next safe point (function prologue). This ensures no goroutine can monopolize a P.
+
+```
+Sysmon → SIGURG → M receives signal → goroutine yields → scheduler picks next G
+```
+
+### Safe Points
+
+Not every point in execution is safe to preempt. The runtime tracks "safe points" — locations where the goroutine's stack is in a consistent state (function entry, loop back-edge). The signal handler sets a flag, and the goroutine checks the flag at the next safe point.
+
+## Local & Global Run Queues
+
+Each P has a **local run queue** — a lock-free ring buffer that holds up to 256 goroutines. The scheduler pops from the local queue first because it is fast (no lock needed for the M that owns the P).
+
+The **global run queue** is a linked list protected by a mutex. Goroutines from `go` statements that cannot fit in a P's local queue go here. The scheduler checks the global queue every 61st scheduling iteration to ensure fairness.
+
+```go
+// Scheduling decision
+func schedule(p *P) *G {
+    // Every 61 iterations, check global queue
+    if s.ticks%61 == 0 {
+        if g := globalQueue.pop(); g != nil {
+            return g
+        }
+    }
+    // Prefer local queue
+    if g := p.localQueue.pop(); g != nil {
+        return g
+    }
+    // Fall back to global
+    if g := globalQueue.pop(); g != nil {
+        return g
+    }
+    return nil
+}
+```
+
+The 61:1 ratio ensures that goroutines in the global queue eventually get CPU time, preventing starvation.
+
+## Work Stealing
+
+When an M finishes executing all goroutines in its P's local queue and the global queue is empty, it does not go idle immediately. It picks another P at random and tries to steal half of its local queue.
+
+```go
+// Work stealing: steal half the goroutines from a random P
+func stealWork(p *P) *G {
+    for _, victim := range randomOrder(allProcessors) {
+        if victim != p && victim.localQueue.len() > 0 {
+            n := victim.localQueue.len() / 2
+            for i := 0; i < n; i++ {
+                g := victim.localQueue.popBack()
+                p.localQueue.push(g)
+            }
+            return p.localQueue.pop()
+        }
+    }
+    return nil
+}
+```
+
+Work stealing uses `popBack` from the victim (removing from the tail) and pushes to the thief's queue. This preserves the FIFO ordering of the victim's remaining goroutines.
+
+### Spinning M's
+
+An M that fails to steal work does not immediately block. It **spins** for a while — checking the global queue and attempting steals in a loop. Spinning ensures low latency when a new goroutine becomes runnable. The runtime limits the number of spinning M's to at most GOMAXPROCS.
+
+## Sysmon — The System Monitor
+
+The runtime spawns a dedicated OS thread called **sysmon** (system monitor). It runs independently of the scheduler and performs several critical tasks:
+
+- **Preemption**: Sends SIGURG to goroutines running longer than 10 ms (async preemption)
+- **Network polling**: Checks if goroutines blocked on network I/O can be unblocked
+- **Retaking P**: If an M is blocked on a syscall for more than 20 microseconds, sysmon unassigns the P from that M and makes it available for other M's
+- **GC trigger**: If no GC has run in 2+ minutes, sysmon triggers one
+
+Sysmon is the runtime's safety net. It ensures forward progress even if goroutines forget to yield and M's get stuck on long syscalls.
+
+### Syscall Handling
+
+When a goroutine makes a blocking syscall (e.g., file read, network I/O):
+
+1. The M enters the syscall with the G
+2. The P is detached from the M (becomes idle)
+3. Another M picks up the idle P and continues scheduling
+4. When the syscall returns, the G tries to find a P. If none is available, the G goes to the global run queue
+
+This is why Go can handle thousands of blocked I/O operations with only GOMAXPROCS M's. The M blocks on the syscall, but the P and scheduler continue working.
+
+## Channel Internals
+
+A channel in Go is a pointer to an `hchan` struct in the runtime:
+
+```go
+// Simplified hchan struct
+type hchan struct {
+    qcount   uint           // total data in buf
+    dataqsiz uint           // size of circular buffer
+    buf      unsafe.Pointer // pointer to buffer array
+    elemsize uint16         // size of each element
+    closed   uint32         // channel closed flag
+    elemtype *_type         // element type
+    sendx    uint           // send index in buffer
+    recvx    uint           // receive index in buffer
+    recvq    waitq          // list of blocked receivers
+    sendq    waitq          // list of blocked senders
+    lock     mutex          // protects all fields
+}
+```
+
+### Unbuffered Channels
+
+An unbuffered channel (`make(chan T)`) has `dataqsiz = 0`. A send blocks until a matching receive is ready, and vice versa. The runtime matches them directly — the sender copies its value into the receiver's stack frame without going through a buffer.
+
+```go
+// Unbuffered channel: handoff
+ch := make(chan int)
+
+// G1:
+ch <- 42  // blocks until G2 receives
+
+// G2:
+x := <-ch // unblocks G1, receives 42 directly
+```
+
+The runtime's `chansend` and `chanrecv` functions operate on the same `hchan` struct. When a goroutine calls `ch <- x`:
+
+1. Acquire the lock
+2. If `recvq` is not empty (someone is waiting to receive), dequeue a receiver, copy the value directly, unlock
+3. If `buf` has space, copy value into buffer, unlock
+4. Otherwise, enqueue the sender on `sendq`, park the goroutine, unlock
+
+Receiving follows the reverse order: check `sendq` first (direct handoff), then `buf`, then park on `recvq`.
+
+### Buffered Channels
+
+A buffered channel (`make(chan T, N)`) uses a circular buffer. Sends add to the buffer until full. Receives remove from the buffer until empty.
+
+```bash
+Visualizing hchan:
++-------------------------------+
+|        hchan                  |
+|  buf: [10, 20, _, _, _]      |
+|  sendx: 2 (next write slot)  |
+|  recvx: 0 (next read slot)   |
+|  sendq: [G3, G4] (blocked)   |
+|  recvq: []                    |
+|  lock: unlocked               |
++-------------------------------+
+```
+
+Key rules:
+
+- Send to a closed channel panics
+- Receive from a closed channel returns the zero value immediately
+- `close()` wakes up all goroutines in `recvq`
+- After draining, receives from closed channels return zero values
+
+<GoChannelDemo client:visible />
+
+## Select Implementation
+
+The `select` statement is one of Go's most sophisticated runtime features. It lets a goroutine wait on multiple channel operations simultaneously.
+
+```go
+select {
+case v := <-ch1:
+    // handle v
+case ch2 <- x:
+    // handle send
+case <-ch3:
+    // handle receive
+default:
+    // none ready
+}
+```
+
+### The Select Algorithm
+
+1. **Scramble cases**: Randomize the order of all cases (with `fastrand`)
+2. **Lock all channels**: Acquire locks on every channel involved (deadlock-safe ordering by hchan address)
+3. **Check each case** in scrambled order:
+   - For a receive: is `recvq` non-empty or `buf` non-empty?
+   - For a send: is `sendq` non-empty or `buf` non-full?
+   - If a case is ready: unlock all channels, execute the case, return
+4. **Default**: If no case is ready and `default` exists, unlock all channels and execute default
+5. **Block**: If no case is ready and no default:
+   - Enqueue the goroutine on all channels' `sendq`/`recvq`
+   - Park the goroutine
+   - When a channel operation unblocks this goroutine, dequeue from all channels' queues
+
+### Random Selection
+
+When multiple cases are ready simultaneously, Go picks one uniformly at random:
+
+```go
+// Go's runtime selects randomly among ready cases
+// This prevents one case from always being favored
+select {
+case <-ch1:
+    // equally likely as ch2 or ch3
+case <-ch2:
+    // equally likely
+case <-ch3:
+    // equally likely
+}
+```
+
+This is a critical design decision. Without randomization, a select that checks cases in order would always prefer the first ready case, leading to starvation. Go's select scatters the order per-call using `runtime.fastrand`.
+
+### Nil Channels
+
+A receive from or send to a nil channel blocks forever. In a `select`, nil channels are **never selected** — the runtime skips them entirely.
+
+```go
+var nilCh chan int
+
+select {
+case <-nilCh:
+    // never selected
+case <-readyCh:
+    // this case is selected if readyCh has data
+default:
+    // or this runs
+}
+```
+
+This is useful for dynamically disabling cases. Set a channel variable to nil, and its case in a select becomes inert.
+
+<GoSelectDemo client:visible />
+
+## Mutex: Futex vs Spinlock
+
+Go's `sync.Mutex` uses a two-level strategy: spin briefly, then fall back to a futex (fast userspace mutex on Linux).
+
+```go
+// Simplified mutex implementation
+type Mutex struct {
+    state int32   // locked=1 | starving? | woken? | waiters count
+    sema  uint32  // semaphore for parking goroutines
+}
+
+func (m *Mutex) Lock() {
+    // Fast path: try to acquire immediately
+    if atomic.CompareAndSwap(&m.state, 0, 1) {
+        return // locked!
+    }
+    // Slow path: spin then park
+    m.lockSlow()
+}
+```
+
+### The `lockSlow` Path
+
+1. **Spin**: Try to acquire the mutex in a tight loop (~4 iterations). If the mutex holder releases it quickly (common for short critical sections), the spinning goroutine acquires it without a context switch.
+2. **Park**: After spinning, the goroutine increments the waiter count and calls `runtime_Semacquire`. This parks the goroutine and puts it on a semaphore queue.
+3. **Wakeup**: When the mutex is unlocked, the runtime wakes one waiter from the semaphore queue.
+
+### Starvation Mode
+
+Go 1.8+ added starvation mode. If a goroutine waits for more than 1 ms to acquire a mutex, the mutex enters starvation mode:
+
+- The goroutine is always placed at the front of the waiter queue
+- The holder of the mutex unlocks directly to the next waiter (no spinning)
+- Starvation mode ends when the goroutine acquires the mutex successfully
+
+```
+Normal mode:
+  Goroutine A holds mutex
+  Goroutine B spins briefly, then parks
+  Goroutine A unlocks, B wakes up
+
+Starvation mode:
+  Goroutine B has been waiting >1ms
+  Mutex enters starvation
+  A unlocks and hands off directly to B
+  No spinning allowed
+```
+
+## GC Interaction with Scheduler
+
+Go's garbage collector is concurrent and runs alongside application goroutines. The GC interacts with the scheduler at several points.
+
+### GC Phases
+
+```
+STW → Concurrent Mark → STW → Concurrent Sweep
+```
+
+1. **Sweep Termination (STW)**: All goroutines must reach a safe point. The scheduler ensures no goroutine is in the middle of mutating the heap.
+2. **Concurrent Mark**: GC worker goroutines (assists) run alongside application goroutines. The scheduler treats GC workers as regular goroutines.
+3. **Mark Termination (STW)**: Final STW to finish marking.
+4. **Concurrent Sweep**: Sweeping runs lazily in the background, triggered by allocations.
+
+### GC Worker Goroutines
+
+The runtime creates dedicated goroutines for concurrent marking. These GC workers are scheduled like any other goroutine, but they have special priority:
+
+```go
+// GC workers are scheduled alongside user goroutines
+// They have dedicated P time proportional to allocation rate
+func gcBgMarkWorker() {
+    for {
+        // Wait for GC mark phase
+        <-gcBgMarkWorkerPool
+        // Mark work
+        markRoots()
+        drainWorkBuffers()
+    }
+}
+```
+
+### GC Assist
+
+When an application goroutine allocates memory faster than the GC can mark, the runtime forces the goroutine to help (GC assist):
+
+```
+Allocation → GC Assist → Mark some objects → Continue
+```
+
+This creates feedback: if you allocate more, you help more, which keeps the GC pace matched to allocation rate.
+
+### Write Barrier
+
+During concurrent marking, the runtime needs to track pointer writes. Go uses a **Dijkstra-style insertion write barrier**:
+
+```go
+// Write barrier: before writing a pointer
+func writeBarrier(dst *unsafe.Pointer, src unsafe.Pointer) {
+    if gcphase == GC_MARK {
+        // Shade the new pointer (mark it)
+        shade(src)
+    }
+    *dst = src
+}
+```
+
+The write barrier ensures that concurrent marking does not miss reachable objects. It activates during the GC mark phase and deactivates during sweep.
+
+## Happens-Before & Memory Model
+
+Go's memory model defines the synchronization guarantees between goroutines. Without synchronization, writes in one goroutine are not guaranteed to be visible in another — this is a **data race**.
+
+### Happens-Before Rules
+
+The basic rule: A write to a variable happens-before a read that observes the write, provided there is a synchronization operation between them.
+
+```
+Without synchronization:
+  G1: x = 42   |   G2: print(x)  // DATA RACE: may print 0 or 42
+```
+
+With channel synchronization:
+```
+With channel:
+  G1: x = 42           |   G2: <-ch  // happens-before
+  G1: ch <- 1          |   G2: print(x)  // guaranteed to print 42
+```
+
+A send on a channel happens-before the corresponding receive completes. This means any write before the send is visible to the goroutine after the receive.
+
+### Sync Primitives and Happens-Before
+
+- **Channel**: Send happens-before receive
+- **Mutex**: Unlock happens-before next Lock
+- **WaitGroup**: Wait returns after the last Done call
+- **Once**: Do(f) happens-before all other calls to Do return
+- **Goroutine**: The go statement happens-before the goroutine starts
+- **atomic**: Store happens-before Load (with proper memory ordering)
+
+```go
+// Mutex happens-before example
+var mu sync.Mutex
+var x int
+
+// G1:
+mu.Lock()
+x = 42
+mu.Unlock()  // happens-before G2's Lock
+
+// G2:
+mu.Lock()    // synchronizes with G1's Unlock
+print(x)     // guaranteed to see 42
+mu.Unlock()
+```
+
+### Detecting Data Races
+
+Go has a built-in race detector:
+
+```bash
+go run -race main.go
+go build -race main.go
+```
+
+The race detector instruments every memory access. At runtime, it reports any unsynchronized read/write to the same memory location:
+
+```bash
+WARNING: DATA RACE
+Read by goroutine 2:
+  main.readX()
+      /path/main.go:15 +0x3a
+
+Previous write by goroutine 1:
+  main.writeX()
+      /path/main.go:10 +0x34
+```
+
+The race detector adds overhead (~10x memory, ~5x CPU), so use it in testing, not production.
+
+<GoMemoryModelDemo client:visible />
+
+## Goroutine Leak Detection
+
+A goroutine leak occurs when goroutines are created but never exit. The goroutine stays in a blocked state forever, consuming stack memory.
+
+### Common Leak Patterns
+
+```go
+// Leak 1: Send on a channel nobody receives from
+func leak() {
+    ch := make(chan int)
+    go func() {
+        ch <- 42  // blocks forever — nobody reads
+    }()
+}
+
+// Leak 2: Receive from a channel nobody sends to
+func leak2() {
+    ch := make(chan int)
+    go func() {
+        <-ch  // blocks forever — nobody sends
+    }()
+}
+
+// Leak 3: Blocked on a mutex that never unlocks
+func leak3() {
+    var mu sync.Mutex
+    mu.Lock()
+    go func() {
+        mu.Lock()  // blocks forever — first Lock never unlocks
+    }()
+}
+```
+
+### Detection Strategies
+
+1. **pprof**: The `net/http/pprof` package exposes goroutine profiles:
+
+```bash
+go tool pprof http://localhost:6060/debug/pprof/goroutine
+```
+
+2. **runtime.NumGoroutine**: Monitor goroutine count over time:
+
+```go
+import "runtime"
+
+func monitor() {
+    for {
+        n := runtime.NumGoroutine()
+        log.Printf("goroutines: %d", n)
+        time.Sleep(10 * time.Second)
+    }
+}
+```
+
+3. **leakcheck**: Testing tools like `go.uber.org/goleak` detect leaked goroutines in tests:
+
+```go
+func TestNoLeak(t *testing.T) {
+    defer goleak.VerifyNone(t)
+    // test code
+}
+```
+
+### Preventing Leaks
+
+- Use contexts with timeouts for blocking operations
+- Ensure channels are closed or cleaned up
+- Use buffered channels when the sender may outlive the receiver
+- Use `select` with `default` or timeouts for non-blocking channel ops
+
+```go
+// Safe pattern: context cancellation prevents leak
+func safe(ctx context.Context, ch chan int) {
+    select {
+    case ch <- 42:
+    case <-ctx.Done():
+        // context cancelled, don't block
+    }
+}
+```
+
+## Full Runtime Architecture
+
+Go's runtime is a self-contained library compiled into every binary. There is no VM, no JIT, and no runtime dependency to install.
+
+```
+Toolchain:
+  go build
+    → go tool compile (source → AST → SSA → .o)
+      → go tool asm (assembly → .o)
+        → go tool pack (archive .a files)
+          → go tool link (resolve symbols, embed runtime)
+            → static executable
+
+Runtime in the binary:
+  ┌─────────────────────────────────┐
+  │         Go Binary               │
+  │  ┌───────────────────────────┐  │
+  │  │    GMP Scheduler          │  │
+  │  │  ┌─────┐ ┌─────┐ ┌─────┐│  │
+  │  │  │ G's │ │ M's │ │ P's ││  │
+  │  │  └─────┘ └─────┘ └─────┘│  │
+  │  │  Sysmon (preemption)     │  │
+  │  ├───────────────────────────┤  │
+  │  │    GC (Concurrent)        │  │
+  │  │  Marker  Sweeper  Worker │  │
+  │  ├───────────────────────────┤  │
+  │  │    Memory Allocator       │  │
+  │  │  mcache  mcentral  mheap │  │
+  │  ├───────────────────────────┤  │
+  │  │    Network Poller         │  │
+  │  │    (epoll/kqueue/IOCP)    │  │
+  │  └───────────────────────────┘  │
+  │           │                     │
+  │      syscall/SIGURF            │
+  │           │                     │
+  │     OS Kernel (Linux/macOS)    │
+  └─────────────────────────────────┘
+```
+
+<GoArchitectureDemo client:visible />
+
+### Key Runtime Components
+
+- **Network Poller**: Integrates with OS-specific I/O multiplexing (epoll on Linux, kqueue on macOS, IOCP on Windows). When a goroutine blocks on network I/O, the runtime registers the fd with the poller and parks the goroutine. When data arrives, the poller unblocks the goroutine.
+- **Timers**: Per-P timer heaps. Each P maintains a min-heap of timers. The scheduler checks the timer heap before picking the next goroutine. Timer accuracy is ~1 ms.
+- **Finalizers**: Objects can have finalizer functions that run when the GC discovers the object is unreachable. Finalizers run on a dedicated goroutine.
+
+## Summary
+
+| Concept | Mechanism | Key Insight |
+|---------|-----------|-------------|
+| Goroutines | M:N scheduling | Lightweight stacks, growable, multiplexed onto threads |
+| GMP | G, M, P | P limits parallelism, M executes, G is the workload |
+| Scheduling | Cooperative + preemptive | Yield at channel ops, async preemption via SIGURG |
+| Work stealing | Random steal from P queues | Balances load, keeps M's busy |
+| Channels | hchan struct | Buffer + sendq/recvq + mutex, direct handoff when possible |
+| Select | Scrambled case checking | Random selection among ready cases, nil channels skipped |
+| Mutex | Spin + futex | Brief spin avoids context switch, starvation mode for fairness |
+| GC | Concurrent mark-sweep | GC assists, write barrier, sub-ms pauses |
+| Memory model | Happens-before | Channels, mutexes, and atomics establish ordering |
+
+### Self-Check
+
+- How does Go multiplex thousands of goroutines onto a handful of OS threads?
+- What happens when a goroutine makes a blocking syscall?
+- How does the scheduler prevent goroutine starvation?
+- Why does select randomize case selection?
+- What is the difference between an unbuffered and buffered channel at the runtime level?
+- How does async preemption work in Go 1.14+?
+- What is a GC assist and when does it trigger?
