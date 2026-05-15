@@ -1,0 +1,629 @@
+---
+title: "Design a Notification System: Push, Email, and SMS at Scale"
+description: "A complete system design walkthrough for a multi-channel notification system — push notifications (APNS/FCM), email/SMS gateways, template management, delivery guarantees, deduplication, and rate limiting."
+date: 2026-05-16T01:00:00
+tags: ["system-design", "interview", "notifications", "real-time", "design-problem"]
+---
+
+import NotifRequirementsDemo from '../../components/demos/NotifRequirementsDemo'
+import NotifPipelineDemo from '../../components/demos/NotifPipelineDemo'
+import PushNotificationDemo from '../../components/demos/PushNotificationDemo'
+import TemplateEngineDemo from '../../components/demos/TemplateEngineDemo'
+import NotifPreferencesDemo from '../../components/demos/NotifPreferencesDemo'
+import NotifArchitectureDemo from '../../components/demos/NotifArchitectureDemo'
+
+You wake up at 3 AM. Your phone buzzes. Your server is on fire. A push notification tells you the news before your monitoring dashboard does. Across the world, a user resets their password and gets an email. Another user just got an SMS about a package delivery. All of these flow through a notification system — one of the most critical yet invisible infrastructure pieces in modern software.
+
+Designing a notification system that handles push (APNS/FCM), email, SMS, and in-app notifications at scale is a classic system design interview problem. It touches distributed queuing, external provider integration, template rendering, preference filtering, rate limiting, and delivery guarantees. This walkthrough covers every layer.
+
+## Understanding the Problem
+
+A notification system delivers messages to users across multiple channels. Think of it like a postal service with four different delivery methods: push is like a telegram that arrives immediately, email is like a letter that sits in a mailbox, SMS is like a postcard, and in-app is like a message pinned to the user's fridge.
+
+When a service needs to tell a user something — "your order shipped," "someone liked your photo," "your password was reset" — it sends a notification request. The notification system handles the rest: it decides which channel to use, renders the message, respects the user's preferences, and tracks whether the delivery succeeded.
+
+<NotifRequirementsDemo client:visible />
+
+### Notification Types
+
+Notifications fall into three categories, each with different delivery expectations:
+
+**Transactional:** Password resets, order confirmations, payment receipts. The user expects these immediately. If the email does not arrive in 30 seconds, they hit "resend." Delivery SLA: under 5 seconds. Reliability is critical.
+
+**Promotional:** Weekly digests, flash sale announcements, new feature releases. These are batched and sent during off-peak hours. Delivery SLA: minutes to hours. Rate limits matter more than latency.
+
+**Alert:** Service outage warnings, fraud detection flags, threshold breaches. These are urgent (usually push or SMS). Delivery SLA: under 1 second. Must bypass quiet hours.
+
+### Channels
+
+| Channel | Provider | Latency | Cost | Best For |
+|---|---|---|---|---|
+| Push | APNS (iOS), FCM (Android) | < 1s | Free | Urgent, engagement |
+| Email | SendGrid, SES, Mailgun | 1-60s | $0.0001/email | Rich content, receipts |
+| SMS | Twilio, Vonage, SNS | 1-5s | $0.0075/SMS | Urgent, high-open-rate |
+| In-App | WebSocket, SSE, polling | < 0.5s | Free | Real-time UI updates |
+
+## Capacity Estimation
+
+Before designing, estimate the scale. Assume a mid-to-large platform (10 million monthly active users):
+
+- **Daily notifications:** 50 million (5 per user per day on average)
+- **Write QPS:** 50M / 86,400 = ~580 writes/second peak, spike to ~5,000 writes/second during campaigns
+- **Channel split:** 40% push, 35% email, 15% SMS, 10% in-app
+- **Payload size:** ~2 KB average (recipient, template ID, variables, metadata)
+- **Storage per day:** 50M x 2 KB = ~100 GB/day
+- **Storage per year:** 100 GB x 365 = ~36.5 TB (for delivery logs and analytics)
+
+The write-to-read ratio is unusual here: most systems are read-heavy, but notification systems are write-heavy. Every notification is a new write. Users "read" notifications on their devices, not on our servers.
+
+## System API Design
+
+The notification API is simple but must handle batch operations and idempotency:
+
+```
+POST /api/v1/notifications/send      → Send a single notification
+POST /api/v1/notifications/send-batch → Send to multiple recipients
+GET  /api/v1/notifications/{id}      → Check delivery status
+POST /api/v1/notifications/templates → Create a template
+GET  /api/v1/notifications/templates → List templates
+PUT  /api/v1/users/preferences       → Update user notification prefs
+```
+
+The primary endpoint accepts a payload like:
+
+```json
+{
+  "recipient_id": "user_abc123",
+  "channel": "email",
+  "template_id": "welcome_email_v2",
+  "variables": {
+    "username": "alice",
+    "activation_link": "https://example.com/activate?token=xyz"
+  },
+  "idempotency_key": "req_abc_20260515_001"
+}
+```
+
+The `idempotency_key` is critical. Without it, a network retry from the client could send the same notification twice. The server checks if it has already processed this key and returns the existing result.
+
+## The Notification Pipeline
+
+Every notification travels through a multi-stage pipeline. Understanding each stage is essential because different failure modes appear at every step.
+
+<NotifPipelineDemo client:visible />
+
+### Stage 1: Validation
+
+The API receives the request and validates:
+- Recipient exists and is active
+- Channel is valid (push, email, SMS, in-app)
+- Template exists and is published
+- Variables match the template's expected keys
+- Idempotency key is not a duplicate
+
+### Stage 2: Enrichment
+
+The system fetches additional user data from the user service:
+- Device tokens (for push)
+- Email address, phone number
+- Preferred language and timezone
+- Notification preferences (opt-in/out per type per channel)
+- Quiet hours configuration
+
+This is a read from the user service cache (Redis). If the user service is down, the notification system should use cached preferences from its local database.
+
+### Stage 3: Preference Filtering
+
+Before rendering, check whether the user wants this notification at all. If the user has disabled "promotional emails," a promotional email is dropped silently. If quiet hours are active (e.g., 10 PM - 8 AM), push and SMS notifications are queued for later delivery.
+
+<NotifPreferencesDemo client:visible />
+
+### Stage 4: Template Rendering
+
+The system loads the template by ID and substitutes variables. Templates use a safe, sandboxed templating language like Liquid or Jinja — NOT JavaScript eval or string concatenation (which leads to injection attacks).
+
+<TemplateEngineDemo client:visible />
+
+### Stage 5: Channel Routing
+
+The enriched, rendered notification is published to a channel-specific message queue topic. Kafka topics like `notifications.push`, `notifications.email`, `notifications.sms`, `notifications.inapp` allow independent scaling per channel. The email worker pool can scale to 100 instances while the push pool stays at 10.
+
+### Stage 6: Rate Limiting
+
+Each channel has rate limits — both at the provider level (SendGrid caps at 10,000 emails/second) and the user level (no more than 3 SMS per hour per user). A token bucket per user per channel prevents abuse.
+
+### Stage 7: Send
+
+The channel handler calls the external provider's API. Push notifications go to FCM or APNS. Emails go to SendGrid or SES. SMS goes to Twilio. The handler records the provider's response, including the `provider_message_id` for tracking.
+
+### Stage 8: Delivery Tracking
+
+Delivery is asynchronous. For email, SendGrid sends a webhook callback when the email is delivered, opened, or bounced. For push, FCM returns a delivery receipt. A delivery tracker service updates the notification status in the database.
+
+### Stage 9: Retry with Backoff
+
+If the provider returns a transient error (rate limited, timeout, 503), the notification is moved to a retry queue. The retry schedule uses exponential backoff:
+
+```
+Retry 1: wait 60 seconds
+Retry 2: wait 5 minutes
+Retry 3: wait 15 minutes
+Retry 4: wait 1 hour
+After 4 failures: move to Dead Letter Queue
+```
+
+### Stage 10: Dead Letter Queue
+
+After exhausting retries, the notification is moved to a dead letter queue (DLQ). An operator dashboard alerts on DLQ depth. An operator can manually replay notifications from the DLQ after fixing the root cause (e.g., fixing a broken template or unblocking an API key).
+
+## Push Notification Infrastructure
+
+Push notifications have a unique architecture compared to email and SMS. They require device registration, platform-specific gateways, and handle the fact that devices are often offline.
+
+<PushNotificationDemo client:visible />
+
+### Registration Token Flow
+
+1. User opens the app for the first time.
+2. The app requests a device token from the OS push service (APNS for iOS, FCM for Android).
+3. The OS returns a unique token string.
+4. The app sends the token to your server's registration endpoint.
+5. Your server stores the token associated with the user ID and device.
+
+```python
+POST /api/v1/devices/register
+{
+  "user_id": "user_abc123",
+  "device_token": "fE1a2b3c4d5e6f7g8h9i0j...",
+  "platform": "ios",
+  "app_version": "3.2.1"
+}
+```
+
+### Sending a Push Notification
+
+```python
+import requests
+
+def send_push(device_token: str, payload: dict, platform: str) -> dict:
+    if platform == "ios":
+        url = "https://api.push.apple.com/3/device/{}".format(device_token)
+        headers = {
+            "apns-topic": "com.example.app",
+            "apns-push-type": "alert",
+            "authorization": "bearer {}".format(apns_jwt_token()),
+        }
+    else:
+        url = "https://fcm.googleapis.com/fcm/send"
+        headers = {
+            "Authorization": "key={}".format(fcm_server_key),
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "to": device_token,
+            "notification": {
+                "title": payload.get("title"),
+                "body": payload.get("body"),
+            },
+        }
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=5)
+    return {"status": resp.status_code, "body": resp.json()}
+```
+
+### Handling Invalid Tokens
+
+If FCM or APNS returns a 410 (Unregistered) or 400 (BadDeviceToken), the token is invalid — the user likely uninstalled the app. Remove the token from your database immediately to avoid wasting retries.
+
+```python
+def handle_push_response(resp: dict, device_token: str):
+    if resp.get("status") == 410:
+        remove_device_token(device_token)
+    elif resp.get("status") >= 500:
+        enqueue_retry(device_token, delay=exponential_backoff())
+```
+
+## Email and SMS Gateways
+
+Email and SMS are simpler to send but harder to track. Unlike push where delivery is near-instant (if the device is online), email can take seconds to minutes, and SMS delivery is best-effort.
+
+### Email Provider Abstraction
+
+Wrap your email provider behind an interface so you can swap providers without changing business logic:
+
+```python
+class EmailProvider:
+    def send(self, to: str, subject: str, body_html: str) -> dict:
+        raise NotImplementedError
+
+class SendGridProvider(EmailProvider):
+    def send(self, to: str, subject: str, body_html: str) -> dict:
+        payload = {
+            "personalizations": [{"to": [{"email": to}]}],
+            "from": {"email": "noreply@example.com"},
+            "subject": subject,
+            "content": [{"type": "text/html", "value": body_html}],
+        }
+        resp = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            json=payload,
+            headers={"Authorization": "Bearer {}".format(sendgrid_api_key)},
+            timeout=10,
+        )
+        return {"message_id": resp.headers.get("X-Message-Id")}
+
+class SESProvider(EmailProvider):
+    def send(self, to: str, subject: str, body_html: str) -> dict:
+        client = boto3.client("ses", region_name="us-east-1")
+        resp = client.send_email(
+            Source="noreply@example.com",
+            Destination={"ToAddresses": [to]},
+            Message={
+                "Subject": {"Data": subject},
+                "Body": {"Html": {"Data": body_html}},
+            },
+        )
+        return {"message_id": resp["MessageId"]}
+```
+
+### SMS Provider
+
+```python
+class TwilioProvider:
+    def send(self, to: str, message: str) -> dict:
+        client = Client(twilio_account_sid, twilio_auth_token)
+        resp = client.messages.create(
+            body=message,
+            from_="+15551234567",
+            to=to,
+        )
+        return {"message_id": resp.sid, "status": resp.status}
+```
+
+### Webhook Callbacks
+
+Email and SMS providers send delivery status via webhooks. Your notification system needs a webhook endpoint per provider:
+
+```
+POST /api/v1/webhooks/sendgrid   → SendGrid event data
+POST /api/v1/webhooks/ses        → SES bounce/complaint notifications
+POST /api/v1/webhooks/twilio     → Twilio delivery status
+POST /api/v1/webhooks/fcm        → FCM delivery receipts
+```
+
+The webhook handler maps the provider's message ID back to your internal notification ID and updates the delivery status:
+
+```python
+@app.post("/api/v1/webhooks/sendgrid")
+async def handle_sendgrid_webhook(events: list):
+    for event in events:
+        message_id = event.get("sg_message_id")
+        status = event.get("event")
+        notification_id = db.lookup_by_provider_message_id(message_id)
+        if status == "delivered":
+            db.update_delivery_status(notification_id, "delivered")
+        elif status == "bounce":
+            db.update_delivery_status(notification_id, "bounced")
+            mark_email_invalid(event.get("email"))
+        elif status == "open":
+            db.record_open(notification_id, event.get("timestamp"))
+```
+
+## Template System at Scale
+
+Templates need versioning, preview, and sandboxed execution. A template is a string with `{{variable}}` placeholders. The template engine loads the template by ID and version, substitutes variables, and returns the rendered output.
+
+### Template Storage Schema
+
+```json
+{
+  "template_id": "welcome_email",
+  "version": "v2.1.0",
+  "channel": "email",
+  "subject": "Welcome to {{app_name}}, {{username}}!",
+  "body": "Hi {{username}},\n\nWelcome to {{app_name}}...",
+  "variables": ["username", "app_name", "activation_link"],
+  "status": "published",
+  "created_at": "2026-05-01T00:00:00Z"
+}
+```
+
+### Rendering Safely
+
+```python
+from jinja2 import Environment, BaseLoader, TemplateError, select_autoescape
+
+env = Environment(
+    loader=BaseLoader(),
+    autoescape=select_autoescape(["html"]),
+    undefined=StrictUndefined,
+)
+
+def render_template(template_body: str, variables: dict) -> str:
+    try:
+        tpl = env.from_string(template_body)
+        return tpl.render(**variables)
+    except TemplateError as e:
+        raise TemplateRenderError(str(e))
+```
+
+StrictUndefined is critical. If a template references a variable that was not provided, it raises an error immediately rather than silently substituting an empty string. Better to fail fast than send a broken notification.
+
+### Template Versioning Rules
+
+- Templates are immutable once created. You cannot edit a published template.
+- To change a template, create a new version. The template_id stays the same, but the version increments.
+- Notifications reference a specific template_id + version pair at send time. If a template referenced does not exist, the notification fails validation.
+- Draft templates can be previewed but not used for delivery.
+
+## Deduplication and Exactly-Once Delivery
+
+Exactly-once delivery is notoriously hard with distributed systems and external providers. Notification systems aim for "at-least-once" delivery with deduplication — the system will deliver at least once, and the idempotency key prevents the same notification from being sent twice.
+
+### Idempotency Key
+
+Every notification request carries an idempotency key. The server stores the key in a DDB table or Redis with a TTL (say, 7 days). Before processing, it checks:
+
+```python
+def process_notification(request: NotificationRequest) -> NotificationResult:
+    key = request.idempotency_key
+    existing = idempotency_cache.get(key)
+    if existing:
+        return existing.result  # Return cached result, do NOT resend
+    result = send_notification(request)
+    idempotency_cache.set(key, result, ttl=604800)
+    return result
+```
+
+### Handling Duplicate Provider Deliveries
+
+Even with idempotency on the send side, providers might deliver duplicates (rare but possible). The client app should handle this: a push notification with the same `notification_id` in the payload should update the existing notification in the tray rather than creating a new one.
+
+```python
+# In the mobile app's push handler
+void onPushReceived(RemoteMessage message) {
+    String notificationId = message.getData().get("notification_id");
+    Notification existing = notificationManager.getActiveNotification(notificationId);
+    if (existing != null) {
+        notificationManager.updateNotification(notificationId, message);
+    } else {
+        notificationManager.createNotification(notificationId, message);
+    }
+}
+```
+
+## Rate Limiting Per Channel
+
+Rate limiting operates at two levels: provider-level and user-level. Provider-level rate limits are fixed (e.g., SendGrid allows 10,000 emails/second on a standard plan). User-level rate limits prevent abuse (e.g., a single user should not receive 100 SMS in 5 minutes).
+
+### Provider-Level Rate Limiter
+
+A global token bucket for each provider:
+
+```python
+from bucket import TokenBucket
+
+sendgrid_bucket = TokenBucket(capacity=10000, refill_rate=10000, refill_interval=1.0)
+twilio_bucket = TokenBucket(capacity=20, refill_rate=20, refill_interval=1.0)
+
+def send_via_provider(channel: str, payload: dict, provider: str):
+    if provider == "sendgrid":
+        if not sendgrid_bucket.try_consume(1):
+            raise RateLimitError("SendGrid rate limit exceeded")
+    elif provider == "twilio":
+        if not twilio_bucket.try_consume(1):
+            raise RateLimitError("Twilio rate limit exceeded")
+```
+
+### User-Level Rate Limiter
+
+Per user, per channel, sliding window counters in Redis:
+
+```python
+def check_user_rate_limit(user_id: str, channel: str) -> bool:
+    key = "ratelimit:{}:{}".format(user_id, channel)
+    window = 3600  # 1 hour sliding window
+    max_requests = {
+        "push": 60,
+        "email": 20,
+        "sms": 3,
+        "inapp": 100,
+    }.get(channel, 10)
+
+    current = redis_client.incr(key)
+    if current == 1:
+        redis_client.expire(key, window)
+
+    return current <= max_requests
+```
+
+If the check fails, the notification is queued with a delay rather than dropped. The rate limiter tells the caller how long to wait:
+
+```python
+def send_notification(request):
+    if not check_user_rate_limit(request.recipient_id, request.channel):
+        retry_after = get_rate_limit_retry_after(request.recipient_id, request.channel)
+        return NotificationResult(
+            status="queued",
+            retry_after_seconds=retry_after,
+        )
+```
+
+## Full Architecture
+
+Here is how everything fits together. The notification API is the single entry point. A message queue decouples the API from the workers. Each channel has its own worker pool and handler. External gateways deliver to end devices.
+
+<NotifArchitectureDemo client:visible />
+
+### Data Flow Summary
+
+1. Client sends `POST /api/v1/notifications/send` to the Notification API.
+2. The API validates, deduplicates (idempotency key), and enriches the request.
+3. The API publishes the enriched notification to a channel-specific Kafka topic.
+4. A worker consumer picks up the message, renders the template, checks preferences, applies rate limits.
+5. The worker calls the appropriate channel handler (PushHandler, EmailHandler, SmsHandler, InAppHandler).
+6. The channel handler calls the external provider SDK (FCM, APNS, SendGrid, Twilio).
+7. The provider delivers to the end device (iPhone, Android phone, email inbox, SMS inbox).
+8. A delivery tracker receives provider webhooks and updates the delivery status in the database.
+
+### Database Schema for Delivery Tracking
+
+```sql
+CREATE TABLE notifications (
+    id UUID PRIMARY KEY,
+    recipient_id VARCHAR(64) NOT NULL,
+    channel VARCHAR(16) NOT NULL CHECK (channel IN ('push', 'email', 'sms', 'inapp')),
+    template_id VARCHAR(64),
+    template_version VARCHAR(16),
+    variables JSONB,
+    status VARCHAR(16) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'sent', 'delivered', 'failed', 'bounced', 'opened', 'clicked')),
+    provider_message_id VARCHAR(255),
+    idempotency_key VARCHAR(128) UNIQUE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    delivered_at TIMESTAMP WITH TIME ZONE,
+    INDEX idx_recipient_status (recipient_id, status),
+    INDEX idx_idempotency (idempotency_key),
+    INDEX idx_provider_message (provider_message_id)
+);
+
+CREATE TABLE notification_templates (
+    template_id VARCHAR(64) NOT NULL,
+    version VARCHAR(16) NOT NULL,
+    channel VARCHAR(16) NOT NULL,
+    subject_template TEXT,
+    body_template TEXT NOT NULL,
+    variables TEXT[],
+    status VARCHAR(16) NOT NULL DEFAULT 'draft',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (template_id, version)
+);
+```
+
+### Monitoring and Observability
+
+Every stage of the pipeline emits metrics. These are the essential dashboard panels:
+
+- **Notification volume:** Count per channel, per status, per template (broken line chart)
+- **Delivery latency:** p50/p95/p99 time from "sent" to "delivered" per channel
+- **Provider error rate:** 4xx and 5xx responses from external providers
+- **DLQ depth:** Number of notifications stuck in retry and DLQ
+- **Rate limit hits:** How often user-level and provider-level limits are hit
+- **Webhook processing lag:** Time between provider event and status update in DB
+
+Alert when DLQ depth exceeds 100, when provider error rate exceeds 5%, or when delivery latency p99 exceeds 30 seconds for push.
+
+## Retry Strategy with Exponential Backoff
+
+A notification that fails to send is not discarded — it is retried with increasing delays. The approach is exponential backoff with jitter to avoid the thundering herd problem when a provider recovers.
+
+```python
+import random
+import time
+
+MAX_RETRIES = 4
+BACKOFF_BASE = [60, 300, 900, 3600]  # 1min, 5min, 15min, 1hr
+
+def retry_with_backoff(notification_id: str, attempt: int):
+    if attempt > MAX_RETRIES:
+        move_to_dlq(notification_id)
+        return
+
+    delay = BACKOFF_BASE[attempt - 1]
+    jitter = random.uniform(0, delay * 0.1)
+    total_delay = delay + jitter
+
+    time.sleep(total_delay)
+    result = send_notification_by_id(notification_id)
+
+    if result.status == "failed":
+        retry_with_backoff(notification_id, attempt + 1)
+    elif result.status == "rate_limited":
+        retry_with_backoff(notification_id, attempt)  # same attempt, shorter wait
+```
+
+### Retry Queue Implementation
+
+Rather than `time.sleep()` in the worker (which blocks the thread), use a scheduled retry queue:
+
+```python
+# Publish to a retry topic with a scheduled delivery time
+def enqueue_retry(notification_id: str, attempt: int):
+    delay = BACKOFF_BASE[attempt - 1] if attempt <= len(BACKOFF_BASE) else 3600
+    deliver_at = int(time.time()) + delay
+    retry_topic.publish(
+        message={"notification_id": notification_id, "attempt": attempt},
+        scheduled_delivery=deliver_at,
+    )
+```
+
+Kafka does not natively support scheduled delivery, but you can implement it with a priority queue in Redis or use SQS's delay queue (max 15 minutes). For longer delays, a separate "retry worker" polls a database table of scheduled retries.
+
+## Analytics and Click Tracking
+
+Beyond delivery, notification systems track engagement: did the user open the email? Did they click the link? This drives decisions about timing, channel selection, and content.
+
+### Email Tracking
+
+Insert tracking pixels and link redirects:
+
+```html
+<!-- Tracking pixel for open detection -->
+<img src="https://track.example.com/open?nid={{notification_id}}" width="1" height="1" alt="" />
+
+<!-- Link wrapping for click tracking -->
+<a href="https://track.example.com/click?nid={{notification_id}}&url={{encoded_url}}">
+  Click here
+</a>
+```
+
+The tracking service records the event and redirects the user:
+
+```python
+@app.get("/click")
+async def track_click(nid: str, url: str):
+    db.record_click(nid, timestamp=time.time(), user_agent=request.headers.get("User-Agent"))
+    return RedirectResponse(url=url)
+```
+
+### Push Notification Engagement
+
+For push notifications, track:
+- Delivered: confirmed by FCM/APNS delivery receipt
+- Opened: the app reports when the user taps the notification
+- Dismissed: iOS reports when the user dismisses (if the app uses Notification Service Extension)
+
+```python
+@app.post("/api/v1/analytics/push-opened")
+async def record_push_open(notification_id: str, device_id: str):
+    db.record_event(notification_id, event="opened", device_id=device_id)
+```
+
+## Design Decision Summary
+
+| Decision | Choice | Alternative | Why |
+|---|---|---|---|
+| Message queue | Kafka (per-channel topics) | RabbitMQ, SQS | Higher throughput, replay capability, per-channel consumer groups |
+| Template engine | Jinja2 with StrictUndefined | Mustache, Liquid | Safe by default, strict variable checking |
+| Idempotency | DDB/Redis with TTL | Database unique constraint | Lower latency, automatic expiry |
+| Rate limiting | Token bucket + sliding window | Leaky bucket | Handles bursts, simpler implementation |
+| Delivery tracking | Webhook receiver | Polling provider APIs | Lower latency, fewer API calls |
+| Retry strategy | Exponential backoff with jitter | Fixed interval | Prevents thundering herd, faster recovery |
+| Push providers | FCM + APNS | Unified push API | Direct access to platform features |
+| Email providers | SendGrid + SES | Mailgun, Postmark | SendGrid for analytics, SES for cost |
+
+## Self-Check
+
+- [ ] Can you explain the four notification channels and their trade-offs?
+- [ ] Can you trace a notification through the full pipeline from API to device?
+- [ ] Can you describe the push notification registration token flow?
+- [ ] Can you design the template system with versioning and safe rendering?
+- [ ] Can you explain how user preferences filter notifications before sending?
+- [ ] Can you implement a per-channel, per-user rate limiter?
+- [ ] Can you describe the retry strategy with exponential backoff?
+- [ ] Can you explain how idempotency keys prevent duplicate sends?
+- [ ] Can you design the database schema for delivery tracking?
+- [ ] Can you list the essential observability metrics for a notification system?
+- [ ] Can you explain how email open and click tracking works?
+- [ ] Can you compare Kafka vs SQS for the message queue in this system?
