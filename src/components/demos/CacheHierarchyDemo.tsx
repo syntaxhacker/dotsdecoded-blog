@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import DemoBoundary from './DemoBoundary'
 
 const s = {
@@ -10,266 +10,204 @@ const s = {
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 
-const H: React.CSSProperties = { fontSize: 20, fontWeight: 700, color: s.text, marginBottom: 16, letterSpacing: -0.3 }
-const SEC: React.CSSProperties = { background: s.bg2, borderRadius: 12, padding: '24px 28px', marginBottom: 24 }
+type CacheMode = 'read-through' | 'write-through' | 'write-behind'
 
-const levels = [
-  {
-    name: 'Registers',
-    size: '~1 KB',
-    cycles: 1,
-    ns: 0.3,
-    detail: 'CPU registers sit directly on the processor core. The ALU reads operands from registers in a single cycle.',
-    color: s.red,
-    analogy: '1 second',
-    analogyUnit: 'second',
-  },
-  {
-    name: 'L1 Cache',
-    size: '~32 KB',
-    cycles: 3,
-    ns: 1,
-    detail: 'L1 cache runs at CPU clock speed. Modern CPUs have separate L1d (data) and L1i (instruction) caches.',
-    color: s.orange,
-    analogy: '3',
-    analogyUnit: 'seconds',
-  },
-  {
-    name: 'L2 Cache',
-    size: '~256 KB',
-    cycles: 12,
-    ns: 4,
-    detail: 'L2 cache is larger but slightly slower than L1. It catches most misses from the L1 cache.',
-    color: s.yellow,
-    analogy: '12',
-    analogyUnit: 'seconds',
-  },
-  {
-    name: 'L3 Cache',
-    size: '~8 MB',
-    cycles: 40,
-    ns: 15,
-    detail: 'L3 cache is shared across all CPU cores. It reduces latency for multi-threaded workloads.',
-    color: s.accent,
-    analogy: '40',
-    analogyUnit: 'seconds',
-  },
-  {
-    name: 'RAM',
-    size: '~16 GB',
-    cycles: 200,
-    ns: 80,
-    detail: 'Main memory (DRAM) is orders of magnitude slower than cache. It stores all actively used data and code.',
-    color: s.purple,
-    analogy: '3.3',
-    analogyUnit: 'minutes',
-  },
-  {
-    name: 'Disk',
-    size: '~1 TB',
-    cycles: 1000000,
-    ns: 10000000,
-    detail: 'SSDs and HDDs provide bulk storage. Even fast NVMe drives are millions of cycles away from the CPU.',
-    color: s.green,
-    analogy: '11.5',
-    analogyUnit: 'days',
-  },
-]
-
-const barW = [22, 32, 44, 56, 72, 90]
+const layerColors = [s.accent, s.green, s.orange]
+const layerNames = ['L1 (On-heap)', 'L2 (Redis)', 'L3 (Database)']
 
 export default function CacheHierarchyDemo() {
-  const [selected, setSelected] = useState<number | null>(null)
-  const [touring, setTouring] = useState(false)
-  const tourRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [mode, setMode] = useState<CacheMode>('read-through')
+  const [step, setStep] = useState(-1)
+  const [running, setRunning] = useState(false)
+  const [l1Hit, setL1Hit] = useState(true)
+  const [l2Hit, setL2Hit] = useState(true)
+  const [l1Data, setL1Data] = useState('')
+  const [l2Data, setL2Data] = useState('')
+  const [l3Data, setL3Data] = useState('')
+  const [highlight, setHighlight] = useState<number | null>(null)
 
-  const stopTour = useCallback(() => {
-    if (tourRef.current) {
-      clearInterval(tourRef.current)
-      tourRef.current = null
+  const getSteps = useCallback(() => {
+    if (mode === 'read-through') {
+      return [
+        { label: 'Check L1', layer: 0, action: 'GET key_x from L1 cache' },
+        { label: 'L1 Miss', layer: 0, action: 'Not found in L1 (on-heap)' },
+        { label: 'Check L2', layer: 1, action: 'GET key_x from Redis' },
+        { label: 'L2 Miss', layer: 1, action: 'Not found in Redis' },
+        { label: 'Read from DB', layer: 2, action: 'SELECT * FROM data WHERE id = key_x' },
+        { label: 'Populate L2', layer: 1, action: 'SET key_x = result (TTL: 3600)' },
+        { label: 'Populate L1', layer: 0, action: 'Store in on-heap cache' },
+        { label: 'Return', layer: -1, action: 'Return result to client' },
+      ]
+    } else if (mode === 'write-through') {
+      return [
+        { label: 'Write to L1', layer: 0, action: 'SET key_x = value in L1' },
+        { label: 'Write to L2', layer: 1, action: 'SET key_x = value in Redis' },
+        { label: 'Write to DB', layer: 2, action: 'INSERT/UPDATE data WHERE id = key_x' },
+        { label: 'Confirm', layer: -1, action: 'Return OK to client (synchronous)' },
+      ]
+    } else {
+      return [
+        { label: 'Write to L1', layer: 0, action: 'SET key_x = value in L1 (instant)' },
+        { label: 'Queue write', layer: -1, action: 'Enqueue write to background worker' },
+        { label: 'Return OK', layer: -1, action: 'Return OK to client (async)' },
+        { label: 'Batch flush', layer: 2, action: 'Batch INSERT/UPDATE (every 100ms)' },
+      ]
     }
-    setTouring(false)
-  }, [])
+  }, [mode])
 
-  const startTour = useCallback(() => {
-    setSelected(0)
-    setTouring(true)
-  }, [])
+  const steps = getSteps()
+
+  const runAnimation = useCallback(() => {
+    if (running) return
+    setRunning(true)
+    setStep(0)
+    setL1Data('')
+    setL2Data('')
+    setL3Data('')
+  }, [running])
 
   useEffect(() => {
-    if (!touring) return
-    tourRef.current = setInterval(() => {
-      setSelected(prev => {
-        if (prev === null || prev >= levels.length - 1) {
-          if (tourRef.current) clearInterval(tourRef.current)
-          tourRef.current = null
-          setTouring(false)
-          return prev
-        }
-        return prev + 1
-      })
-    }, 2200)
-    return () => {
-      if (tourRef.current) clearInterval(tourRef.current)
+    if (!running || step < 0) return
+    if (step >= steps.length) {
+      setRunning(false)
+      setStep(-1)
+      setHighlight(null)
+      return
     }
-  }, [touring])
-
-  useEffect(() => {
-    return () => {
-      if (tourRef.current) clearInterval(tourRef.current)
+    const st = steps[step]
+    setHighlight(st.layer)
+    if (st.layer === 0) setL1Data('user:42 = { name: "Alice" }')
+    if (st.layer === 1 && mode === 'read-through') {
+      if (step === 2) setL2Data('cache miss')
+      if (step === 5) setL2Data('user:42 = { name: "Alice" }')
     }
-  }, [])
+    if (st.layer === 2) setL3Data('user:42 = { name: "Alice" }')
+    const timer = setTimeout(() => {
+      setStep(prev => prev + 1)
+    }, 700)
+    return () => clearTimeout(timer)
+  }, [running, step, steps, mode])
 
-  const handleSelect = (idx: number) => {
-    if (touring) return
-    setSelected(prev => prev === idx ? null : idx)
+  const reset = () => {
+    setRunning(false)
+    setStep(-1)
+    setHighlight(null)
+    setL1Data('')
+    setL2Data('')
+    setL3Data('')
   }
 
-  const formatNs = (v: number) => {
-    if (v >= 1000000) return `${(v / 1000000).toFixed(0)} ms`
-    if (v >= 1000) return `${(v / 1000).toFixed(0)} us`
-    return v < 1 ? `${v} ns` : `${v} ns`
-  }
+  const currentStep = step >= 0 && step < steps.length ? steps[step] : null
 
   return (
-    <DemoBoundary name="CPU Memory Hierarchy">
-    <div style={{ background: s.bg, padding: '32px 24px', borderRadius: 16, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", maxWidth: 820, margin: '0 auto' }}>
-      <div style={SEC}>
-        <div style={H}>CPU Memory Hierarchy</div>
-        <p style={{ color: s.text2, fontSize: 14, margin: '0 0 12px 0', lineHeight: 1.6 }}>
-          Memory gets larger and slower as we move away from the CPU core. Click any level for details.
-        </p>
+    <DemoBoundary name="Cache Hierarchy">
+    <div style={{
+      background: s.bg, padding: '32px 24px', borderRadius: 16,
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      maxWidth: 820, margin: '0 auto',
+    }}>
+      <div style={{ fontSize: 20, fontWeight: 700, color: s.text, marginBottom: 8, letterSpacing: -0.3 }}>
+        Cache Hierarchy: L1 / L2 / L3
+      </div>
+      <p style={{ color: s.text2, fontSize: 14, margin: '0 0 20px 0', lineHeight: 1.6 }}>
+        A read traverses L1 (on-heap) to L2 (Redis) to L3 (DB). Writes can be synchronous or deferred.
+      </p>
 
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, marginBottom: 20 }}>
-          {levels.map((lv, i) => {
-            const isSelected = selected === i
-            return (
-              <div
-                key={lv.name}
-                onClick={() => handleSelect(i)}
-                style={{
-                  width: `${barW[i]}%`,
-                  height: 48,
-                  background: isSelected ? lv.color + '33' : lv.color + '15',
-                  borderLeft: `3px solid ${isSelected ? lv.color : lv.color + '66'}`,
-                  borderRadius: 6,
-                  padding: '0 14px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  cursor: touring ? 'default' : 'pointer',
-                  transition: 'all 0.25s ease',
-                  opacity: touring && selected !== null && selected !== i ? 0.4 : 1,
-                }}
-                onMouseEnter={e => {
-                  if (!touring) {
-                    e.currentTarget.style.background = lv.color + '28'
-                  }
-                }}
-                onMouseLeave={e => {
-                  if (!touring) {
-                    e.currentTarget.style.background = isSelected ? lv.color + '33' : lv.color + '15'
-                  }
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <div style={{ width: 10, height: 10, borderRadius: '50%', background: lv.color, flexShrink: 0 }} />
-                  <span style={{ color: isSelected ? s.text : s.text2, fontSize: 13, fontWeight: isSelected ? 700 : 500, transition: 'color 0.2s' }}>
-                    {lv.name}
-                  </span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-                  <span style={{ color: s.text3, fontFamily: s.mono, fontSize: 11 }}>{lv.size}</span>
-                  <span style={{ color: s.text3, fontFamily: s.mono, fontSize: 11 }}>~{lv.cycles.toLocaleString()}c</span>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-
-        {selected !== null && (
-          <div style={{
-            background: s.bg,
-            border: `1px solid ${levels[selected].color}44`,
-            borderRadius: 10,
-            padding: '18px 20px',
-            marginBottom: 16,
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-              <div style={{ width: 12, height: 12, borderRadius: '50%', background: levels[selected].color, flexShrink: 0 }} />
-              <span style={{ color: s.text, fontSize: 16, fontWeight: 700 }}>{levels[selected].name}</span>
-            </div>
-            <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', marginBottom: 12 }}>
-              <div>
-                <div style={{ color: s.text3, fontSize: 11, marginBottom: 2 }}>Size</div>
-                <div style={{ color: s.text, fontFamily: s.mono, fontSize: 13 }}>{levels[selected].size}</div>
-              </div>
-              <div>
-                <div style={{ color: s.text3, fontSize: 11, marginBottom: 2 }}>Latency</div>
-                <div style={{ color: s.text, fontFamily: s.mono, fontSize: 13 }}>
-                  ~{levels[selected].cycles.toLocaleString()} cycles ({formatNs(levels[selected].ns)})
-                </div>
-              </div>
-              <div>
-                <div style={{ color: s.text3, fontSize: 11, marginBottom: 2 }}>Analogy</div>
-                <div style={{ color: levels[selected].color, fontFamily: s.mono, fontSize: 13 }}>
-                  {levels[selected].analogy} {levels[selected].analogyUnit}
-                </div>
-              </div>
-            </div>
-            <div style={{ color: s.text2, fontSize: 13, lineHeight: 1.6, borderTop: `1px solid ${s.border}`, paddingTop: 12 }}>
-              {levels[selected].detail}
-            </div>
-            <div style={{
-              marginTop: 12,
-              background: levels[selected].color + '11',
-              border: `1px solid ${levels[selected].color}33`,
-              borderRadius: 8,
-              padding: '10px 14px',
-              color: levels[selected].color,
-              fontSize: 13,
-              fontFamily: s.mono,
-            }}>
-              If register access takes 1 second, accessing {levels[selected].name} takes ~{levels[selected].analogy} {levels[selected].analogyUnit}
-            </div>
-          </div>
-        )}
-
-        <div style={{ display: 'flex', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        {(['read-through', 'write-through', 'write-behind'] as CacheMode[]).map(m => (
           <button
-            onClick={touring ? stopTour : startTour}
+            key={m}
+            onClick={() => { setMode(m); reset() }}
             style={{
-              background: touring ? s.red : s.bg3,
-              border: `1px solid ${touring ? s.red : s.border}`,
-              borderRadius: 8,
-              padding: '10px 20px',
-              color: touring ? '#fff' : s.text2,
-              cursor: 'pointer',
-              fontSize: 13,
-              fontWeight: touring ? 600 : 400,
-              transition: 'all 0.15s',
+              flex: 1, padding: '8px 12px', borderRadius: 8, cursor: 'pointer',
+              background: mode === m ? s.accent : s.bg3,
+              border: `1px solid ${mode === m ? s.accent : s.border}`,
+              color: mode === m ? '#fff' : s.text2, fontSize: 12, fontWeight: mode === m ? 600 : 400,
+              transition: 'all 0.2s',
             }}
           >
-            {touring ? 'Stop Tour' : 'Start Tour'}
+            {m === 'read-through' ? 'Read-Through' : m === 'write-through' ? 'Write-Through' : 'Write-Behind'}
           </button>
-          {selected !== null && !touring && (
-            <button
-              onClick={() => setSelected(null)}
-              style={{
-                background: 'transparent',
-                border: `1px solid ${s.border}`,
-                borderRadius: 8,
-                padding: '10px 20px',
-                color: s.text3,
-                cursor: 'pointer',
-                fontSize: 13,
-              }}
-            >
-              Clear
-            </button>
-          )}
-        </div>
+        ))}
       </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
+        {[0, 1, 2].map(i => (
+          <div key={i} style={{
+            background: highlight === i ? `${layerColors[i]}20` : s.bg2,
+            border: `1px solid ${highlight === i ? layerColors[i] : s.border}`,
+            borderRadius: 12, padding: '14px 18px',
+            transition: 'all 0.3s ease',
+            position: 'relative',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{
+                  width: 10, height: 10, borderRadius: '50%',
+                  background: highlight === i ? layerColors[i] : s.text3,
+                  transition: 'background 0.3s',
+                }} />
+                <span style={{ color: highlight === i ? layerColors[i] : s.text, fontWeight: 600, fontSize: 13 }}>
+                  {layerNames[i]}
+                </span>
+              </div>
+              <div style={{
+                color: s.text3, fontFamily: s.mono, fontSize: 11,
+                background: s.bg, padding: '2px 8px', borderRadius: 4,
+              }}>
+                {i === 0 ? '~0.1ms' : i === 1 ? '~1ms' : '~10ms'}
+              </div>
+            </div>
+            <div style={{
+              marginTop: 8, minHeight: 24,
+              color: i === 0 ? l1Data : i === 1 ? l2Data : l3Data ? s.text2 : s.text3,
+              fontFamily: s.mono, fontSize: 12,
+            }}>
+              {i === 0 && (l1Data || '(empty)')}
+              {i === 1 && (l2Data || '(empty)')}
+              {i === 2 && (l3Data || '(empty)')}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{
+        background: s.bg2, border: `1px solid ${s.border}`,
+        borderRadius: 10, padding: '12px 16px', marginBottom: 16,
+        minHeight: 40,
+      }}>
+        {currentStep ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{
+              width: 6, height: 6, borderRadius: '50%',
+              background: layerColors[currentStep.layer] || s.text,
+              animation: currentStep.layer >= 0 ? 'pulse 0.5s ease-in-out infinite' : undefined,
+            }} />
+            <div>
+              <span style={{ color: s.text2, fontFamily: s.mono, fontSize: 11, marginRight: 8 }}>
+                Step {step + 1}/{steps.length}
+              </span>
+              <span style={{ color: s.text, fontSize: 13 }}>{currentStep.action}</span>
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: s.text3, fontSize: 13, textAlign: 'center' }}>
+            Click "Run Request" to see the path through the hierarchy
+          </div>
+        )}
+      </div>
+
+      <button
+        onClick={running ? reset : runAnimation}
+        style={{
+          width: '100%', padding: '10px 0', borderRadius: 8, cursor: 'pointer',
+          background: running ? s.red : s.accent, border: 'none',
+          color: '#fff', fontSize: 13, fontWeight: 600,
+          transition: 'background 0.2s',
+        }}
+      >
+        {running ? 'Reset' : 'Run Request'}
+      </button>
     </div>
     </DemoBoundary>
   )
