@@ -1,0 +1,242 @@
+---
+title: "Design a Distributed Key-Value Store: Dynamo-Style Architecture"
+description: "A complete system design walkthrough for a distributed key-value store — consistent hashing, gossip protocol, hinted handoff, read repair, Merkle trees, quorum consistency, and Dynamo/Cassandra-style architecture."
+date: 2026-05-16T01:00:00
+tags: ["system-design", "interview", "database", "distributed", "key-value-store", "design-problem"]
+---
+
+import KvRequirementsDemo from '../../components/demos/KvRequirementsDemo'
+import ConsistentHashingDemo from '../../components/demos/ConsistentHashingDemo'
+import QuorumNodesDemo from '../../components/demos/QuorumNodesDemo'
+import HintedHandoffDemo from '../../components/demos/HintedHandoffDemo'
+import MerkleTreeDemo from '../../components/demos/MerkleTreeDemo'
+import GossipProtocolDemo from '../../components/demos/GossipProtocolDemo'
+
+Imagine you are building the shopping cart service for an e-commerce site that serves 100 million users. Every time a user adds an item to their cart, you need to write that data somewhere. Every time they view their cart, you need to read it back. You need it to be fast -- under 10 milliseconds. You need it to be available -- no downtime during Black Friday. And you need it to survive the inevitable hardware failures that happen when you run thousands of servers.
+
+A single database server cannot do this. Even the most powerful machine has a ceiling. So you spread the data across many machines. But now you have a new problem: how do you keep all those machines coordinated? How do you add a new machine without reshuffling everything? How do you handle a machine that goes down in the middle of a write? How do you detect and repair data that gradually drifts apart?
+
+This is exactly what Amazon faced in the early 2000s when building Dynamo, the distributed key-value store that powers their shopping cart. The lessons from Dynamo became the foundation for Cassandra, Riak, Voldemort, and most modern distributed databases. By the end of this post, you will understand every major technique in the Dynamo playbook -- and you will be ready to design your own distributed KV store from scratch.
+
+## What Makes a Distributed KV Store Different
+
+A key-value store is the simplest database there is. You put a value by a key, and you get it back later. `put("user:42", data)` and `get("user:42")`. No tables, no schemas, no joins. Just a giant hash map spread across many machines.
+
+The challenge is not the data model. It is the distribution. When you have 10 machines and one of them goes down, you need to answer: can you still accept writes? What about reads? How do you know which machine has the latest version of a key? How do you add a new machine without a full data migration?
+
+These questions lead to a specific set of design goals.
+
+## Requirements
+
+Every distributed system starts with requirements. Here are the goals for a Dynamo-style KV store:
+
+- **Put / Get API**: Simple key-value interface. The API has two operations: `put(key, value, context)` and `get(key) -> (value, context)`.
+- **High Availability**: Writes and reads succeed even when nodes are down. The system should be "always writable."
+- **Partition Tolerance**: The system continues operating during network partitions. If the link between two datacenters is cut, both sides keep serving.
+- **Tunable Consistency**: Each operation can specify its own consistency level. A shopping cart add can be eventually consistent; a payment write can be strongly consistent.
+- **Horizontal Scalability**: Adding a new node should increase capacity linearly with zero downtime.
+- **Durability**: Data is replicated to N nodes. If one node's disk dies, the data survives on the others.
+
+These requirements lean heavily toward **AP** in the CAP theorem -- availability and partition tolerance are prioritized over strong consistency. The system provides **eventual consistency**: if no new writes are made, all replicas eventually converge to the same value.
+
+<KvRequirementsDemo client:visible />
+
+## Partitioning with Consistent Hashing
+
+The first problem is: where does each key live? You have N nodes. You need a rule that maps `hash(key)` to a specific node so your application knows where to send reads and writes.
+
+The naive approach is `hash(key) % N`. This works well until you add or remove a node. Changing N changes every key's assignment. Suddenly, every piece of data needs to move to a different node. With terabytes of data, this is a full data migration -- and it takes hours.
+
+Consistent hashing solves this. Imagine a ring of numbers from 0 to 2^32 - 1 (the output range of a hash function). Each node gets a position on this ring by hashing its identifier (like its IP address). Each key also hashes to a position on the ring. The rule: a key belongs to the **first node encountered by moving clockwise** from the key's position.
+
+The beauty of this approach: when you add a new node, it appears at some position on the ring. The only keys that need to move are those in the range between the new node and its clockwise neighbor. Every other key stays exactly where it is. With N nodes, only about 1/N of the keys need to move -- dramatically better than reshuffling everything.
+
+### Virtual Nodes
+
+In practice, a naive consistent hashing ring can lead to uneven data distribution. If nodes are randomly placed, some end up with larger ranges than others. The fix is **virtual nodes**: each physical node appears at multiple positions on the ring. With 100 virtual nodes per physical node, the law of large numbers ensures each physical node owns roughly the same amount of data.
+
+Virtual nodes also help with heterogeneous clusters. If one machine has twice the capacity of others, give it twice as many virtual nodes. Data automatically balances proportionally.
+
+<ConsistentHashingDemo client:visible />
+
+## Replication Strategy
+
+Consistent hashing tells you which node is responsible for a key. But one node is not enough for durability -- if that node dies, you lose the data. The solution is to replicate each key to **N nodes** (typically N=3).
+
+The replication group for a key is called the **preference list**. For a given key, the preference list consists of the N nodes encountered while walking clockwise from the key's position on the ring. In practice, to handle virtual nodes, you skip duplicate physical nodes to ensure N distinct physical machines handle each key.
+
+### Sloppy Quorum
+
+Strict quorum requires writes to reach the first N healthy nodes in the preference list. Dynamo uses **sloppy quorum**: it sends writes to the first N healthy nodes in the preference list, even if those are not the first N nodes. This means if the first two nodes in the preference list are down, the write goes to nodes 3, 4, and 5 instead. This keeps writes succeeding even when multiple replicas are unavailable.
+
+## Quorum Consistency
+
+With N replicas, you face a trade-off. Every read must contact how many replicas? Every write must be acknowledged by how many replicas? These parameters are **R** (read quorum) and **W** (write quorum).
+
+The formula for quorum consistency is:
+
+$$R + W > N$$
+
+When this holds, every read is guaranteed to overlap with at least one replica that has the latest write. Here is why: a write is stored on W nodes. A read reads from R nodes. If R + W > N, then at least one of the R read nodes must overlap with the W write nodes -- they cannot all miss each other.
+
+With N=3, the most common configuration is W=2, R=2 (since 2 + 2 = 4 > 3). This gives you:
+
+- **Write latency**: must wait for 2 of 3 nodes to acknowledge. Fast.
+- **Read latency**: must wait for 2 of 3 nodes to respond. Fast.
+- **Stale reads**: impossible, since any 2 nodes overlap with any 2 write nodes.
+
+You can tune this for different trade-offs:
+
+- **W=3, R=1**: Slow writes (wait for all 3), fast reads (only need 1). Maximizes read performance.
+- **W=1, R=3**: Fast writes (only 1 node), slow reads (must check all 3). Maximizes write performance.
+- **W=1, R=1**: Fast everything, but stale reads are possible (no overlap guarantee).
+
+The formula works across any N. With N=5, W=3, R=3 gives you consistency (3+3=6>5) while tolerating up to 2 node failures.
+
+<QuorumNodesDemo client:visible />
+
+## Hinted Handoff
+
+Sloppy quorum keeps writes succeeding during failures, but what about the data that was supposed to go to the downed node? This is where **hinted handoff** comes in.
+
+When a replica is unavailable during a write, the coordinator (the node handling the request) stores the write locally along with a "hint" -- metadata indicating which node was the intended recipient. The hint includes the key, value, and a timestamp or version.
+
+When the downed node comes back online, the coordinator scans its stored hints and replays each one to the recovered node. The handoff happens in the background, transparent to the client.
+
+Hinted handoff is critical for **write availability**. Without it, a write that targets N=3 nodes must fail if even one replica is down. With it, the write succeeds as long as at least W replicas are available, and the data eventually reaches the downed node.
+
+The trade-off: hints consume storage on the coordinator. If a node is down for hours, the coordinator accumulates thousands of hints. Dynamo implementations limit the maximum hint storage and fall back to other anti-entropy mechanisms (like Merkle trees) when hints overflow.
+
+<HintedHandoffDemo client:visible />
+
+## Read Repair
+
+Hinted handoff deals with missed writes. But what about stale data that was written before a node went down? Consider: a node accepts a write, then goes down before replicating it. Other replicas have the old value. When the node comes back up, it still has the old value.
+
+**Read repair** is a passive anti-entropy mechanism that runs during read operations. When a coordinator receives responses from R replicas, it checks the timestamps or version vectors. If any replica returned a stale value, the coordinator sends the latest value to that replica after returning the response to the client.
+
+Read repair has a crucial limitation: it only fixes data that is actively being read. If a key is written once and never read again, stale replicas never get repaired. That is why read repair is called "passive" -- it reacts to reads rather than proactively scanning for inconsistencies.
+
+## Merkle Trees for Anti-Entropy
+
+For data that is rarely read but needs to be consistent, a system needs **active anti-entropy**. This is where Merkle trees come in.
+
+A Merkle tree is a hash tree where:
+- Each leaf is the hash of a key-value pair (or a range of keys)
+- Each internal node is the hash of its children's hashes
+- The root is the hash of the entire data set
+
+To compare two replicas, you compare their root hashes. If they match, the replicas are identical -- you are done. If they differ, you traverse down the tree: compare the left child's hash, then the right child's. Each mismatch narrows down the divergent range. By walking down the tree, you identify exactly which key ranges are out of sync without transferring the entire data set.
+
+For N key-value pairs, a Merkle tree comparison transfers at most O(log N) hashes per mismatched branch to find each difference. Compare this to transferring all N values -- or worse, all N pairs between every pair of replicas. Merkle trees make anti-entropy efficient enough to run periodically on every replica pair in the cluster.
+
+Each node builds a Merkle tree for each key range it stores. It then exchanges root hashes with neighboring replicas according to the gossip protocol. This runs in the background, continuously fixing silent inconsistencies.
+
+<MerkleTreeDemo client:visible />
+
+## Gossip Protocol
+
+In a distributed system, nodes need to discover each other and share membership information. Who is alive? Who just joined? Who failed? You could use a central registry (like ZooKeeper), but that creates a single point of failure. Dynamo uses a **gossip protocol** instead.
+
+Here is how gossip works: every node maintains a membership list -- a table of every other node it knows about, along with a heartbeat counter and a timestamp of when it last heard from that node. Every second (or on a configurable interval), each node picks 1-3 random peers and exchanges its membership list with them.
+
+When node A gossips with node B:
+- A sends its membership list to B
+- B merges A's list into its own, keeping the highest heartbeat for each node
+- B sends its updated list back to A
+- A merges B's list
+
+If a node's heartbeat has not increased for a configurable period (e.g., 40 seconds), it is marked as "suspected" and eventually "dead." If a node sees a new node in a peer's list, it adds it to its own list.
+
+The surprising property of gossip protocols: information spreads exponentially. In a cluster of N nodes, a piece of information reaches every node in O(log N) rounds. For a 1000-node cluster, every node knows about every other node within about 10 gossip rounds (roughly 10 seconds).
+
+<GossipProtocolDemo client:visible />
+
+## Vector Clocks
+
+When a node accepts a write, it assigns a version number. But in a system with concurrent writes and no global clock, simple timestamps are not enough to determine which write is newer. Two clients might write to different replicas at the same time, and two replicas might each have a write the other does not know about.
+
+**Vector clocks** solve this. A vector clock is a list of `(node, counter)` pairs. Each node maintains its own counter. When a write happens:
+
+1. The coordinator increments its own counter in the vector clock
+2. The new vector clock is attached to the written value
+3. On read, the coordinator returns all conflicting values along with their vector clocks
+
+When a client reads, it gets back the value and its vector clock. To write, the client includes the vector clock it received from the read. The coordinator uses this to determine causality:
+
+- If clock A has every counter greater than or equal to clock B, and at least one is strictly greater, then A is a **descendant** of B (A is newer)
+- If clock A has a higher counter for some node and clock B has a higher counter for a different node, they are **concurrent** -- a conflict exists
+- Conflicting values are returned to the client, which must resolve them (typically with "last write wins" using a timestamp)
+
+Vector clocks can grow unboundedly as more nodes interact with a key. In practice, systems cap the clock size by pruning old entries or using a technique called "clock truncation."
+
+## The Write Path
+
+Here is how a write flows through the system, end to end:
+
+1. **Client request**: A client sends `put(key, value)` to any node in the cluster. That node becomes the **coordinator** for this request.
+2. **Preference list**: The coordinator uses consistent hashing to determine the N nodes in the preference list for this key. With sloppy quorum, it picks the first N healthy nodes.
+3. **Forward**: The coordinator sends the write request to all N nodes in parallel.
+4. **Wait for W**: The coordinator waits for W acknowledgments. If a node is down, the coordinator stores a hinted handoff entry.
+5. **Respond**: Once W nodes acknowledge (including hints), the coordinator responds to the client with success.
+
+If fewer than W nodes are available, the write fails. The client can retry with a lower consistency level (smaller W) or handle the error.
+
+## The Read Path
+
+The read path mirrors the write path with one extra step:
+
+1. **Client request**: Client sends `get(key)` to any node. That node becomes the coordinator.
+2. **Preference list**: The coordinator determines the N replicas for this key.
+3. **Forward**: The coordinator requests the value and its context (vector clock + timestamp) from all N nodes.
+4. **Wait for R**: The coordinator waits for R responses.
+5. **Reconcile**: The coordinator examines the vector clocks of all returned values. If there are concurrent versions (a conflict), it collects all of them.
+6. **Read repair**: If any replica returned a stale value (older timestamp or dominated vector clock), the coordinator sends the latest value to that replica asynchronously.
+7. **Respond**: The coordinator returns the value (or conflicting values) and the latest context to the client.
+
+The client uses the returned context in its next write. This is how the system tracks causality across read-modify-write cycles.
+
+## Tunable Consistency in Practice
+
+The Dynamo model lets you tune consistency per operation. This is one of its most powerful features. Here are common combinations:
+
+| Scenario | N | W | R | Behavior |
+|---|---|---|---|---|
+| Default | 3 | 2 | 2 | Balanced: no stale reads, tolerant of 1 failure |
+| Fast reads | 3 | 3 | 1 | Strong write consistency, fastest reads |
+| Fast writes | 3 | 1 | 3 | Fastest writes, slower reads |
+| Maximum durability | 5 | 4 | 4 | Tolerates 2 failures, high consistency |
+| Eventual | 3 | 1 | 1 | Fastest, but stale reads possible |
+
+Cassandra exposes these as **consistency levels** in its query language: `ONE`, `QUORUM`, `ALL`, `LOCAL_QUORUM`, `EACH_QUORUM`. A write with `CL.ONE` matches W=1. A read with `CL.QUORUM` matches R = floor(N/2) + 1.
+
+DynamoDB uses a simpler model: **strongly consistent reads** (R=N, W=N) vs **eventually consistent reads** (R=1, W=N). You trade consistency for half the read cost and lower latency.
+
+### Real-World Architecture Comparison
+
+| Feature | Dynamo (Amazon, 2007) | Cassandra (Apache) | Riak (Basho) |
+|---|---|---|---|
+| Consistent hashing | Yes | Yes | Yes |
+| Virtual nodes | No | Yes (default) | Yes |
+| Gossip protocol | Yes | Yes | Yes |
+| Hinted handoff | Yes | Yes | Yes |
+| Read repair | Yes | Yes | Yes |
+| Merkle trees | Yes | Yes | Yes |
+| Vector clocks | Yes | Yes (NTP-baesd timestamps) | Yes |
+| Query language | Key-only | CQL (SQL-like) | Key + secondary indexes |
+| Consistency levels | Per-operation | Per-operation | Per-operation |
+
+## Self-Check
+
+Can you answer these questions?
+
+- [ ] What problem does consistent hashing solve that modulo-N hashing does not?
+- [ ] When you add a new node to a consistent hashing ring, how many keys need to move?
+- [ ] What is the purpose of virtual nodes?
+- [ ] If N=5, W=2, R=2, is consistency guaranteed? Why or why not?
+- [ ] What happens to a write in hinted handoff when a replica is down?
+- [ ] Explain the difference between read repair and Merkle tree anti-entropy. When would each be sufficient?
+- [ ] How many gossip rounds does it take for information to reach all nodes in a 128-node cluster?
+- [ ] What is a vector clock and what problem does it solve?
+- [ ] Walk through the read path step by step. What happens if a replica returns stale data?
+- [ ] In what scenario would you set W=N and R=1? When would you set W=1 and R=N?

@@ -267,6 +267,7 @@ export { default as PaintOrderDemo } from './PaintOrderDemo'
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 export { default as RebaseDemo } from './RebaseDemo'
 export { default as ReflogDemo } from './ReflogDemo'
 export { default as CherryPickDemo } from './CherryPickDemo'
@@ -365,3 +366,11 @@ export { default as TemplateEngineDemo } from './TemplateEngineDemo'
 export { default as NotifPreferencesDemo } from './NotifPreferencesDemo'
 export { default as NotifArchitectureDemo } from './NotifArchitectureDemo'
 >>>>>>> feat/notification-system
+=======
+export { default as KvRequirementsDemo } from './KvRequirementsDemo'
+export { default as ConsistentHashingDemo } from './ConsistentHashingDemo'
+export { default as QuorumNodesDemo } from './QuorumNodesDemo'
+export { default as HintedHandoffDemo } from './HintedHandoffDemo'
+export { default as MerkleTreeDemo } from './MerkleTreeDemo'
+export { default as GossipProtocolDemo } from './GossipProtocolDemo'
+>>>>>>> feat/distributed-key-value-store
