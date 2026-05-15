@@ -1,0 +1,428 @@
+---
+title: "Design a Distributed ID Generator: Snowflake, UUIDs, and Unique IDs at Scale"
+description: "A complete system design walkthrough for distributed ID generation — Twitter Snowflake algorithm, UUID variants, database sequences, range batching, and generating unique IDs across millions of nodes."
+date: 2026-05-17T01:00:00
+tags: ["system-design", "interview", "distributed", "id-generation", "snowflake", "design-problem"]
+---
+
+import IdRequirementsDemo from '../../components/demos/IdRequirementsDemo'
+import SnowflakeDemo from '../../components/demos/SnowflakeDemo'
+import UuidComparisonDemo from '../../components/demos/UuidComparisonDemo'
+import DbSequenceDemo from '../../components/demos/DbSequenceDemo'
+import IdArchitectureDemo from '../../components/demos/IdArchitectureDemo'
+
+You are in a system design interview. The interviewer says: "Design a distributed ID generator." Where do you start? Not with the algorithm. You start by understanding why auto-increment IDs break at scale, what properties a distributed ID needs, and how to generate millions of unique IDs per second without a single point of failure.
+
+This is the complete walkthrough — from the fundamental problem to production deployment across multiple datacenters.
+
+## Understanding the Problem
+
+What is a distributed ID generator? Think of a concert wristband system. A small venue uses sequential numbers 1, 2, 3 — one person at the door writes the next number. This is a centralized auto-increment, and it works fine for 500 people.
+
+Now think of a global passport numbering system. Every country issues passports, and every passport must have a unique number worldwide. You cannot have one central clerk assigning numbers — that clerk would be a bottleneck and a single point of failure. Instead, each country gets a prefix (a "country code"), and within that prefix, each office gets a range of numbers to assign locally.
+
+This is the distributed ID problem. When you have thousands of server nodes generating IDs simultaneously, they cannot coordinate on every ID (that would be too slow), but the IDs must still be globally unique.
+
+Real-world systems that need this: Twitter assigns a unique ID to every tweet. Discord assigns one to every message. Stripe assigns one to every payment. Each of these generates millions of IDs per day across hundreds of server nodes.
+
+## What Makes a Good Distributed ID
+
+An ID is not just a unique number. In a distributed system, the ID format directly impacts database performance, system reliability, and operational complexity. Five properties matter.
+
+**Globally unique** — no two IDs anywhere in the system, across any node, in any datacenter, at any time, are ever the same. This is non-negotiable. Duplicate IDs corrupt foreign keys and break replication.
+
+**Roughly sortable by time** — if ID A was created before ID B, then A should be smaller than B (or close to it). Why? Database indexes, especially B-trees, perform best with monotonically increasing keys. Random keys cause page splits and index fragmentation that slow inserts by 10-100x.
+
+**Compact** — 64 bits is ideal. It fits in a single `long` in Java, a `BigInt` in Python, and an `INT64` in most databases. Half the size of a 128-bit UUID means half the storage, half the memory in caches, and half the network bandwidth.
+
+**High throughput** — each node should generate 10K+ IDs per second without blocking. No per-ID network calls, no per-ID database writes. ID generation must be purely local computation after initialization.
+
+**Highly available with no single point of failure** — the ID generator must keep working even when databases are down, networks are partitioned, or coordination services are unreachable. This means no centralized ID server on the critical path.
+
+## Requirements Gathering
+
+Let us translate these properties into concrete requirements:
+
+**Functional:**
+- `generateId()` returns a unique 64-bit integer
+- IDs are monotonically increasing (or nearly so) over time
+- The system supports 1,000+ worker nodes
+
+**Non-Functional:**
+- 99.999% availability (under 5 minutes of downtime per year)
+- 10,000+ IDs per second per node
+- p99 latency under 5 milliseconds
+- Zero ID collisions across the lifetime of the system
+- Survive NTP clock skew, server restarts, and network partitions
+
+<IdRequirementsDemo client:visible />
+
+### Use Cases by Scale
+
+Different scale points demand different solutions. A single-server application with 1,000 users can use auto-increment. A startup with 10 servers can use UUID v4. At Twitter scale — thousands of servers, millions of IDs per second — you need Snowflake.
+
+| Scale | IDs/sec | Approach | Why |
+|-------|---------|----------|-----|
+| Single server | < 100 | Auto-increment | Simple, no coordination |
+| Small cluster | < 10K | UUID v4 | Each node generates independently |
+| Medium cluster | < 100K | UUID v7 | Time-sortable, good for indexes |
+| Large cluster (Twitter) | 1M+ | Snowflake | Compact, time-sortable, deterministic |
+
+## UUID Variants: v4 and v7
+
+UUIDs are the simplest distributed ID. Every node generates them independently with no coordination. But not all UUIDs are equal.
+
+### UUID v4 (Random)
+
+UUID v4 is 128 bits: 122 random bits plus 6 version/variant bits. The format is `xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx` where `4` marks the version and `y` encodes the variant.
+
+The advantage is simplicity — literally anyone can call `uuidv4()` on any machine and get a unique ID with overwhelming probability. The disadvantage is total randomness. UUID v4 IDs are not sortable by time at all. Inserting them into a B-tree index causes near-worst-case page splits because each new ID lands at a random position in the tree.
+
+Collision probability: with 122 random bits, the chance of a single collision after generating 1 billion IDs is approximately (10^9)^2 / (2 * 2^122) = 10^18 / (2 * 5.3 * 10^36) = roughly 1 in 10^19. Essentially zero at any realistic scale. But it is non-zero — a probabilistic guarantee, not a deterministic one.
+
+### UUID v7 (Time-Ordered)
+
+UUID v7 fixes the sortability problem. The first 48 bits are a Unix timestamp in milliseconds, followed by 74 random bits (plus version/variant). The format is `tttttttt-tttt-7xxx-yxxx-xxxxxxxxxxxx` where the prefix sorts by time.
+
+This means UUID v7 IDs are roughly monotonically increasing. B-tree indexes handle them much better than v4. The trade-off: still 128 bits, still probabilistic uniqueness (the random suffix can theoretically collide within the same millisecond).
+
+Database support: PostgreSQL has `gen_random_uuid()` (v4). MySQL 9.0+ and some cloud databases support v7 natively.
+
+<UuidComparisonDemo client:visible />
+
+## Snowflake Algorithm: The Gold Standard
+
+In 2010, Twitter faced a problem. Every new tweet needed a unique ID, and the existing database auto-increment could not keep up with 4,000+ tweets per second across hundreds of servers. They designed Snowflake: a 64-bit, time-sortable, deterministically unique ID generator.
+
+The core insight: if you can guarantee that no two workers share the same ID and that each worker never generates the same sequence number twice in the same millisecond, you get deterministic uniqueness without per-ID coordination.
+
+Snowflake splits the 64-bit integer into four fields:
+
+- **1 bit**: sign (always 0, reserved for future use)
+- **41 bits**: timestamp in milliseconds since a custom epoch
+- **10 bits**: worker ID (identifies the server node)
+- **12 bits**: sequence number (per-worker, per-millisecond counter)
+
+This gives: 2^10 = 1,024 workers, each generating 2^12 = 4,096 IDs per millisecond, for a cluster-wide throughput of ~4.2 million IDs per second.
+
+The timestamp uses a custom epoch (Twitter chose 2010-11-04 01:42:54 UTC). With 41 bits, the timestamp wraps after about 69 years. Starting from 2010, this gives us IDs until the year 2079.
+
+<SnowflakeDemo client:visible />
+
+### Why 64 Bits?
+
+Sixty-four bits is the sweet spot. A 64-bit integer is native on all modern CPUs — no arbitrary-precision arithmetic needed. It fits in a single database `BIGINT` column, a single Java `long`, a single Go `int64`. In JSON, it encodes as a string (JavaScript cannot represent 64-bit integers precisely), but in binary protocols like Thrift or Protobuf, it is 8 bytes flat.
+
+Compare to 128-bit UUIDs: at Twitter's scale of ~500 billion tweets, UUIDs would consume 8 TB of additional index space. Snowflake IDs consume half that.
+
+## Database Sequences and Range Batching
+
+Before Snowflake, the simplest distributed ID scheme was a database sequence with range batching.
+
+The idea: a central database maintains a counter. Instead of incrementing it for every ID (which would be too slow), each server requests a batch. Server A asks the database for 1,000 IDs and gets the range [1-1000]. Server B requests the next batch and gets [1001-2000].
+
+Each server increments its local counter within its range: no database calls per ID. When a server exhausts its range, it requests another batch.
+
+```python
+class RangeBasedIdGenerator:
+    def __init__(self, db_connection, batch_size=1000):
+        self.db = db_connection
+        self.batch_size = batch_size
+        self.start = 0
+        self.end = 0
+        self.current = 0
+
+    def _request_range(self):
+        # Atomic UPDATE ... RETURNING in SQL
+        with self.db.transaction():
+            cursor = self.db.execute(
+                "UPDATE id_sequence SET next_id = next_id + %s "
+                "RETURNING next_id - %s AS start, next_id - 1 AS end",
+                [self.batch_size, self.batch_size]
+            )
+            row = cursor.fetchone()
+            self.start = row.start
+            self.end = row.end
+            self.current = self.start
+
+    def next_id(self):
+        if self.current > self.end:
+            self._request_range()
+        result = self.current
+        self.current += 1
+        return result
+```
+
+The advantage: simple, works with any SQL database, IDs are sequential (best possible for B-tree indexes). The disadvantage: the database is a single point of failure — if it goes down, no new ranges can be allocated. Also, the batch size must be tuned: too small causes frequent DB calls, too large wastes IDs if servers restart.
+
+<DbSequenceDemo client:visible />
+
+### Outage Resilience
+
+If a server crashes after receiving a range but before using all IDs, those IDs are "lost." They will never be used by any server. This means your ID space has gaps. In most systems, gap-tolerant IDs are acceptable — tweets, posts, and messages do not need gapless sequences.
+
+The key guarantee is that no two servers ever get overlapping ranges. This is enforced by the atomic `UPDATE ... RETURNING` or equivalent `SELECT ... FOR UPDATE` in the database transaction.
+
+## Snowflake Bit Layout in Detail
+
+Let us go deep on the Snowflake bit layout, because the exact bit allocation drives every design decision.
+
+**Sign bit (1 bit):** Always 0. In two's complement, a 0 in the most significant bit means the integer is positive. Some implementations repurpose this for a "signed vs unsigned" flag, but in practice it stays 0.
+
+**Timestamp (41 bits):** Milliseconds since a custom epoch. Why a custom epoch? Because Unix epoch 1970-01-01 wastes bits on historical time. Twitter's epoch 2010-11-04 gives 69 years from then, not from 1970. Snowflake IDs starting at 1 instead of ~1.3 trillion.
+
+The 41-bit timestamp wraps at 2^41 = 2,199,023,255,552 ms = about 69 years. If your epoch is 2024, IDs are safe until 2093. Choose your epoch to match your deployment horizon.
+
+**Worker ID (10 bits):** Identifies the server. 1,024 unique values. This is the only field that requires coordination — but only at startup. Once assigned, the worker caches its ID and generates IDs entirely in memory.
+
+The worker ID is the "country code" in our passport analogy. It is the deterministic uniqueness anchor. As long as no two workers share an ID, and as long as each worker manages its sequence correctly, IDs are guaranteed unique.
+
+**Sequence (12 bits):** A per-worker counter that resets every millisecond. When the millisecond changes, the sequence resets to 0. If the sequence overflows (4,096 IDs in the same millisecond), the worker waits for the next millisecond.
+
+```python
+import time
+
+class SnowflakeGenerator:
+    def __init__(self, worker_id, epoch=1288834974657):
+        self.worker_id = worker_id
+        self.epoch = epoch
+        self.last_ts = 0
+        self.sequence = 0
+
+    def next_id(self):
+        ts = int(time.time() * 1000) - self.epoch
+
+        if ts < self.last_ts:
+            raise ClockSkewError("Clock moved backwards")
+
+        if ts == self.last_ts:
+            self.sequence = (self.sequence + 1) & 4095
+            if self.sequence == 0:
+                while ts <= self.last_ts:
+                    ts = int(time.time() * 1000) - self.epoch
+        else:
+            self.sequence = 0
+
+        self.last_ts = ts
+
+        id = (ts << 22) | (self.worker_id << 12) | self.sequence
+        return id
+```
+
+The bit shift constants come from the bit layout: worker ID is at position 12 (right-shifted by 12), timestamp is at position 22 (10 worker + 12 sequence = 22 bits below timestamp).
+
+## Worker ID Assignment with ZooKeeper
+
+How does a new server know its worker ID? You could hardcode it in configuration files, but that does not scale — every new server needs a manual config update, and you risk duplicate IDs from copy-paste errors.
+
+The production solution: use a coordination service like ZooKeeper or etcd.
+
+On startup, each Snowflake service:
+
+1. Connects to ZooKeeper
+2. Creates an ephemeral sequential node under `/snowflake/workers/`
+3. ZooKeeper assigns the next available sequence number as the worker ID
+4. The service caches the worker ID and starts generating IDs
+5. The ephemeral node auto-deletes if the service crashes (heartbeat timeout)
+
+```python
+# Pseudocode for ZooKeeper worker registration
+def register_worker(zk_client):
+    path = zk_client.create(
+        "/snowflake/workers/worker-",
+        value=json.dumps({"hostname": socket.gethostname(), "started_at": time.time()}),
+        ephemeral=True,
+        sequence=True
+    )
+    worker_id = int(path.split("-")[-1]) % 1024
+    return worker_id
+```
+
+The ephemeral node acts as a lease. If the service crashes, ZooKeeper detects the missing heartbeat within the session timeout (typically 5-10 seconds) and deletes the node, freeing the worker ID for another service.
+
+What about the case where all 1,024 worker IDs are taken? The service waits and retries. A well-provisioned cluster has a 2-3x worker ID buffer — if you need 300 workers, allocate 1,024 worker IDs so you have room for rolling deploys and failovers.
+
+## Clock Skew and NTP
+
+The Snowflake timestamp assumes system clocks are synchronized via NTP. But NTP is not perfect — clocks drift, and NTP corrections can move a clock forward OR backward.
+
+A clock moving forward is harmless — it just means IDs from that worker suddenly jump ahead. A clock moving backward is dangerous — it could cause the worker to generate IDs with old timestamps, potentially duplicating sequence numbers.
+
+The standard defense: if the current timestamp is less than the last timestamp seen:
+
+```python
+if ts < self.last_ts:
+    # Clock moved backward. Wait until caught up.
+    while ts < self.last_ts:
+        ts = int(time.time() * 1000) - self.epoch
+    # Or: raise an error if skew exceeds a threshold
+```
+
+Twitter's production Snowflake takes a softer approach: if clock skew is small (under a few seconds), it waits. If skew exceeds a threshold (say 10 seconds), it logs a critical alert and shuts down the worker, relying on the deployment system to restart it after NTP syncs.
+
+In multi-datacenter deployments, the NTP configuration is critical. Each datacenter should run its own NTP stratum servers synchronized to GPS or atomic clocks. Inter-DC clock skew should stay under 10 milliseconds for reliable Snowflake operation.
+
+### The 69-Year Clock Problem
+
+With 41 timestamp bits, the ID space wraps after approximately 69 years. When the timestamp reaches 2^41 - 1 and rolls over to 0, every new ID uses a timestamp of 0, which would collide with IDs from 69 years ago.
+
+In practice, this is not a problem — any system with a 69-year design horizon will undergo multiple architectural overhauls. But it is a great interview discussion point. Solutions: increase timestamp bits (at the cost of worker/sequence bits), or add a "generation" identifier outside the Snowflake ID (a database row that maps ID ranges to generations).
+
+## Sequence Overflow
+
+What happens when a single worker generates 4,096 IDs in the same millisecond? The sequence wraps to 0. If the millisecond has not changed, the worker would produce IDs with the same timestamp-worker-sequence tuple as earlier IDs in the same millisecond.
+
+The solution: spin-wait for the next millisecond.
+
+```python
+if ts == self.last_ts:
+    self.sequence = (self.sequence + 1) & 4095
+    if self.sequence == 0:  # Overflowed this millisecond
+        while ts <= self.last_ts:  # Wait for next ms
+            ts = int(time.time() * 1000) - self.epoch
+```
+
+This limits throughput to 4,096 IDs per millisecond per worker. At Twitter scale, this is rarely a problem — 4 million IDs per second cluster-wide is enormous headroom. But if you have a use case that bursts above 4,096 per worker per millisecond (e.g., batch imports, event replay), you have options:
+
+- Increase sequence bits: 13 bits gives 8,192 per ms, 14 bits gives 16,384
+- Decrease worker bits: 9 bits = 512 workers, 8 bits = 256 workers
+- Use a hybrid approach: allow the worker to use the next millisecond's sequence space
+
+```python
+# Configurable Snowflake with dynamic bit allocation
+class ConfigurableSnowflake:
+    def __init__(self, worker_id, worker_bits=10, seq_bits=12, epoch=1288834974657):
+        self.worker_id = worker_id
+        self.worker_bits = worker_bits
+        self.seq_bits = seq_bits
+        self.max_seq = (1 << seq_bits) - 1
+        self.epoch = epoch
+        self.last_ts = 0
+        self.sequence = 0
+
+    def next_id(self):
+        ts = int(time.time() * 1000) - self.epoch
+        if ts < self.last_ts:
+            raise Exception("Clock skew detected")
+        if ts == self.last_ts:
+            self.sequence += 1
+            if self.sequence > self.max_seq:
+                while ts <= self.last_ts:
+                    ts = int(time.time() * 1000) - self.epoch
+                self.sequence = 0
+        else:
+            self.sequence = 0
+        self.last_ts = ts
+
+        shift_worker = self.seq_bits
+        shift_ts = self.worker_bits + self.seq_bits
+        return (ts << shift_ts) | (self.worker_id << shift_worker) | self.sequence
+```
+
+## Multi-Datacenter Deployment
+
+In production, you deploy across multiple datacenters for availability. Each datacenter runs its own Snowflake services, and they all share a ZooKeeper cluster. How do you ensure unique IDs across datacenters?
+
+The standard approach: partition the worker ID space by datacenter.
+
+- US-East: workers 0-511
+- EU-West: workers 512-1023
+
+With 10-bit worker IDs, you get 512 workers per datacenter (2 datacenters) or 341 (3 datacenters). The ZooKeeper ensemble spans all datacenters, but the worker ID assignment logic enforces the partition.
+
+```python
+# Worker ID assignment with datacenter partitioning
+DC_RANGES = {
+    "us-east": (0, 511),
+    "eu-west": (512, 1023),
+}
+
+def register_worker(zk_client, datacenter):
+    start, end = DC_RANGES[datacenter]
+    for attempt in range(10):
+        for worker_id in range(start, end + 1):
+            path = f"/snowflake/workers/{datacenter}/{worker_id}"
+            if not zk_client.exists(path):
+                zk_client.create(path, ephemeral=True, value=...)
+                return worker_id
+        time.sleep(5)
+    raise Exception("All worker IDs in range exhausted")
+```
+
+This design gives you deterministic insight: the worker ID reveals which datacenter generated the ID. IDs 0-511 come from US-East. IDs 512-1023 come from EU-West. This is enormously useful for debugging and traffic analysis.
+
+Another approach: add dedicated datacenter bits. Instead of 10 worker bits, use 3 datacenter bits + 7 worker bits. This supports 8 datacenters with 128 workers each. Twitter did not need this (they used the 10-bit flat space and reserved ranges per DC), but larger deployments might.
+
+<IdArchitectureDemo client:visible />
+
+### Cross-Datacenter ZooKeeper
+
+ZooKeeper itself must be deployed across datacenters. A 5-node ZooKeeper ensemble can span 3 datacenters (2 nodes in two DCs, 1 in the third). The ZooKeeper leader is elected automatically and handles write requests. Reads go to any node.
+
+The latency cost: ZooKeeper writes require a majority of nodes to confirm. If the leader is in US-East and a follower is in EU-West (70ms round-trip), each write takes at least 70ms. This is why worker ID assignment happens at service startup, not on every ID generation. Once the worker ID is assigned (one-time 70ms RTT), ID generation is purely local memory operations.
+
+## Collision Probability
+
+Snowflake IDs are deterministically unique, not probabilistically. A collision only happens when protocol rules are violated:
+
+**Duplicate worker ID:** Two servers with the same worker ID and synchronized clocks could generate the same timestamp-sequence pair. This is prevented by ZooKeeper's ephemeral node guarantee — no two servers can hold the same worker ID simultaneously.
+
+**Clock skew:** If a server's clock jumps backward after generating IDs with timestamp T, and the server resumes generating IDs with timestamp T again, it might reuse a sequence number. This is prevented by the clock skew detection logic described above.
+
+**Sequence overflow:** If a server generates more than 4,096 IDs in the same millisecond (with default 12-bit sequence), the sequence wraps. This is prevented by the spin-wait loop.
+
+Compare to UUID v4: UUID v4 has a 1 in 2^122 chance of collision per pair of IDs. At 1 billion IDs, the birthday paradox gives approximately (10^9)^2 / (2 * 5.3 * 10^36) = ~10^-19 probability of any collision. That is safe enough for most systems. But it is not zero. For systems where collision is business-critical (payment IDs, account numbers, legal document identifiers), deterministic uniqueness matters.
+
+### Real-World Usage
+
+- **Twitter**: Snowflake for every tweet, DM, and notification. ~500 billion IDs generated since 2010.
+- **Discord**: Snowflake-like IDs for every message, channel, and server. 60-bit timestamp (milliseconds + increment), 5-bit internal worker ID, 7-bit process ID. IDs expose creation time via their API.
+- **Instagram**: Sharded database with custom ID generator. 41-bit timestamp, 13-bit logical shard ID, 10-bit sequence. IDs are 64-bit like Snowflake.
+- **Snowflake (the company)**: Named after the algorithm. Uses it for their data warehouse row IDs.
+- **Mastodon**: Uses ULID (26-character, 128-bit, time-sortable) which is conceptually similar to UUID v7.
+
+### When Not to Use Snowflake
+
+Snowflake is not always the right answer. Consider the alternatives:
+
+**Use UUID v4 when:** You need absolute simplicity, ID generation must work offline, and your database handles random keys efficiently (some NoSQL databases like Cassandra are optimized for hash-partitioned keys).
+
+**Use UUID v7 when:** You need time-sortability but want zero coordination. UUID v7 works on a laptop disconnected from the internet. Snowflake requires at least one-time ZooKeeper access.
+
+**Use auto-increment when:** You have a single database, or you are building a demo/prototype. Auto-increment is the simplest option and performs well at low scale.
+
+**Use ULID when:** You want a human-readable, URL-safe ID that encodes time (like Snowflake) but is 26 characters (128 bits) and sortable as a string.
+
+## Summary
+
+| Approach | Size | Sortable | Uniqueness | Coordination | Throughput |
+|----------|------|----------|------------|--------------|------------|
+| Auto-increment | 32-64 bit | Perfect | Deterministic | Database per ID | Low |
+| UUID v4 | 128 bit | No | Probabilistic | None | Unlimited |
+| UUID v7 | 128 bit | Yes | Probabilistic | None | Unlimited |
+| Range batching | 64 bit | Perfect | Deterministic | Database per range | High |
+| Snowflake | 64 bit | Yes | Deterministic | ZooKeeper at startup | Very high |
+
+Snowflake is the reference solution for distributed ID generation at scale. It is compact (64-bit), time-sortable (B-tree friendly), and deterministically unique (zero collisions). The trade-off is the need for a coordination service like ZooKeeper for worker ID assignment — but this is a one-time cost at service startup, not a per-ID cost.
+
+In a system design interview, start with the requirements, walk through the alternatives (UUIDs, DB sequences, range batching), then land on Snowflake. Explain the bit layout, the worker ID assignment strategy, the clock skew handling, and the multi-datacenter deployment. That is the complete answer.
+
+## Self-Check
+
+Before your interview, make sure you can answer all of these without looking:
+
+- [ ] Can you list all 5 properties of a good distributed ID?
+- [ ] Can you explain why random UUIDs cause B-tree index fragmentation?
+- [ ] Can you draw the 64-bit Snowflake layout with all four fields?
+- [ ] Can you calculate maximum throughput given N workers and M sequence bits?
+- [ ] Can you compute the timestamp expiry date given a bit count and epoch?
+- [ ] Can you write a Snowflake `next_id()` function in Python?
+- [ ] Can you explain how ZooKeeper prevents duplicate worker IDs?
+- [ ] Can you describe what happens when NTP moves a clock backward?
+- [ ] Can you explain how range batching avoids per-ID database calls?
+- [ ] Can you design a multi-datacenter worker ID assignment scheme?
+- [ ] Can you compare the trade-offs between UUID v4, v7, and Snowflake?
+- [ ] Can you handle the "what if" follow-up on sequence overflow?
+- [ ] Can you explain why Snowflake collisions are deterministic, not probabilistic?
+- [ ] Can you name three real-world systems that use Snowflake-style IDs?
+- [ ] Can you describe when NOT to use Snowflake and what to use instead?
