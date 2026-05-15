@@ -1,0 +1,334 @@
+---
+title: "The Browser Rendering Pipeline: From URL to Pixels"
+description: "A deep dive into how browsers turn HTML, CSS, and JavaScript into pixels — DOM construction, CSSOM, the render tree, layout, paint, compositing, and how to avoid performance pitfalls."
+date: 2026-05-15T01:00:00
+tags: ["browser", "rendering", "performance", "frontend"]
+---
+
+import HtmlParsingDemo from '../../components/demos/HtmlParsingDemo'
+import CssParsingDemo from '../../components/demos/CssParsingDemo'
+import RenderTreeDemo from '../../components/demos/RenderTreeDemo'
+import LayoutDemo from '../../components/demos/LayoutDemo'
+import PaintDemo from '../../components/demos/PaintDemo'
+import CompositeDemo from '../../components/demos/CompositeDemo'
+import ReflowTriggerDemo from '../../components/demos/ReflowTriggerDemo'
+import CriticalPathDemo from '../../components/demos/CriticalPathDemo'
+import LayoutThrashDemo from '../../components/demos/LayoutThrashDemo'
+import AsyncDeferDemo from '../../components/demos/AsyncDeferDemo'
+import WillChangeDemo from '../../components/demos/WillChangeDemo'
+import FramePipelineDemo from '../../components/demos/FramePipelineDemo'
+
+## The Big Picture
+
+Think of the browser as a factory with a six-stage assembly line. Raw materials go in one end — HTML, CSS, JavaScript — and pixels come out the other. Each stage transforms the product into something closer to the final display.
+
+The six stages are: **DOM construction** from HTML, **CSSOM construction** from CSS, merging both into the **Render Tree**, computing element geometry in **Layout**, filling pixels in **Paint**, and stacking layers together in **Composite**.
+
+Every stage depends on the stage before it. But here is the key insight for performance: some CSS changes skip stages entirely. Changing `background-color` triggers Paint but skips Layout. Changing `transform` or `opacity` skips straight to Composite. Understanding which stage each operation touches is how we write fast, smooth web pages.
+
+## HTML Parsing
+
+The browser receives HTML as raw bytes over the network. The first job is to turn those bytes into a tree of objects the browser can work with — the **Document Object Model** or **DOM**.
+
+The process runs through four phases:
+
+1. **Bytes to characters** — the browser decodes the byte stream using the file's encoding (usually UTF-8).
+2. **Characters to tokens** — the HTML tokenizer scans character by character and emits tokens: start tags, end tags, attribute names, attribute values, text content.
+3. **Tokens to nodes** — the tree construction algorithm consumes tokens and creates `Node` objects (`Element`, `Text`, `Comment`, etc.).
+4. **Nodes to DOM tree** — nodes are wired into a tree structure. A `<div>` becomes an `Element` node, its child `<p>` becomes a child `Element` node, and so on.
+
+The DOM is not the HTML you wrote. It is the browser's internal representation — corrected for errors, missing tags, and misnesting. The browser never shows you the HTML source; it renders from the DOM.
+
+<HtmlParsingDemo client:visible />
+
+## CSS Parsing
+
+While HTML is being parsed into the DOM, the browser also processes CSS. Every stylesheet — external files, `<style>` blocks, and inline `style` attributes — goes through its own parsing pipeline.
+
+CSS bytes become tokens, tokens become rules, and rules are organized into the **CSS Object Model** or **CSSOM**. The CSSOM is a tree structure, but unlike the DOM it is optimized for cascading — walking from general rules to specific ones.
+
+During CSSOM construction the browser resolves **the cascade**: for each property of each element, which rule wins? It applies this priority order:
+
+- **Importance** — `!important` beats normal declarations
+- **Origin** — author styles beat user-agent defaults
+- **Specificity** — inline > ID > class > element
+- **Source order** — last declaration wins if specificity is tied
+
+If an external CSS file is still downloading, the browser **blocks rendering** — it refuses to paint anything until the CSSOM is ready. This is why CSS is called a "render-blocking" resource.
+
+<CssParsingDemo client:visible />
+
+## The Render Tree
+
+The DOM and CSSOM are independent trees. The browser merges them into a third structure: the **Render Tree**. This tree contains only the nodes that will actually appear on screen.
+
+The merge process walks every DOM node and checks its CSSOM entry. If the node has `display: none`, or is a non-visual element like `<script>` or `<meta>`, it is excluded from the render tree. If the node has `visibility: hidden`, it stays — hidden elements still occupy space and affect layout.
+
+Each surviving node becomes a **render object** with a reference to its DOM node and its computed styles. The render tree is what Layout operates on.
+
+<RenderTreeDemo client:visible />
+
+## Layout (Reflow)
+
+With the render tree built, the browser now needs to figure out where everything goes. This stage is called **Layout**, also known as **Reflow**.
+
+The browser starts at the root of the render tree and computes geometry for every node: x and y coordinates, width, height, margin, padding, border. This is where the box model becomes concrete — `box-sizing`, `margin collapsing`, `percentage widths` all resolve to actual pixel values here.
+
+Layout flows top-down and left-to-right. A parent's width affects its children's widths. A child's height can affect the parent's height (unless the parent has an explicit height). The result is a **layout tree** where every element knows its exact position and size in viewport coordinates.
+
+Layout is expensive. Changing `width` of a top-level element can cause the browser to relayout every descendant and potentially every sibling. The time is roughly proportional to the number of render objects and the depth of the tree.
+
+<LayoutDemo client:visible />
+
+## Paint
+
+Once the browser knows where every element is, it draws them onto pixels. This is the **Paint** stage.
+
+Painting happens in a specific order, sometimes called the **painting order** or **stacking context order**:
+
+1. Background and borders of the element itself
+2. Negative z-index child stacking contexts
+3. Block-level descendants in normal flow
+4. Floating descendants
+5. Inline-level descendants (text, images)
+6. Non-positioned child stacking contexts
+7. Positioned child stacking contexts (by z-index)
+
+Elements are painted onto one or more bitmaps (called **layers**). Each layer is a separate surface that the browser can repaint independently. If only one element on the page changes color that is tracked in a separate paint layer (e.g., via `will-change`), the browser repaints only that layer, not the entire page.
+
+Paint is rasterization — turning vector data (shapes, text, gradients) into pixels. The browser's rasterizer walks each render object and fills pixels according to its computed styles. Text uses the font rasterizer. Borders use shape rasterizers. Shadows are blurred and composited.
+
+<PaintDemo client:visible />
+
+## Compositing
+
+After individual layers are painted, the browser merges them together in the **Composite** stage. This is like stacking transparent sheets of plastic — each layer has its own content, and the layers are combined in a specific order with blending and alpha.
+
+Compositing is handled by the **GPU** in most modern browsers. Each layer is uploaded to GPU memory as a texture. The GPU can move, scale, rotate, and fade layers without involving the CPU — and without triggering Layout or Paint on the rest of the page.
+
+This is why `transform: translateX(100px)` is faster than `left: 100px`. The transform only touches compositing. Changing `left` triggers Layout, then Paint, then Composite. For animations, using `transform` and `opacity` means the browser only needs to recomposite each frame — staying within the $16.67\text{ms}$ budget is far easier.
+
+The browser automatically creates layers for certain conditions: elements with `<video>` or `<canvas>`, elements with `will-change`, elements with 3D transforms (`translateZ(0)`), and elements that overlap with composited siblings.
+
+<CompositeDemo client:visible />
+
+## JavaScript Blocking
+
+JavaScript adds a complication to the pipeline. When the HTML parser encounters a `<script>` tag without `async` or `defer`, it **pauses DOM construction** entirely. It stops parsing HTML, fetches the script (if external), executes it, and only then resumes building the DOM.
+
+Why does it block? Because JavaScript can modify the DOM and CSSOM. A script might use `document.write()` to insert new HTML, or read `element.style.color` which requires the CSSOM to be ready. The browser cannot safely continue parsing while a script could change the structure.
+
+This blocking behavior is the cause of most slow initial page loads. Every parser-blocking script adds its fetch time + execute time to the critical rendering path. The fix is `async` and `defer`:
+
+- `<script async src="app.js">` — downloads in parallel with parsing. Executes as soon as it finishes downloading, regardless of where the parser is.
+- `<script defer src="app.js">` — downloads in parallel with parsing. Executes after parsing completes, in document order.
+
+Use `async` for independent scripts that don't touch the DOM (analytics, ads). Use `defer` for scripts that need the full DOM to be ready (your application code).
+
+<AsyncDeferDemo client:visible />
+
+## Reflow Triggers
+
+Layout (reflow) is triggered whenever the browser detects that the geometry of an element has changed or might have changed. Some triggers are obvious, others are subtle.
+
+**Obvious triggers** — changing a CSS property that affects geometry:
+
+```css
+element.style.width = '200px';
+element.style.marginTop = '20px';
+element.style.display = 'none';
+element.classList.add('new-layout-class');
+```
+
+**Subtle triggers** — reading layout properties forces a synchronous reflow. The browser must compute layout to give you an accurate value:
+
+```javascript
+// Every one of these forces a reflow if layout is dirty
+const h = element.offsetHeight;
+const w = element.clientWidth;
+const top = element.getBoundingClientRect().top;
+const scrollPos = element.scrollTop;
+const isVisible = element.offsetParent !== null;
+window.getComputedStyle(element).top;
+```
+
+When you modify a style and then immediately read a layout property, the browser has no choice — it must run Layout right there, synchronously, before returning the value. This is called a **forced synchronous layout**.
+
+<ReflowTriggerDemo client:visible />
+
+## Layout Thrashing
+
+**Layout thrashing** happens when forced synchronous layouts are triggered repeatedly in a loop. Each iteration forces the browser to recalculate layout, then invalidates it again, creating a costly read-write cycle.
+
+Here is the classic anti-pattern:
+
+```javascript
+// Unbatched: 100 forced reflows
+for (let i = 0; i < items.length; i++) {
+  const h = items[i].offsetHeight;          // read  → reflow
+  items[i].style.height = (h + 10) + 'px';  // write → invalidates layout
+}
+```
+
+Each iteration reads the current height (forcing a reflow), then writes a new height (invalidating layout). The next iteration reads again, forcing another reflow. One hundred iterations, one hundred reflows.
+
+The fix is batching — separate all reads from all writes:
+
+```javascript
+// Batched: 1 reflow (batch read), then 1 reflow (batch write)
+const heights = [];
+for (let i = 0; i < items.length; i++) {
+  heights.push(items[i].offsetHeight); // read phase — one reflow
+}
+for (let i = 0; i < items.length; i++) {
+  items[i].style.height = (heights[i] + 10) + 'px'; // write phase — one reflow
+}
+```
+
+Layout thrashing is invisible to the developer — the code "works" — but causes visible jank for the user. The frame budget is eaten by repeated layout calculations instead of painting.
+
+<LayoutThrashDemo client:visible />
+
+## Layer Promotion
+
+We learned that compositing-only changes are the cheapest. The key to unlocking compositor-only updates is **layer promotion** — telling the browser to put an element on its own compositor layer.
+
+The most common techniques:
+
+```css
+/* Hint that the element should be a layer */
+.element {
+  will-change: transform;
+}
+
+/* Legacy hack — still works everywhere */
+.element {
+  transform: translateZ(0);
+}
+
+/* Paint containment — new, clean approach */
+.element {
+  contain: paint;
+}
+```
+
+`will-change: transform` is the declarative approach. It tells the browser "this element will animate, prepare a layer for it." The browser can pre-allocate GPU memory and skip Layout and Paint during the animation.
+
+`transform: translateZ(0)` is the old hack. It forces a 3D transform (z-axis translation of zero), which triggers layer creation in every browser. It works, but it's wasteful — every promoted layer uses GPU memory. Promoting hundreds of elements can exhaust GPU memory on mobile devices.
+
+`contain: paint` creates a new stacking context and clips the element's paint to its box. The element can be repainted independently without affecting siblings, but it does not guarantee GPU compositing.
+
+The rule: promote layers deliberately. Profile first, then promote only the elements that benefit — usually animated elements that move or fade every frame.
+
+<WillChangeDemo client:visible />
+
+## The Critical Rendering Path
+
+The **Critical Rendering Path (CRP)** is the sequence of steps the browser must complete before it can paint the first frame. Every resource on this path directly delays the user seeing anything.
+
+For the initial page load, the CRP is:
+
+1. HTML starts arriving. Parsing begins immediately.
+2. CSS `<link>` in `<head>` is discovered. Download begins. **Rendering is blocked** until CSSOM is ready.
+3. Scripts without `async`/`defer` are discovered. **Parsing is blocked** during fetch and execution.
+4. Once DOM and CSSOM are ready, Render Tree is built, Layout runs, Paint runs, Composite runs.
+5. First paint happens.
+
+Each render-blocking resource adds its round-trip time to the CRP. Measuring and optimizing the CRP means:
+
+- **Inline critical CSS** in `<head>` so the first paint needs no external CSS download
+- **Defer non-critical CSS** with `media="print"` or `rel="preload"` with `onload`
+- **Use `async` or `defer`** on all scripts
+- **Remove unused CSS** to reduce CSSOM size
+- **Compress and minify** everything on the path
+
+The goal is a **first paint in under one second** on a 3G connection. That means the total CRP length (all round-trips plus processing time) must fit under 1000ms.
+
+<CriticalPathDemo client:visible />
+
+## A Single Frame
+
+When the page is running at 60 frames per second, each frame has exactly $16.67\text{ms}$ to complete. The browser follows a fixed pipeline for every frame:
+
+```
+JavaScript → Style → Layout → Paint → Composite
+```
+
+The frame starts with a **vsync** signal from the display. The browser's rendering engine runs its scheduled tasks:
+
+1. **JavaScript** — executes `requestAnimationFrame` callbacks, resolves promises, processes DOM events. Should take no more than **5-8ms**.
+2. **Style** — recalculates computed styles for any elements with changed or inherited properties.
+3. **Layout** — recomputes geometry for any elements affected by style changes.
+4. **Paint** — rasterizes changed regions.
+5. **Composite** — merges layers for display.
+
+If the total exceeds $16.67\text{ms}$, the frame is dropped — the user sees a stutter instead of smooth motion. Chrome DevTools' Performance panel shows this as a red bar in the frame overview.
+
+The 60fps target is a hard deadline. Tasks that cannot fit in the frame budget (like network responses) should be deferred to the next idle period via `requestIdleCallback` or a `setTimeout` with zero delay.
+
+<FramePipelineDemo client:visible />
+
+## Self-Check
+
+Test your understanding by working through these exercises.
+
+### Identify the Reflow Triggers
+
+Look at each code snippet. Does it force a reflow?
+
+```javascript
+// Snippet A
+element.style.padding = '20px';
+console.log(element.offsetHeight);
+```
+
+```javascript
+// Snippet B
+element.style.transform = 'translateX(100px)';
+element.style.opacity = '0.5';
+```
+
+```javascript
+// Snippet C
+element.classList.add('hidden');
+element.style.width = '50%';
+const rect = element.getBoundingClientRect();
+```
+
+**Answers**: A forces reflow (write + read). B does not — `transform` and `opacity` only trigger composite. C forces two reflows: the `classList.add` and `style.width` dirty layout, then `getBoundingClientRect()` forces synchronous reflow.
+
+### Optimize the Critical Path
+
+Given this HTML head, describe three optimizations:
+
+```html
+<head>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="fonts.css">
+  <script src="analytics.js"></script>
+  <script src="app.js"></script>
+</head>
+```
+
+**Optimizations**: (1) Inline critical CSS from `styles.css` into a `<style>` block. (2) Load `fonts.css` with `<link rel="preload" as="style" href="fonts.css" onload="this.rel='stylesheet'">` to avoid blocking. (3) Add `async` to `analytics.js` and `defer` to `app.js`.
+
+### Compare Layer Strategies
+
+| Strategy | Creates Layer | GPU Memory | Use Case |
+|---|---|---|---|
+| `will-change: transform` | Yes | Allocated lazily | Animations you know about |
+| `transform: translateZ(0)` | Yes | Immediate | Legacy fallback |
+| `contain: paint` | Paint isolation only | Minimal | Isolated repaints |
+| `opacity: 0.99` | In some browsers | Variable | Side effect, avoid |
+
+### Performance Checklist
+
+- [ ] I know which CSS properties trigger Layout, Paint, or only Composite
+- [ ] My animations use `transform` and `opacity` exclusively
+- [ ] I batch DOM reads separately from DOM writes
+- [ ] I load scripts with `async` or `defer`
+- [ ] I inline critical CSS for first paint
+- [ ] I promote layers deliberately, not with blanket `translateZ(0)`
+- [ ] I profile frames in DevTools before optimizing
+
+Understanding the rendering pipeline turns performance optimization from guesswork into engineering. When you know exactly which stage a change touches, you can predict its cost — and decide deliberately which costs are worth paying.
