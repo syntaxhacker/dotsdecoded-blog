@@ -1,0 +1,453 @@
+---
+title: "Design Pastebin: Building a Code Snippet Sharing Service"
+description: "A complete system design walkthrough for a pastebin service — content storage, syntax highlighting, expiration policies, custom slugs, rate limiting, and scaling to handle millions of pastes."
+date: 2026-05-18T01:00:00
+tags: ["system-design", "interview", "pastebin", "code-snippets", "design-problem"]
+---
+
+import PasteRequirementsDemo from '../../components/demos/PasteRequirementsDemo'
+import PasteStorageDemo from '../../components/demos/PasteStorageDemo'
+import PasteExpirationDemo from '../../components/demos/PasteExpirationDemo'
+import PasteArchitectureDemo from '../../components/demos/PasteArchitectureDemo'
+
+You are in a system design interview. The interviewer says: "Design a pastebin / code snippet service." You have used these before — Pastebin, GitHub Gist, Hastebin, Glot.io. They let you paste text, get a shareable URL, and optionally set an expiration time. The problem sounds simple. The depth is in the details: how do you store millions of pastes efficiently, deduplicate content, handle syntax highlighting for 50+ languages, enforce expiration, and prevent abuse?
+
+This is a complete walkthrough from zero to deployed architecture.
+
+## What We Are Building
+
+A pastebin is like a sticky note for the internet. You write some text (usually code), the service gives you back a short URL, and anyone with that URL can view the paste. Services like Pastebin and GitHub Gist have been around for two decades because developers constantly need to share code snippets — in chat, on forums, in bug reports, during code reviews.
+
+Real-world examples: Pastebin (launched 2002, still one of the most-trafficked sites on the internet), GitHub Gist (2008, integrated with Git for versioning), Hastebin (lightweight, used in Discord), Glot.io (runnable snippets with Docker), and PrivateBin (zero-knowledge, encrypted pastes).
+
+Why do these services matter? Three reasons. First, collaboration — sharing a code snippet in Slack or IRC is useless if the code wraps badly or gets lost in the scrollback. A paste link is clean and persistent. Second, debugging — users paste error logs, stack traces, and server output to get help. Third, archival — pastebins serve as lightweight documentation for one-off scripts, configuration files, and SQL queries.
+
+### Requirements
+
+<PasteRequirementsDemo client:visible />
+
+### Functional Requirements
+
+1. **Create a paste** — paste text content, optionally set a title, language, expiration, and visibility
+2. **View a paste** — given a short slug URL, render the content with syntax highlighting
+3. **Raw text access** — serve plain text at `/raw/<slug>` for curl and programmatic consumption
+4. **Syntax highlighting** — support 20+ programming languages with automatic detection
+5. **Expiration** — support burn-after-read, 10 minutes, 1 hour, 1 day, 1 week, 1 month, and never
+6. **Custom slugs** — let users specify a custom URL alias
+7. **Visibility** — public (searchable), unlisted (only with direct link), private (only creator)
+
+### Non-Functional Requirements
+
+1. **High availability** — the view endpoint must never 5xx (99.9% uptime target)
+2. **Low latency** — paste views complete in under 100ms at p99
+3. **Durability** — no paste content is lost before its expiration
+4. **Scalability** — handle 10,000+ writes/second and 1M+ reads/second at peak
+5. **Abuse resistance** — rate limiting, content scanning, and spam detection
+
+### Out of Scope
+
+We are not building: user authentication (optional for MVP), paste editing (complex versioning), collaborative editing (multiple simultaneous editors), runnable code execution (like Glot.io), or a full admin dashboard.
+
+## Paste Anatomy
+
+Every paste has the same internal structure regardless of how users interact with it.
+
+```sql
+CREATE TABLE pastes (
+    id            BIGSERIAL PRIMARY KEY,
+    slug          VARCHAR(12) UNIQUE NOT NULL,
+    title         VARCHAR(200),
+    content_hash  CHAR(64) NOT NULL,
+    content_path  VARCHAR(500) NOT NULL,
+    language      VARCHAR(30) NOT NULL DEFAULT 'auto',
+    visibility    VARCHAR(10) NOT NULL DEFAULT 'public',
+    expiration    TIMESTAMPTZ,
+    burn_after_read BOOLEAN NOT NULL DEFAULT false,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    content_size  INTEGER NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_pastes_slug ON pastes(slug);
+CREATE INDEX idx_pastes_content_hash ON pastes(content_hash);
+CREATE INDEX idx_pastes_expiration ON pastes(expiration);
+```
+
+Each field serves a specific purpose:
+
+- **slug** — the short string in the URL (`pastebin.com/aB3x9Q`). Must be unique, generated randomly or user-specified.
+- **content_hash** — SHA-256 of the raw paste content. Used for deduplication — if two pastes have the same hash, we store the content once.
+- **content_path** — the key in object storage (S3, R2) where the full compressed content lives. Metadata stays in SQL; content stays in blob storage.
+- **language** — the syntax highlighting language. Auto-detected on upload but user-overridable.
+- **expiration** — nullable timestamp. NULL means the paste never expires. When the timestamp is reached, the paste is eligible for cleanup.
+
+### URL Generation: Random vs Custom Slugs
+
+Slugs must be short, unique, and URL-safe. Two approaches:
+
+**Random slugs (default):** Generate a 7-character string from a 62-character alphabet (a-z, A-Z, 0-9). This gives 62^7 = ~3.5 trillion combinations — more than enough. Use a cryptographically random generator to prevent sequential enumeration. Check the database for collisions (extremely rare at this keyspace, but handle it with a retry).
+
+```python
+import secrets
+import string
+
+ALPHABET = string.ascii_letters + string.digits
+
+def generate_slug(length=7):
+    return ''.join(secrets.choice(ALPHABET) for _ in range(length))
+```
+
+**Custom slugs:** Let users specify their own slug (e.g., `deploy-script-v2`). Validate length (max 100 chars), character set (alphanumeric plus hyphens), and uniqueness. Custom slugs need an explicit uniqueness check before insert because users will collide on common names like `test` or `config`.
+
+**Edge case:** What if a random slug happens to match a custom slug? The random generator retries (typically 0-1 retries). What if a user requests an already-taken custom slug? Return a 409 Conflict with a suggestion.
+
+## Storage Strategy
+
+Metadata lives in a relational database. Content lives in object storage. This separation lets us scale each independently — the database handles millions of rows with fast indexed lookups, while object storage handles gigabytes of raw paste content cheaply.
+
+<PasteStorageDemo client:visible />
+
+### Why Not Store Content in SQL?
+
+Paste content can be anything from a 3-line config to a 50 MB log file. Storing large blobs in PostgreSQL or MySQL causes table bloat, slow backups, and expensive queries. Object storage (S3, Cloudflare R2, GCS) costs pennies per GB and handles multi-TB scale without manual sharding.
+
+The database stores only:
+
+- A 64-character SHA-256 hash (content deduplication key)
+- A content path string (the S3 key)
+- Metadata (title, language, expiration, visibility, access count)
+
+### Content Deduplication
+
+When a user creates a paste:
+
+1. Compute SHA-256 of the raw content
+2. Query the `pastes` table for existing rows with the same `content_hash`
+3. If found: reuse the existing `content_path`, increment the reference counter
+4. If not found: compress the content with gzip, upload to S3, store the path
+
+This dramatically reduces storage for common snippets. SQL queries, common config files, and popular code patterns get pasted thousands of times but stored once.
+
+```python
+import hashlib
+import gzip
+import boto3
+
+s3 = boto3.client('s3')
+
+def store_content(content: str) -> tuple[str, str, int]:
+    raw_bytes = content.encode('utf-8')
+    content_hash = hashlib.sha256(raw_bytes).hexdigest()
+
+    existing = db.query("SELECT content_path FROM pastes WHERE content_hash = %s LIMIT 1", [content_hash])
+    if existing:
+        db.execute("UPDATE content_refs SET ref_count = ref_count + 1 WHERE content_hash = %s", [content_hash])
+        return (content_hash, existing[0][0], len(raw_bytes))
+
+    compressed = gzip.compress(raw_bytes)
+    key = f"pastes/{content_hash[:2]}/{content_hash[2:4]}/{content_hash}"
+    s3.put_object(Bucket="paste-content", Key=key, Body=compressed, ContentType="text/plain")
+    db.execute("INSERT INTO content_refs (content_hash, content_path, original_size, compressed_size, ref_count) VALUES (%s, %s, %s, %s, 1)",
+               [content_hash, key, len(raw_bytes), len(compressed)])
+    return (content_hash, key, len(raw_bytes))
+```
+
+## Syntax Highlighting Pipeline
+
+Syntax highlighting turns raw code into colored, formatted HTML. Every paste service needs this — without it, a paste is just monospace text.
+
+The pipeline works in four stages:
+
+1. **Language detection** — on upload, analyze the content to guess the language. Heuristics: filename extension (`main.py` → Python), shebang line (`#!/usr/bin/env node` → JavaScript), and content patterns (`fn main()` → Rust).
+2. **Tokenization** — the highlighter (PrismJS, highlight.js, Pygments) breaks the code into tokens: keywords, strings, comments, operators, punctuation.
+3. **HTML rendering** — each token is wrapped in a `<span>` with a CSS class representing its type (`.token.keyword`, `.token.string`).
+4. **Server-side caching** — the rendered HTML is cached alongside the paste. Re-rendering happens only if the language preference changes.
+
+```python
+from pygments import highlight
+from pygments.lexers import guess_lexer, get_lexer_by_name
+from pygments.formatters import HtmlFormatter
+
+def render_paste(content: str, language: str = 'auto') -> str:
+    if language == 'auto' or language not in SUPPORTED_LANGUAGES:
+        lexer = guess_lexer(content)
+    else:
+        lexer = get_lexer_by_name(language)
+    formatter = HtmlFormatter(classprefix='token ')
+    return highlight(content, lexer, formatter)
+```
+
+For the frontend, PrismJS handles highlighting on the client side for dynamic content. The server-side rendered HTML serves as the initial load, while the raw text endpoint (`/raw/<slug>`) serves the unhighlighted content for API consumers.
+
+## Create Paste Flow
+
+When a user submits a new paste, the following happens in sequence:
+
+1. **Client sends POST /api/pastes** with `{ content, title?, language?, expiration?, visibility?, slug? }`
+2. **API Gateway validates** — content size check (max 10 MB), slug format (if custom), expiration validation (must be in the future or null)
+3. **Rate limiter checks** — per-IP limit (e.g., 10 pastes/minute for anonymous, 100/minute for authenticated)
+4. **Content hash computed** — SHA-256 for deduplication
+5. **Slug generated** — random if not custom, with collision retry
+6. **Content compressed** — gzip at level 6 (good balance of speed and compression)
+7. **Content stored** — upload to S3 if not already present (dedup check)
+8. **Metadata inserted** — INSERT into `pastes` table
+9. **Cache populated** — store the rendered paste in Redis for hot access
+10. **Response returned** — `201 Created` with the paste URL
+
+```python
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class CreatePasteRequest(BaseModel):
+    content: str
+    title: str | None = None
+    language: str = 'auto'
+    expiration: str | None = None
+    visibility: str = 'public'
+    slug: str | None = None
+
+@app.post("/api/pastes")
+async def create_paste(req: CreatePasteRequest):
+    if len(req.content) > 10 * 1024 * 1024:
+        raise HTTPException(413, "Content exceeds 10 MB limit")
+
+    client_ip = request.client.host
+    if not rate_limiter.check(client_ip, "create_paste"):
+        raise HTTPException(429, "Rate limit exceeded")
+
+    content_hash, content_path, size = store_content(req.content)
+
+    slug = req.slug or generate_slug()
+    if slug_collides(slug):
+        slug = generate_slug()
+
+    paste_id = db.insert("pastes", {
+        "slug": slug,
+        "title": req.title,
+        "content_hash": content_hash,
+        "content_path": content_path,
+        "language": req.language,
+        "expiration": parse_expiration(req.expiration),
+        "visibility": req.visibility,
+        "content_size": size,
+    })
+
+    cache.set(f"paste:{slug}", render_paste(req.content, req.language), ttl=3600)
+    return {"url": f"https://paste.example.com/{slug}", "slug": slug}
+```
+
+## View Paste Flow
+
+When a user opens a paste URL:
+
+1. **Request hits CDN** — Cloudflare checks if the paste is cached at the edge (for extremely popular pastes)
+2. **Load balancer** — routes to the nearest healthy API instance
+3. **Cache check** — Redis lookup by slug. If found (cache hit), return immediately (~5ms latency)
+4. **Database lookup** — on cache miss, query the `pastes` table by slug index
+5. **Expiration check** — if `expiration < NOW()` or `burn_after_read` and already viewed, return 410 Gone
+6. **Content fetch** — load from S3 using `content_path`, decompress gzip
+7. **Render** — apply syntax highlighting, build the HTML page
+8. **Cache populate** — store in Redis with a TTL proportional to remaining expiration (or 1 hour for permanent pastes)
+9. **Return** — serve the rendered page, increment `access_count`
+
+```python
+@app.get("/{slug}")
+async def view_paste(slug: str):
+    cached = cache.get(f"paste:{slug}")
+    if cached:
+        db.execute("UPDATE pastes SET access_count = access_count + 1 WHERE slug = %s", [slug])
+        return HTMLResponse(cached)
+
+    paste = db.query_one("SELECT * FROM pastes WHERE slug = %s", [slug])
+    if not paste:
+        raise HTTPException(404, "Paste not found")
+
+    now = datetime.utcnow()
+    if paste.expiration and paste.expiration < now:
+        raise HTTPException(410, "Paste has expired")
+
+    if paste.burn_after_read and paste.access_count > 0:
+        hard_delete_paste(paste.id)
+        raise HTTPException(410, "Paste has been burned")
+
+    content = fetch_from_s3(paste.content_path)
+    rendered = render_paste(content, paste.language)
+
+    ttl = int((paste.expiration - now).total_seconds()) if paste.expiration else 3600
+    cache.set(f"paste:{slug}", rendered, ttl=min(ttl, 3600))
+    db.execute("UPDATE pastes SET access_count = access_count + 1 WHERE id = %s", [paste.id])
+    return HTMLResponse(rendered)
+```
+
+### Caching Hot Pastes
+
+Paste traffic follows a power-law distribution: 80% of views hit 20% of pastes. A top-viral paste (e.g., a leaked config or a popular code snippet) can get millions of views in hours.
+
+The cache strategy:
+
+| Layer | Store | TTL | Size | Hit Rate Target |
+|-------|-------|-----|------|-----------------|
+| CDN edge | Cloudflare cache | 5 minutes | Unlimited | 40% of all requests |
+| Application cache | Redis | Remaining expiration (capped at 1 hour) | 10 GB | 80% of requests reaching app |
+| Database | PostgreSQL | N/A (source of truth) | N/A | 100% for misses |
+
+Cache invalidation happens when: the paste is deleted (explicit delete by user, or expiration cleanup), the paste is edited (not in our MVP, but would clear the cache), or the TTL expires naturally.
+
+For extremely hot pastes (a single paste getting >100K views/min), the CDN edge cache is the safety valve. The 5-minute CDN TTL means even a massive spike hits the origin only once per 5 minutes per edge location.
+
+## Rate Limiting
+
+A pastebin without rate limiting is a pastebin that will be used to store spam, malware, and stolen data. We need rate limiting at multiple levels:
+
+| Scope | Limit | Target |
+|-------|-------|--------|
+| Per IP (create) | 10 pastes / minute | Anonymous abuse |
+| Per IP (view) | 1000 views / minute | Scraping and DDoS |
+| Global (create) | 10,000 pastes / minute | Infrastructure protection |
+| Global (view) | 1,000,000 views / minute | Infrastructure protection |
+| Per slug (view) | 10,000 views / minute | Hot paste DoS |
+
+Rate limiting uses a sliding window counter with Redis. The counter tracks requests per IP per endpoint over a rolling 60-second window. When a user exceeds the limit, the API returns a 429 response with a `Retry-After` header.
+
+## Expiration, Cleanup & Burn After Read
+
+Every paste has a lifecycle. It is created, possibly viewed many times, and eventually deleted. Three mechanisms enforce this.
+
+<PasteExpirationDemo client:visible />
+
+### TTL Expiration
+
+When a paste is created with an expiration time, the `expiration` column is set to `NOW() + interval`. The paste is returned normally until that timestamp passes. After expiration, the paste returns a 410 Gone status.
+
+### Background Cleanup Worker
+
+A separate worker process runs on a cron schedule (every 5 minutes) to:
+
+1. **Scan** — `SELECT id, content_path FROM pastes WHERE expiration < NOW() AND deleted_at IS NULL`
+2. **Soft delete** — set `deleted_at = NOW()` on matched rows (grace period starts)
+3. **Grace period** — 24 hours during which an admin could theoretically restore the paste (in practice, this is a safety net for accidental bulk deletes)
+4. **Hard delete** — after 24 hours, delete the row from the database and remove the content from S3
+
+```python
+def cleanup_expired_pastes():
+    with db.transaction():
+        expired = db.query("""
+            SELECT id, content_path, content_hash
+            FROM pastes
+            WHERE expiration < NOW() AND deleted_at IS NULL
+            LIMIT 1000
+        """)
+
+        for paste in expired:
+            db.execute("UPDATE pastes SET deleted_at = NOW() WHERE id = %s", [paste.id])
+
+    hard_delete_pending()
+
+def hard_delete_pending():
+    with db.transaction():
+        pending = db.query("""
+            SELECT id, content_path, content_hash
+            FROM pastes
+            WHERE deleted_at < NOW() - INTERVAL '24 hours'
+            LIMIT 500
+        """)
+
+        for paste in pending:
+            s3.delete_object(Bucket="paste-content", Key=paste.content_path)
+            db.execute("DELETE FROM content_refs WHERE content_hash = %s", [paste.content_hash])
+            db.execute("DELETE FROM pastes WHERE id = %s", [paste.id])
+```
+
+Why the grace period? If a bug in the cleanup worker deletes 10,000 active pastes, the grace period gives you 24 hours to catch it and restore. Without it, the data is gone forever.
+
+### Burn After Read
+
+Burn-after-read pastes are the opposite of persistent storage. They are designed for secrets, API keys, and one-time sharing. The flow:
+
+1. User creates a paste with `burn_after_read: true`
+2. On the first view request, the paste is returned normally
+3. The `access_count` is incremented to 1
+4. On any subsequent view request, the paste returns 410 and is immediately hard-deleted
+
+```python
+@app.get("/{slug}")
+async def view_paste(slug: str):
+    paste = db.query_one("SELECT * FROM pastes WHERE slug = %s", [slug])
+    if paste.burn_after_read and paste.access_count >= 1:
+        hard_delete_paste(paste.id)
+        raise HTTPException(410, "This paste was burned after reading")
+    ...
+```
+
+## Full Architecture
+
+<PasteArchitectureDemo client:visible />
+
+The complete architecture connects all components:
+
+**Create flow:** Client → CDN → Load Balancer → API Gateway → (compute content hash, dedup check) → Object Storage (store content) → Database (store metadata) → Cache (populate hot paste) → Response
+
+**View flow (cache hit):** Client → CDN → Load Balancer → API Gateway → Cache (return rendered paste) → Response
+
+**View flow (cache miss):** Client → CDN → Load Balancer → API Gateway → Cache (miss) → Database (lookup metadata) → Object Storage (fetch content) → Render → Cache (populate) → Response
+
+**Cleanup flow:** Worker → Database (scan expired) → Object Storage (delete content) → Database (delete metadata)
+
+## Abuse Prevention
+
+A public pastebin attracts abuse. Malware authors paste stolen data, spammers post links, and bad actors use it for C2 communication. Prevention strategies:
+
+**Content scanning:** Every paste goes through a content scanner before it is stored. The scanner checks against known malware hashes, spam patterns, and credential patterns (passwords, API keys). Suspicious pastes are flagged for human review.
+
+**IP reputation:** Block known VPNs, Tor exit nodes, and datacenter IPs for paste creation (viewing is unrestricted). This eliminates the vast majority of automated abuse.
+
+**Rate limiting by fingerprint:** Even without authentication, you can fingerprint clients using TLS fingerprint, HTTP headers, and timing patterns. A spammer rotating IPs still gets caught by JA3 fingerprint matching.
+
+**Reporting:** Expose a report endpoint (`POST /api/report/{slug}`). Reported pastes are queued for moderator review and removed if they violate terms of service.
+
+## Scaling Reads vs Writes
+
+This system is dramatically read-heavy. Each paste is created once (write) but viewed dozens to thousands of times (reads). The ratio can be 1:100 or higher for viral pastes.
+
+### Scaling Reads
+
+1. **CDN edge caching** — Cloudflare caches rendered paste HTML at 200+ edge locations. A popular paste never hits the origin for 5 minutes at a time.
+2. **Redis read replicas** — the cache layer uses Redis with read replicas. One write master accepts cache population, multiple read replicas handle the view traffic.
+3. **Database read replicas** — PostgreSQL streaming replicas handle the cache-miss traffic. The write master only handles paste creation.
+4. **Pagination for listing** — public paste listings use cursor-based pagination (not offset-based) to avoid table scans on large datasets.
+
+### Scaling Writes
+
+Writes are easier to scale because the volume is low but we still need durability:
+
+1. **Batch deduplication** — content hashing means many writes produce zero new storage operations (existing pastes with the same hash reuse the S3 object).
+2. **Async S3 uploads** — the content upload to S3 happens asynchronously. The API returns the paste URL as soon as the metadata is in the database. If the S3 upload fails, a retry worker picks it up.
+3. **Write queue** — during traffic spikes, incoming paste creates are queued in a message broker (RabbitMQ or Redis streams) and processed at a steady rate.
+
+### Database Sharding
+
+At enormous scale (billions of pastes), the `pastes` table is sharded by `slug` prefix. The first character of the slug determines the shard. This distributes reads and writes evenly because slugs are random.
+
+```sql
+-- Shard 0: slugs starting with a-m
+-- Shard 1: slugs starting with n-z
+-- Shard 2: slugs starting with 0-9
+```
+
+The shard mapping is handled by the API gateway or a lightweight proxy. Each shard is an independent PostgreSQL instance, with its own read replicas.
+
+## Self-Check Questions
+
+After reading this walkthrough, test your understanding:
+
+1. Why do we store content in S3 instead of directly in PostgreSQL? What problems does this solve?
+2. How does content deduplication via SHA-256 work? What happens if two users paste the same code?
+3. What is the difference between random slugs and custom slugs? How do you handle collisions for each?
+4. How does the burn-after-read mechanism differ from TTL expiration?
+5. Why does the cleanup worker use a 24-hour grace period before hard-deleting?
+6. What rate limits would you set for anonymous users vs authenticated users?
+7. How does the cache invalidation strategy ensure consistency?
+8. What happens when a cache miss occurs for a very hot paste?
