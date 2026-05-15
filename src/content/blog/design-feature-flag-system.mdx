@@ -1,0 +1,347 @@
+---
+title: "Design a Feature Flag System: LaunchDarkly-Style Feature Management"
+description: "A complete system design walkthrough for a feature flag system — gradual rollout, targeting rules, flag evaluation at scale, SDK architecture, edge caching, and experimentation integration."
+date: 2026-05-18T01:00:00
+tags: ["system-design", "interview", "feature-flags", "launchdarkly", "experimentation", "design-problem"]
+draft: false
+---
+
+import FlagRequirementsDemo from '../../components/demos/FlagRequirementsDemo'
+import FlagEvaluationDemo from '../../components/demos/FlagEvaluationDemo'
+import GradualRolloutDemo from '../../components/demos/GradualRolloutDemo'
+import FlagArchitectureDemo from '../../components/demos/FlagArchitectureDemo'
+
+## What Are Feature Flags?
+
+A feature flag (also called a feature toggle) is a software development technique that lets you turn functionality on and off at runtime without deploying code. Think of it as a light switch for every feature in your application. Instead of wiring a new checkout flow directly into production, you wrap it in an `if` check:
+
+```javascript
+if (flagClient.isEnabled('new-checkout', user)) {
+  renderNewCheckout()
+} else {
+  renderLegacyCheckout()
+}
+```
+
+The most important idea here: **deployment and release are two different things**. You deploy code on Monday and release it to users on Friday. If something goes wrong mid-release, you flip the flag off without a rollback. This decoupling is the foundation of trunk-based development, continuous delivery, and safe experimentation at scale.
+
+Feature flag systems like LaunchDarkly, Split, and Unleash take this concept and build a platform around it: a UI dashboard for managing flags, an API for evaluation, SDKs that cache flag rules locally, and a streaming layer that pushes updates in real time.
+
+<FlagRequirementsDemo client:visible />
+
+## Use Cases
+
+Feature flags solve several distinct problems. Understanding each use case helps you design the right system.
+
+### Gradual Rollout
+
+Release a feature to 10% of users on day one, 25% on day two, 50% on day three, and 100% by the end of the week. If error rates spike at any point, you pause the rollout without a code revert. Each user is assigned a deterministic hash (e.g., `hash(user_id) % 100`) so they consistently see the feature or not across sessions.
+
+### Kill Switch (Circuit Breaker)
+
+Every flag has an off position. If a newly released feature causes a production incident -- database overload, timeout spikes, incorrect billing -- you toggle the flag off and the application reverts to the old behavior. No deploy, no CI pipeline wait, no rollback coordination.
+
+### Permission Gating
+
+Show features based on user attributes: plan tier (free vs pro vs enterprise), internal employee status, beta program membership, geographic region. This is how SaaS companies roll out features to enterprise customers before general availability, or block EU users from a feature that has not passed GDPR review.
+
+### Experimentation (A/B Testing)
+
+Flags are the infrastructure layer for A/B tests. You split traffic into a control group (flag off) and treatment group (flag on), then pipe exposure events into an analytics pipeline. The flag system itself does not run statistics, but it provides the targeting and assignment mechanics.
+
+### Operational Flags
+
+Toggle expensive operations at runtime: enable detailed logging for a specific tenant, switch between database read replicas, change cache TTLs. These flags live in the infrastructure layer and rarely touch user-facing code.
+
+## Flag Types
+
+Feature flags come in two main flavors.
+
+### Boolean Flags
+
+The simplest form: on or off. Used for kill switches, permission gates, and simple rollouts. Evaluation returns `true` or `false`.
+
+### Multivariate Flags
+
+Return one value from a set of options. For example, a checkout flow flag might return `"legacy"`, `"v2"`, or `"v3"`. Multivariate flags power A/B/n tests, UI experiments, and gradual migrations where you need more than two states.
+
+LaunchDarkly calls these "multivariate" and allows any JSON-serializable value as a flag variation. The evaluation rules determine which variation each user receives.
+
+### JSON Flags
+
+A fully configurable JSON blob returned as the flag value. Used when the frontend needs dynamic configuration: "show these three UI components, with these colors, and this button text." Instead of redeploying the frontend, you change the JSON flag in the dashboard.
+
+## Targeting Rules
+
+A flag's evaluation is driven by targeting rules. Each rule has a priority order, a set of conditions, and a result (the flag value to return when conditions match).
+
+### Individual Targeting
+
+Target specific user IDs directly. Used for: the QA team testing a new feature, the CEO previewing a dashboard, a specific customer's support ticket. Individual targeting always takes highest priority.
+
+### Percentage Rollout
+
+Assign a percentage of users to a flag variation. The assignment is deterministic: we compute `hash(user_id) % 100` and compare against the rollout threshold. A user at 50% rollout always sees the feature until the threshold moves above or below their hash.
+
+### Custom Attribute Rules
+
+Match against user attributes like `plan`, `region`, `beta`, `email`, `signupDate`. Rules support operators: equals, not equals, starts with, in list, greater than, less than.
+
+```json
+{
+  "rules": [
+    {
+      "priority": 1,
+      "conditions": [{ "attribute": "beta", "op": "equals", "value": true }],
+      "variation": 1
+    },
+    {
+      "priority": 2,
+      "conditions": [
+        { "attribute": "plan", "op": "equals", "value": "enterprise" },
+        { "attribute": "region", "op": "in", "value": ["us-east", "us-west"] }
+      ],
+      "variation": 1
+    },
+    {
+      "priority": 3,
+      "conditions": [{ "attribute": "region", "op": "equals", "value": "eu-west" }],
+      "variation": 0
+    }
+  ]
+}
+```
+
+Rules are evaluated in priority order. The first rule whose conditions all match wins. If no rule matches, the fallback value (typically the control variation) is returned.
+
+<FlagEvaluationDemo client:visible />
+
+## Evaluation Order
+
+The evaluation pipeline processes a flag request in exactly this order:
+
+1. **Off check** -- If the flag is turned off globally, return the fallback value immediately. No rules are evaluated.
+2. **Individual targeting** -- Check if the user ID is in the individual targets list. If yes, return the assigned variation.
+3. **Percentage rollout (bypass rules)** -- Some systems let you set a global rollout percentage that overrides rule matching. This is checked before custom rules.
+4. **Custom rules** -- Iterate through the rule list in priority order. For each rule, evaluate every condition against the user context. Conditions within a rule are AND-ed. Rules are OR-ed (first match wins).
+5. **Fallback** -- No rule matched. Return the default variation.
+
+This ordering guarantees predictable evaluation and lets operators reason about which users see what.
+
+```python
+def evaluate_flag(flag: FlagConfig, user: UserContext) -> FlagValue:
+    if not flag.enabled:
+        return flag.fallback_value
+
+    if user.id in flag.individual_targets:
+        return flag.individual_targets[user.id]
+
+    if flag.rollout_percentage is not None:
+        user_hash = deterministic_hash(user.id) % 100
+        if user_hash < flag.rollout_percentage:
+            return flag.on_variation
+        return flag.fallback_value
+
+    for rule in sorted(flag.rules, key=lambda r: r.priority):
+        if all(
+            evaluate_condition(cond, user)
+            for cond in rule.conditions
+        ):
+            return rule.variation_value
+
+    return flag.fallback_value
+```
+
+## Gradual Rollout Mechanics
+
+Gradual rollout is the most common use case. The implementation depends on deterministic assignment: a user must consistently see the same flag state across sessions, devices, and API calls.
+
+The standard approach: compute `hash(user_id + flag_key) % 100` and compare against the rollout percentage. Using both the user ID and the flag key ensures that a user might be in the 50% for one flag but not for another.
+
+```python
+import hashlib
+
+def in_rollout(user_id: str, flag_key: str, percentage: int) -> bool:
+    key = f"{flag_key}:{user_id}"
+    hash_val = int(hashlib.md5(key.encode()).hexdigest(), 16) % 100
+    return hash_val < percentage
+```
+
+This is why when you move the slider from 30% to 50%, you do not see 20% of users suddenly change state. Instead, users whose hash is between 30 and 50 become newly enabled. Users below 30 stay enabled. Users above 50 stay disabled. The transition is additive, not churning.
+
+<GradualRolloutDemo client:visible />
+
+## SDK Architecture
+
+The SDK is the component that runs inside your application. It must be fast, reliable, and never block your application startup.
+
+### Local Evaluation
+
+The SDK downloads flag configurations from the server at startup and evaluates flags locally. Evaluation is a purely in-memory operation -- no network calls. This means the flag system does not add latency to production request paths.
+
+```json
+{
+  "flags": {
+    "new-checkout": {
+      "key": "new-checkout",
+      "enabled": true,
+      "rollout_percentage": 50,
+      "fallback_value": false,
+      "rules": [
+        {
+          "priority": 1,
+          "conditions": [
+            { "attribute": "plan", "op": "equals", "value": "enterprise" }
+          ],
+          "variation_value": true
+        }
+      ]
+    }
+  }
+}
+```
+
+### Streaming Mode
+
+The SDK opens a long-lived SSE or WebSocket connection to the flag service. When a flag changes in the dashboard, the server pushes the updated config through this connection. The SDK updates its in-memory cache instantly -- no polling, no stale cache, no restart.
+
+```javascript
+const eventSource = new EventSource('https://flags.example.com/stream?token=sdk_123')
+
+eventSource.addEventListener('flag_update', (event) => {
+  const update = JSON.parse(event.data)
+  flagCache.set(update.key, update.config)
+  flagCache.emit('change', update.key)
+})
+```
+
+### Polling Mode
+
+If streaming is unavailable (serverless environments, restrictive firewalls), the SDK falls back to polling. It fetches flag configs on a configurable interval (typically 30 seconds to 5 minutes). Polling is less responsive but still functional.
+
+The SDK should also cache flag configs to local storage or a file. If the SDK restarts and the server is unreachable, it uses the cached config rather than falling back to defaults.
+
+## Edge Caching and Real-Time Updates
+
+At scale, the flag service cannot handle a request from every application instance on every flag evaluation. That is why local evaluation exists. But the flag configs themselves still need to be served efficiently.
+
+### CDN Caching
+
+Flag configs are static JSON that change infrequently (minutes to hours between updates). They are perfect candidates for CDN caching. The flag service writes configs to a CDN with a short TTL (30 seconds to 5 minutes). SDKs fetch from the CDN edge closest to them.
+
+Write path: admin dashboard -> API -> database -> cache invalidation -> CDN purge -> CDN warm -> ready.
+
+### Streaming Gateway
+
+When a flag changes and you need immediate propagation, the CDN cache alone is not enough. A streaming gateway fans out updates to all connected SDKs. LaunchDarkly uses a WebSocket-based gateway that maintains persistent connections with each SDK instance.
+
+```bash
+# A flag update triggers SSE events to all connected SDKs
+curl -X POST https://api.flags.example.com/flags/new-checkout \
+  -H "Authorization: Bearer admin_abc" \
+  -H "Content-Type: application/json" \
+  -d '{"rollout_percentage": 75}'
+
+# Response: flag updated, 1500 SDKs notified via SSE in ~200ms
+```
+
+<FlagArchitectureDemo client:visible />
+
+## Flag Governance
+
+As a feature flag system grows, governance becomes critical. Without it, teams accumulate hundreds of stale flags, obsolete targeting rules, and untracked changes.
+
+### Approval Workflows
+
+Not everyone should be able to change flag rules in production. A governance layer enforces approval policies: changes to flags tagged as "payment" require a senior engineer's approval; changes to flags affecting >50% of users require a manager's approval.
+
+The flag config service stores a pending change as a draft. An approver reviews and publishes it. The audit log records the full chain.
+
+### Stale Flag Cleanup
+
+Flags that are permanently on (100% rollout, no plans to turn off) are dead code. They add complexity, cognitive load, and evaluation cost. A stale flag detection system flags them:
+
+- Flag has been at 100% for >30 days
+- No changes to the flag in >90 days
+- No active experiments using the flag
+
+```bash
+# CLI tool to list stale flags
+flagctl stale --threshold-days 30
+
+# Output:
+# new-checkout: 100% for 45 days, last modified 2026-03-15
+# old-footer: 100% for 120 days, never modified
+```
+
+### Audit Logging
+
+Every mutation to a flag is recorded: who made the change, what changed, when, and the previous value. The audit log serves compliance requirements (SOC 2, HIPAA) and operational debugging.
+
+```json
+{
+  "timestamp": "2026-04-15T14:23:01Z",
+  "actor": "alice@company.com",
+  "action": "flag.update",
+  "flag_key": "new-checkout",
+  "changes": {
+    "rollout_percentage": { "from": 0, "to": 50 },
+    "rules[0].conditions[0].value": { "from": "pro", "to": "enterprise" }
+  },
+  "source_ip": "203.0.113.42",
+  "correlation_id": "txn_abc123"
+}
+```
+
+## A/B Testing Integration
+
+Feature flags are the distribution mechanism for experiments. The flag system assigns users to variants, and an analytics pipeline measures the results.
+
+### Exposure Events
+
+When an SDK evaluates a flag, it emits an exposure event: user ID, flag key, variation received, timestamp, and any experiment metadata. These events are batched and sent to an analytics pipeline (Kafka, Kinesis, or similar) for statistical analysis.
+
+```python
+def evaluate_and_track(flag_key: str, user: UserContext) -> FlagValue:
+    result = evaluate_flag(flag_cache.get(flag_key), user)
+    exposure_queue.put({
+        "user_id": user.id,
+        "flag_key": flag_key,
+        "variation": result,
+        "timestamp": time.now(),
+        "experiment_id": flag_cache.get(flag_key).experiment_id,
+    })
+    return result
+```
+
+### Statistical Analysis
+
+The analytics pipeline aggregates exposure events, joins them with outcome metrics (conversion rate, revenue, retention), and runs statistical tests (chi-squared, Bayesian, sequential testing). The flag system is not the statistics engine, but it provides the clean assignment layer that makes experimentation possible.
+
+### Feature Flags vs Experiments
+
+A common mistake: treating every flag as an experiment. Not all features need statistical analysis. Use flags for operational control (kill switches, permissions) and experiments only when you need to measure a causal impact. Running an underpowered experiment on every flag wastes statistical power and leads to false positives.
+
+## Putting It All Together
+
+A production-grade feature flag system is more than a toggle switch. It is a platform that connects deployment strategy (gradual rollout), user management (targeting rules), infrastructure (edge caching, streaming updates), governance (approvals, audit logs), and product experimentation (A/B testing).
+
+Here is a summary of the key design decisions:
+
+| Component | Approach |
+|-----------|----------|
+| Flag storage | Relational database (PostgreSQL) with JSON config columns |
+| SDK evaluation | Local, in-memory, no network calls on hot path |
+| Config distribution | CDN cache (30s-5m TTL) + SSE streaming |
+| Targeting rules | Priority-ordered list, first match wins |
+| User assignment | Deterministic hash `md5(flag_key + user_id) % 100` |
+| Audit logging | Append-only table, immutable, indexed by flag key |
+| Rollout safety | Gradual percentage increments, auto-rollback on error |
+
+### Self-Check Questions
+
+- What happens if the SDK cannot reach the flag server at startup? (Answer: use cached config from disk, or fall back to hardcoded defaults)
+- How do you ensure a user sees the same flag state across web and mobile? (Answer: same deterministic hash algorithm in all SDKs, same user ID)
+- How do you prevent flag evaluation from adding latency to production requests? (Answer: local evaluation, all evaluation is in-memory, no network calls)
+- What happens when a flag is deleted but code still references it? (Answer: SDK should return fallback value and log a warning)
+- How do you roll back a bad rollout quickly? (Answer: toggle the flag off globally, or set rollout percentage back to 0; the SSE stream pushes the update within seconds)
