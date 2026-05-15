@@ -1,0 +1,412 @@
+---
+title: "Operating Systems: Processes, Threads, Virtual Memory, and Syscalls"
+description: "A deep dive into operating system fundamentals — processes and threads, virtual memory and paging, system calls, context switching, and how the OS manages hardware resources."
+date: 2026-05-20T01:00:00
+tags: ["operating-systems", "internals", "kernel", "memory", "processes"]
+draft: false
+---
+
+import OsProcessDemo from '../../components/demos/OsProcessDemo'
+import OsSchedulingDemo from '../../components/demos/OsSchedulingDemo'
+import OsVirtualMemoryDemo from '../../components/demos/OsVirtualMemoryDemo'
+import OsContextSwitchDemo from '../../components/demos/OsContextSwitchDemo'
+import OsSyscallDemo from '../../components/demos/OsSyscallDemo'
+
+Every program you write -- from a tiny shell script to a database server -- runs on top of an operating system. The OS is the invisible layer between your code and the raw hardware. It abstracts the CPU, memory, disk, and network into simple APIs like files, processes, and sockets.
+
+Most developers interact with the OS through system calls without thinking about what happens beneath. When you call `read()`, `fork()`, or `malloc()`, a sophisticated machinery of interrupts, page tables, and scheduler algorithms activates. Understanding this machinery separates developers who guess at performance from those who can predict it.
+
+We will walk through the four pillars of OS fundamentals: processes and threads, virtual memory, system calls, and CPU scheduling. Each section builds on the last, starting from the simplest analogy and working up to kernel internals.
+
+## The OS as a Resource Manager
+
+Imagine a kindergarten classroom with one teacher and thirty children. Each child wants to use the crayons, the building blocks, the swing, and the storybook corner -- all at the same time. The teacher cannot clone herself, so she must decide: who gets the crayons for the next ten minutes? Who goes to the swing? How does she make sure no child hoards the purple crayon forever?
+
+The operating system is that teacher. The children are processes (running programs). The crayons, blocks, and swing are the CPU, memory, disk, and network.
+
+The OS has two primary jobs:
+- **Resource allocation**: decide which process gets the CPU, how much memory each process can use, and in what order disk I/O happens
+- **Isolation and protection**: prevent one process from reading another process's memory, ensure a crashing program does not bring down the whole system, and enforce permissions on files and devices
+
+These two goals are in tension. Giving one process unrestricted access to the CPU improves its throughput but starves others. Strict isolation adds overhead. The OS must balance them in a way that feels seamless to the user.
+
+In the early days of computing (1950s-60s), there was no OS. Programs were loaded one at a time by an operator. The machine ran one job, printed the result, and the operator loaded the next. This was batch processing -- no multitasking, no protection, no interactivity. The OS evolved because that model was wildly inefficient.
+
+## Kernel Mode vs User Mode
+
+The most fundamental protection mechanism in any modern OS is the split between two privilege levels: user mode and kernel mode.
+
+**User mode (Ring 3)**: Applications run here. They cannot execute privileged CPU instructions, cannot directly access hardware devices, and cannot touch memory that belongs to other processes. If a program tries, the CPU raises an exception and the OS kills the process.
+
+**Kernel mode (Ring 0)**: The OS kernel runs here. It can execute any instruction, access any memory location, and talk to any device. The kernel is trusted -- it is the smallest, most carefully audited piece of software on the system.
+
+When a user program needs to do something privileged (read a file, allocate memory, send a network packet), it cannot just do it directly. It must ask the kernel through a **system call**.
+
+<OsSyscallDemo client:visible />
+
+This demo shows the full lifecycle of a system call. When your program calls `read()`, the libc wrapper places the syscall number in RAX, executes the `syscall` instruction, and the CPU atomically switches to kernel mode. The kernel handles the request and returns.
+
+The switch itself is fast (about 100-200 nanoseconds for a simple syscall), but it involves saving registers, changing the stack pointer, and verifying the caller's arguments. On x86-64 Linux, the `syscall` instruction reads the kernel entry point from the MSR_LSTAR model-specific register. The kernel entry assembly saves all registers, calls the C dispatcher, and eventually executes `sysretq` to return.
+
+## The Process: The OS's Unit of Work
+
+A **process** is a running instance of a program. It is more than just the code in memory. It includes:
+- The program counter (which instruction is being executed)
+- The register state (values in RAX, RBX, RSP, etc.)
+- The address space (code, data, heap, stack)
+- Open file descriptors
+- Signal handlers
+- Environment variables
+- Working directory
+
+The kernel represents each process with a **Process Control Block (PCB)** -- a data structure stored in kernel memory. The PCB is the kernel's bookkeeping entry for the process. On Linux, this is the `task_struct`, a large struct defined in `include/linux/sched.h`.
+
+<OsProcessDemo client:visible />
+
+The demo above shows a PCB with its key fields: PID, registers, memory map, program counter, and state. Click Fork to create a child process with copy-on-write memory. Transition between running, ready, and blocked states.
+
+### Process States
+
+A process is always in exactly one of these states:
+- **Running**: The CPU is executing this process's instructions
+- **Ready**: The process could run but the CPU is busy with another process
+- **Blocked** (or waiting): The process cannot run until some external event happens (disk I/O completes, a network packet arrives, a timer expires)
+- **Terminated**: The process has exited but its PCB has not been cleaned up yet (zombie)
+
+Transitions happen constantly. A running process that issues a disk read becomes blocked. When the disk finishes, the process moves back to ready. The scheduler then decides when it runs again.
+
+### fork(): The Unix Way of Creating Processes
+
+On Unix-like systems, processes are created with the `fork()` system call. Fork creates an almost exact copy of the calling process -- the parent and child are identical except for:
+- The child has a new PID
+- The child's parent PID is set to the parent's PID
+- `fork()` returns the child's PID to the parent, and 0 to the child
+
+After fork, the child typically calls `exec()` to load a new program, replacing its address space.
+
+```c
+#include <unistd.h>
+#include <stdio.h>
+#include <sys/wait.h>
+
+int main() {
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        // Child process
+        printf("Child: PID=%d, Parent PID=%d\n", getpid(), getppid());
+        char *args[] = {"/bin/ls", "-l", NULL};
+        execvp(args[0], args);
+    } else if (pid > 0) {
+        // Parent process
+        printf("Parent: child has PID=%d\n", pid);
+        wait(NULL); // Wait for child to finish
+        printf("Parent: child exited\n");
+    } else {
+        perror("fork failed");
+        return 1;
+    }
+    return 0;
+}
+```
+
+The key insight is that fork does **not** copy physical memory immediately. It uses copy-on-write (COW): the parent and child share the same physical pages, marked read-only. When either tries to write, the CPU raises a page fault and the kernel copies the page. This makes fork fast -- it only copies page table entries, not the actual memory.
+
+### Process vs Thread
+
+A **thread** is a lightweight unit of execution within a process. Threads share the same address space (code, data, heap) but have their own stack and registers.
+
+| Aspect | Process | Thread |
+|--------|---------|--------|
+| Address space | Separate | Shared |
+| Creation overhead | High (fork + page tables) | Low (clone with sharing) |
+| Context switch | Expensive (TLB flush) | Cheaper (same address space) |
+| Isolation | Full | None (one crash kills all) |
+| IPC | Pipes, sockets, shared memory | Direct memory access |
+| Scheduling unit | Yes | Yes (kernel threads) or No (user threads) |
+
+On Linux, both processes and threads are created with the `clone()` system call. The difference is in the flags: `CLONE_VM` for shared memory space (thread), no `CLONE_VM` for separate (process). At the kernel level, both are `task_struct` instances.
+
+## CPU Scheduling
+
+The CPU scheduler decides which ready process gets the CPU next. This decision happens frequently -- typically every 4-100 milliseconds (a **time slice** or **quantum**).
+
+<OsSchedulingDemo client:visible />
+
+The demo above lets you switch between four classic scheduling algorithms and see the resulting Gantt chart. Each algorithm makes different tradeoffs between fairness, throughput, and response time.
+
+### First-Come, First-Served (FCFS)
+
+The simplest algorithm: the first process to arrive runs to completion. It is a FIFO queue.
+
+FCFS suffers from the **convoy effect**: one long CPU-bound process blocks all shorter processes behind it. Average waiting time can be very high.
+
+### Shortest Job First (SJF)
+
+Run the process with the shortest total CPU burst first. This minimizes average waiting time (provably optimal for non-preemptive scheduling), but it requires knowing the burst time in advance, which is impossible in practice.
+
+Operating systems approximate SJF using **exponential averaging**: predict the next burst based on past behavior.
+
+### Round Robin
+
+Give each process a fixed time quantum, then rotate. This is the most common algorithm in general-purpose OSes. The quantum must balance responsiveness (short quantum) with efficiency (long quantum, less context switch overhead).
+
+A very short quantum (1ms) means excellent interactivity but high overhead (context switches every 1ms). A long quantum (100ms) gives better throughput but makes the system feel sluggish for interactive tasks.
+
+### Priority Scheduling
+
+Each process has a priority. Higher-priority processes run first. Priorities can be static (set by the user) or dynamic (adjusted by the OS to prevent starvation).
+
+Linux uses a hybrid: the **Completely Fair Scheduler (CFS)**, which tracks "vruntime" for each process and always picks the one with the smallest vruntime. This ensures fairness without a traditional priority system. Nice values affect the rate at which vruntime advances, not a static priority.
+
+### Measuring Performance
+
+Two key metrics:
+- **Turnaround time**: time from arrival to completion (how long the user waits for their job)
+- **Waiting time**: total time spent in the ready queue (how long the process spends not running)
+
+The demo calculates both for each algorithm so you can compare. A good scheduler minimizes both.
+
+## Virtual Memory
+
+Virtual memory is the single most important abstraction the OS provides. It gives every process its own private, contiguous address space, independent of physical memory layout.
+
+**Before virtual memory**: programs addressed physical memory directly. A program compiled to run at address 0x1000 had to be loaded at exactly that physical address. Two programs could not run simultaneously without coordinated memory allocation.
+
+**With virtual memory**: every process sees addresses from 0 to 2^64-1 (on 64-bit systems). The OS and hardware (MMU) translate these virtual addresses to physical addresses on the fly.
+
+<OsVirtualMemoryDemo client:visible />
+
+### How Translation Works
+
+Memory is divided into fixed-size blocks called **pages** (typically 4 KB) and **frames** (same-size blocks in physical memory). The OS maintains a **page table** for each process that maps virtual page numbers (VPNs) to physical frame numbers (PFNs).
+
+When a program accesses address `0x7fff_a100`:
+1. The CPU extracts the VPN: `0x7fff_a` (top bits)
+2. The MMU looks up VPN in the page table
+3. If the mapping exists (valid bit = 1), replace VPN with PFN
+4. The low 12 bits (page offset) stay the same
+5. The resulting physical address is sent to the memory bus
+
+On x86-64, page tables have 4 levels (PML4, PDPT, PD, PT). A virtual address is split into 5 parts: 4 page table indices (9 bits each) plus a 12-bit offset. Each level points to the next, reducing memory consumption because only needed entries are allocated.
+
+### The TLB (Translation Lookaside Buffer)
+
+Page table walks are expensive -- 4 memory accesses per translation on x86-64. The TLB is a hardware cache of recent VPN-to-PFN mappings. It has 32-512 entries and can be accessed in 1-2 CPU cycles.
+
+On a **TLB hit** (90-99% of accesses), translation is instant. On a **TLB miss**, the hardware walks the page tables. On a **context switch**, the TLB must be flushed (process A's mappings are meaningless for process B), which is why context switches are expensive.
+
+### Page Faults
+
+When a program accesses a virtual address whose page table entry has the valid bit clear, the MMU raises a **page fault**. The kernel's page fault handler runs:
+
+1. Determine the faulting address (from CR2 register on x86)
+2. Check if the address is valid (within the process's mapped regions)
+3. If valid: find a free physical frame, read the page from disk (swap), update the page table, return to the program
+4. If invalid: send SIGSEGV (segmentation fault)
+
+Demand paging means pages are only loaded from disk when they are accessed, not when the process starts. Combined with copy-on-write, this means processes start instantly and only use memory they actually touch.
+
+```bash
+# Check memory mappings of a running process
+cat /proc/$(pgrep bash)/maps
+
+# Output shows mapped regions
+# 00400000-00452000 r-xp 00000000 08:01 12345    /bin/bash
+# 00651000-00652000 r--p 00051000 08:01 12345    /bin/bash
+# 00652000-00658000 rw-p 00052000 08:01 12345    /bin/bash
+# 7ffc00000000-7ffc00021000 rw-p 00000000 00:00 0 [stack]
+```
+
+## Context Switching
+
+When the scheduler decides to switch from process A to process B, a **context switch** occurs. This is the most concrete cost of multitasking.
+
+<OsContextSwitchDemo client:visible />
+
+The sequence is:
+1. A timer interrupt fires (the process's time slice expired)
+2. The CPU saves the current instruction pointer and switches to kernel mode
+3. The interrupt handler saves all general-purpose registers to A's PCB
+4. The scheduler runs, picks B from the ready queue
+5. The kernel loads B's saved registers from B's PCB
+6. CPU jumps to B's saved instruction pointer
+
+During a context switch, the CPU does zero productive work. This is pure overhead. Modern systems can do 300,000+ context switches per second, each costing about 1-10 microseconds. The TLB flush alone can cost hundreds of cycles.
+
+### Measuring Context Switch Cost
+
+```c
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/time.h>
+
+long elapsed_us(struct timeval start, struct timeval end) {
+    return (end.tv_sec - start.tv_sec) * 1000000 +
+           (end.tv_usec - start.tv_usec);
+}
+
+int main() {
+    int p[2];
+    pipe(p);
+    struct timeval start, end;
+    char buf[1] = {0};
+
+    gettimeofday(&start, NULL);
+    for (int i = 0; i < 10000; i++) {
+        write(p[1], buf, 1);
+        read(p[0], buf, 1);
+    }
+    gettimeofday(&end, NULL);
+
+    long total = elapsed_us(start, end);
+    printf("Context switch (pipe round trip): %ld us\n", total / 20000);
+    return 0;
+}
+```
+
+This program measures the round-trip time through a pipe (two context switches: parent writes, child reads, child writes, parent reads). On a typical system, each context switch costs about 2-5 microseconds.
+
+Compile with `gcc ctx.c -o ctx && ./ctx`.
+
+## Interrupts: How the OS Regains Control
+
+If the OS only ran when user programs voluntarily yielded the CPU, a misbehaving program could loop forever and freeze the system. **Interrupts** are the hardware mechanism that lets the OS regain control.
+
+A **timer interrupt** fires at a fixed frequency (typically 100-1000 Hz on Linux, i.e., every 1-10 ms). The interrupt controller (APIC) sends a signal to the CPU. The CPU finishes the current instruction, saves the instruction pointer, and jumps to the interrupt handler registered by the OS.
+
+This is how preemptive multitasking works: processes do not need to be cooperative. The timer fires, the scheduler runs, and the current process may be preempted regardless of its behavior.
+
+Interrupts are categorized as:
+- **Hardware interrupts**: generated by devices (timer, disk, network card, keyboard)
+- **Software interrupts**: generated by the `int` instruction (used for system calls on some architectures)
+- **Exceptions**: generated by the CPU for error conditions (page fault, divide by zero)
+
+Each interrupt has a vector number. The kernel maintains an **Interrupt Descriptor Table (IDT)** that maps vectors to handler functions.
+
+```bash
+# Check interrupt statistics
+cat /proc/interrupts
+
+# Example output (simplified):
+#           CPU0       CPU1
+#  0:        1234       IO-APIC    timer
+#  1:          10       IO-APIC    i8042
+#  8:           0       IO-APIC    rtc0
+# 130:       5678       PCI-MSI    nvme0q0
+```
+
+## Demand Paging and Swapping
+
+Virtual memory enables two powerful features that make physical RAM go much further: demand paging and swapping.
+
+**Demand paging**: When a process starts, the kernel loads only the first page of code. The rest stays on disk. As the process accesses more code and data, page faults bring in pages lazily. This means startup is fast and processes only use memory for the pages they actually touch.
+
+**Swapping**: When physical memory is full, the kernel can move a page from physical memory to a designated swap area on disk. The page table entry is marked invalid but stores the disk location. When the process accesses that page, the page fault handler reads it back from swap.
+
+The **page replacement policy** decides which page to evict when freeing a frame. Linux uses a variant of **LRU (Least Recently Used)** with two lists: active and inactive. Pages are promoted to active when accessed frequently and demoted to inactive when idle. On memory pressure, inactive pages are evicted first.
+
+### Memory-Mapped Files
+
+The `mmap()` system call maps a file into a process's address space, creating a direct mapping between file blocks and virtual pages. Reading from the mapped region triggers page faults that load file data into memory. Writing to the mapped region modifies memory, and the kernel writes changes back to disk (either when `msync()` is called or when the mapping is removed).
+
+This means file I/O can be as simple as dereferencing a pointer:
+
+```c
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+
+int main() {
+    int fd = open("data.txt", O_RDWR);
+    char *data = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, fd, 0);
+
+    // Now data[0] is the first byte of the file
+    printf("First char: %c\n", data[0]);
+
+    // Modify the file through memory
+    data[0] = 'X';
+
+    msync(data, 4096, MS_SYNC); // Flush to disk
+    munmap(data, 4096);
+    close(fd);
+    return 0;
+}
+```
+
+Memory-mapped files are used extensively by databases, language runtimes, and the dynamic linker. They combine the convenience of memory access with the persistence of files.
+
+## Scheduler Evolution: From O(1) to CFS
+
+The Linux scheduler has evolved significantly. Early versions used an O(n) scheduler that iterated over all processes. In the 2.6 kernel, it was replaced with an **O(1) scheduler** that used two priority arrays (active and expired) and could select the next process in constant time.
+
+In 2007, Linux 2.6.23 introduced the **Completely Fair Scheduler (CFS)**, which is still the default today. CFS does not use traditional priority queues. Instead:
+
+- Each process accumulates **vruntime** (virtual runtime) based on how long it has run, weighted by nice value
+- CFS maintains processes in a **red-black tree** keyed by vruntime
+- It always picks the leftmost (smallest vruntime) process
+- The target latency (default ~6ms for desktop, ~20ms for servers) determines how often process switches happen
+- CFS is O(log n) for the tree insertion/removal, but the critical path (pick next) is O(1)
+
+```c
+// Simplified CFS pseudo-code
+struct task_struct *cfs_pick_next(struct cfs_rq *cfs_rq) {
+    struct rb_node *left = cfs_rq->tasks_timeline.rb_leftmost;
+    struct task_struct *se = rb_entry(left, struct task_struct, run_node);
+    return se;
+}
+```
+
+The key insight is that CFS achieves fairness not through static time slices but by continuously tracking how much each process has run relative to others. A nice value of -20 means a process runs roughly 1.5x more than default, while +19 means about 0.5x.
+
+## The Lifecycle of a read() Syscall
+
+Let us trace a complete `read()` call from a user program down to disk and back:
+
+1. User program: `char buf[512]; n = read(fd, buf, sizeof(buf));`
+2. libc wrapper: moves args into `RDI=fd, RSI=&buf, RDX=512`, puts syscall number 0 in `RAX`
+3. `syscall` instruction: saves `RIP` to `RCX` and `RFLAGS` to `R11`, loads kernel stack, jumps to entry `entry_SYSCALL_64`
+4. Kernel entry assembly: saves all registers on kernel stack, calls `do_syscall_64()`
+5. `do_syscall_64()`: uses RAX to index into `sys_call_table`, calls `sys_read()`
+6. `sys_read()`: calls `ksys_read()` which does `fdget()`, `vfs_read()`
+7. `vfs_read()`: checks permissions, calls `file->f_op->read_iter` (e.g., `ext4_file_read_iter`)
+8. For cache hit: copies data from page cache to user buffer, returns immediately
+9. For cache miss: initiates disk I/O, calls `io_schedule()` which marks the process as blocked, selects a new process via schedule()
+10. Disk interrupt fires when I/O completes: data is in page cache, process is moved back to ready
+11. Eventually process runs again: kernel copies data from page cache to user buffer
+12. `sysretq`: restores user registers, switches to Ring 3, returns to user code with `RAX` = number of bytes read
+
+This is the full path. Most of the time, step 8 succeeds (page cache hit, ~97% of reads on a warm system), and the whole operation takes about 1-5 microseconds. On a cache miss (step 9), a single disk seek adds ~4-15 milliseconds -- 1000x slower.
+
+## Putting It All Together
+
+A modern OS is a study in tradeoffs. Virtual memory gives every process its own address space but requires TLB flushes on context switches. Preemptive multitasking ensures fairness but adds the overhead of timer interrupts and scheduling decisions. System calls provide security but cost a mode switch.
+
+The brilliance is that these mechanisms compose into a system that feels simple to the programmer. When you call `malloc()`, the kernel might be:
+- Walking a 4-level page table
+- Evicting a page to swap
+- Reading a page from disk
+- Filling a TLB entry
+- Allocating a new physical frame
+
+Your code does not know and does not care. The OS handles it.
+
+Understanding these internals helps you write better software. You know that `fork()` is cheap until the child writes memory. You know that too many threads cause expensive context switches. You know that random file access on a spinning disk is 1000x slower than sequential. And you know that every system call, no matter how small, costs at minimum a mode switch and register save.
+
+### Self-Check Questions
+
+- Why does `fork()` return two different values? What would happen if copy-on-write did not exist?
+- What happens to the TLB during a context switch? Why does this matter?
+- A process on a Linux system is "stuck in D state" (uninterruptible sleep). What is happening, and why can't you SIGKILL it?
+- Round Robin with a quantum of 1ms on a 4-core machine: how many context switches per second per core?
+- Why does `mmap()` outperform `read()` for large sequential reads? When would `read()` be faster?
+
+### Further Reading
+
+- **xv6**: A Unix-like teaching OS by MIT. The book is short (100 pages) and covers all these topics with real code
+- **Linux Kernel Development** by Robert Love: Practical guide to the Linux kernel's design
+- **Operating Systems: Three Easy Pieces**: Free online textbook with excellent explanations
+- `man 2 syscalls`: The full list of Linux system calls
+- `/proc/*/maps` and `/proc/*/status`: Inspect memory and process state of any running process
