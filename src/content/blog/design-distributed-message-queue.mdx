@@ -1,0 +1,444 @@
+---
+title: "Design a Distributed Message Queue: Kafka-Style Architecture"
+description: "A complete system design walkthrough for a distributed message queue — topics and partitions, consumer groups, offset management, replication, exactly-once semantics, and Kafka-like architecture."
+date: 2026-05-16T01:00:00
+tags: ["system-design", "interview", "message-queue", "kafka", "distributed", "design-problem"]
+---
+
+import MqRequirementsDemo from '../../components/demos/MqRequirementsDemo'
+import TopicPartitionDemo from '../../components/demos/TopicPartitionDemo'
+import ConsumerGroupDemo from '../../components/demos/ConsumerGroupDemo'
+import OffsetManagementDemo from '../../components/demos/OffsetManagementDemo'
+import KafkaReplicationDemo from '../../components/demos/KafkaReplicationDemo'
+import KafkaArchitectureDemo from '../../components/demos/KafkaArchitectureDemo'
+
+## What Is a Distributed Message Queue?
+
+A post office. You drop off a letter and go about your day. The postal system stores it, routes it, and delivers it when the recipient is ready. The sender and receiver never need to be active at the same time. That is the essence of a message queue.
+
+A distributed message queue runs this pattern across many machines. Producers write messages, the system stores them durably on disk, and consumers read them later -- possibly hours or days later. Three properties make this powerful:
+
+**Decoupling.** Producers and consumers never talk directly. A producer does not care how many consumers exist or what they do with the data. This lets teams evolve independently.
+
+**Buffering.** If a consumer goes down or falls behind, messages accumulate safely. The producer never blocks. Traffic spikes get absorbed.
+
+**Scalability.** Split the workload across multiple machines. More partitions, more brokers, more throughput.
+
+Apache Kafka is the most widely deployed implementation. LinkedIn open-sourced it in 2011 to handle billions of events per day. It replaces the traditional "delete on consume" queue model with a distributed commit log -- an append-only structure that never deletes messages (until retention kicks in).
+
+### Design Requirements
+
+Before we write a line of code, we define what our system must do.
+
+<MqRequirementsDemo client:visible />
+
+## Pub/Sub vs Point-to-Point
+
+Traditional message queues (RabbitMQ, ActiveMQ) use a point-to-point model. A producer sends a message, the queue delivers it to exactly one consumer, and the message is removed. Private letter: one person reads it, then it is gone.
+
+Kafka uses a **publish/subscribe** model. Producers publish to a topic. Any number of **consumer groups** can independently read the full stream. Each group gets its own copy of every message. Public billboard: many people read the same notice independently.
+
+```
+Point-to-Point:  Producer -> [Queue] -> Consumer A (message gone)
+Pub/Sub:         Producer -> [Topic] -> Consumer Group A
+                                   \-> Consumer Group B
+                                   \-> Consumer Group C
+```
+
+Every message in Kafka is persisted for a configurable retention period (default 7 days). Consumer groups track their own position independently. This means Group A can be at offset 0 (just starting) while Group B is at offset 10,000 (near the head). Both see every message -- Group A just has catching up to do.
+
+## Capacity Estimation
+
+A medium Kafka deployment handles roughly:
+
+- 100,000 orders/second at peak
+- 5-10 events per order (created, paid, shipped, refunded)
+- Average message size: 1 KB
+- Total: ~500,000 messages/second, ~500 MB/s write
+
+One machine cannot handle this. We need horizontal scaling. Kafka achieves millions of messages per second on modest hardware through:
+
+- **Partitions** as the unit of parallelism
+- **Batching** to amortize I/O and network overhead
+- **Zero-copy reads** (sendfile syscall) for consumers
+
+A single partition on a modern SSD can sustain 10-50 MB/s of sequential writes. With 30 partitions spread across 6 brokers:
+
+$$throughput \approx 30 \times 25\text{ MB/s} = 750\text{ MB/s}$$
+
+That is 750,000 1 KB messages per second. Add more partitions to scale linearly.
+
+Kafka consumers also batch. A consumer fetches up to `fetch.max.bytes` (default 50 MB) in a single request. This turns millions of small reads into a handful of large sequential reads -- the fastest possible I/O pattern.
+
+## Topics: The Core Abstraction
+
+A topic is a logical channel for related messages. Producers write to a topic; consumers subscribe to it. Under the hood, a topic is just a name mapped to one or more partitions.
+
+Think of a topic like a database table with one crucial difference: you can only append. No UPDATE, no DELETE. You write new messages to the end, and old messages expire based on retention policy.
+
+```bash
+kafka-topics.sh --create \
+  --topic orders \
+  --partitions 6 \
+  --replication-factor 3 \
+  --bootstrap-server localhost:9092
+```
+
+A Python producer sends messages with a key. The broker computes `hash(key) % numPartitions` to decide where each message lands.
+
+```python
+from kafka import KafkaProducer
+
+producer = KafkaProducer(
+    bootstrap_servers=['localhost:9092'],
+    key_serializer=str.encode,
+    value_serializer=str.encode,
+)
+
+producer.send('orders', key='user:42', value='{"item": "monitor", "qty": 2}')
+producer.send('orders', key='user:99', value='{"item": "keyboard", "qty": 1}')
+producer.send('orders', value='{"event": "heartbeat"}')
+producer.flush()
+```
+
+The key is critical. If you need ordered processing for a specific entity (user 42's events must be processed in order), route all that entity's messages to the same partition by using the same key.
+
+## Partitions: The Secret to Parallelism
+
+A partition is an ordered, immutable sequence of messages. Each message gets a sequential offset (0, 1, 2, ...). Producers append to the end. Consumers read from any position.
+
+Partitions are the unit of parallelism:
+
+- Producers write to different partitions in parallel
+- Partitions live on different brokers (load distribution)
+- Each partition is consumed by exactly one consumer in a group
+
+The partition assignment formula is simple:
+
+$$partition = hash(key) \bmod num\_partitions$$
+
+If you send messages with keys "user:42", "user:99", and "order:7" to a topic with 6 partitions, they land in (for example) partitions 2, 0, and 5. All "user:42" messages go to partition 2 in order.
+
+<TopicPartitionDemo client:visible />
+
+## Consumer Groups: Scaling Consumption
+
+A consumer group is a set of consumers that cooperate to read a topic. Each partition in the topic is assigned to exactly one consumer in the group. This ensures no two consumers process the same message (within a group).
+
+Consumer groups enable two modes:
+
+**Queue mode.** Multiple consumers in the same group split the partitions. Each message goes to one consumer. Work is balanced across the group.
+
+```python
+from kafka import KafkaConsumer
+
+consumer = KafkaConsumer(
+    'orders',
+    bootstrap_servers=['localhost:9092'],
+    group_id='order-processor',
+    auto_offset_reset='earliest',
+)
+
+for msg in consumer:
+    process_order(msg.value)
+```
+
+**Pub/sub mode.** Multiple consumer groups each read the full stream independently. Group "order-processor" processes orders. Group "analytics" feeds a data warehouse. Group "search" updates a search index. All three read every message.
+
+### Partition Rebalancing
+
+When a consumer joins or leaves a group, the group coordinator triggers a **rebalance**. Partitions are reassigned across the remaining consumers. During rebalancing, no consumer in the group can read -- this is a brief pause (milliseconds to seconds).
+
+The rebalance protocol has evolved:
+
+- **Eager rebalancing** (old): all consumers stop, revoke all partitions, then rejoin and get reassigned. Simple but causes a global stop-the-world pause.
+- **Incremental cooperative rebalancing** (new): consumers revoke a subset of partitions while continuing to process the rest. Much smoother for large groups.
+
+<ConsumerGroupDemo client:visible />
+
+## Offset Management: Tracking Your Place
+
+Each consumer tracks its position in each partition using an **offset** -- a 64-bit integer representing the next message to read. The consumer commits its offset periodically to mark progress.
+
+### Auto-Commit vs Manual Commit
+
+**Auto-commit** (default, every 5 seconds). Simple but risky. If the consumer crashes between processing a message and the next auto-commit, the message gets re-read (at-least-once semantics).
+
+```python
+consumer = KafkaConsumer('orders', group_id='processor', enable_auto_commit=True)
+```
+
+**Manual commit.** The consumer commits only after successfully processing. Gives exact control over when progress is recorded.
+
+```python
+consumer = KafkaConsumer('orders', group_id='processor', enable_auto_commit=False)
+
+for msg in consumer:
+    process(msg.value)
+    consumer.commit()
+```
+
+### Rewind and Replay
+
+Because Kafka does not delete messages after consumption, a consumer can rewind to any committed offset and replay messages. This is invaluable for:
+
+- **Bug fixes:** deploy a fix, rewind to when the buggy code was running, re-process the affected messages
+- **Backfills:** reprocess historical data with a new algorithm
+- **Audit:** verify that historical processing was correct
+
+The offset is stored in a special internal topic called `__consumer_offsets`. This topic is itself a compacted Kafka topic -- it keeps only the latest offset for each consumer group + partition pair.
+
+<OffsetManagementDemo client:visible />
+
+## Ordering Guarantees (and Their Limits)
+
+Kafka guarantees **total order within a partition**. Message 3 always appears after message 2 within the same partition. But there is **no global ordering across partitions**. Message with offset 100 in partition 0 and message with offset 50 in partition 1 have no defined order relationship.
+
+This is by design. Global ordering would require serializing all writes through a single leader -- destroying parallelism. Instead, you get order within a partition and parallelism across partitions.
+
+The rule for ordering-sensitive workloads: **put all ordered events for one entity in the same partition**. Use the entity ID as the message key.
+
+```
+Key "user:42" -> always partition 2 (ordered)
+Key "user:99" -> always partition 0 (ordered)
+user:42 and user:99 events -> no ordering guarantee between them
+```
+
+If you absolutely need global ordering across everything (rare), use a single partition. You lose parallelism but gain total order. This is appropriate for, say, an append-only event log that needs exactly-once sequential processing.
+
+## Replication and Fault Tolerance
+
+A single broker is a single point of failure. If it dies, all its partitions become unavailable. Kafka solves this by replicating each partition across multiple brokers.
+
+### Leader and Followers
+
+Each partition has one **leader** and N **followers** (N = `replication.factor - 1`). The leader handles all reads and writes. Followers stay in sync by replicating the leader's log.
+
+### In-Sync Replicas (ISR)
+
+A follower is part of the **in-sync replica** (ISR) set if it has not fallen behind the leader by more than `replica.lag.time.max.ms` (default 30 seconds). Only ISR members are eligible to become the new leader.
+
+### Write Path
+
+1. Producer sends message to partition leader
+2. Leader appends message to its local log
+3. Leader waits for ISR followers to acknowledge the write (configurable with `acks`)
+4. Leader sends acknowledgment back to producer
+
+### Leader Failure
+
+When a leader fails:
+
+1. A controller broker detects the failure (via ZooKeeper session timeout or KRaft heartbeat)
+2. The controller picks a new leader from the ISR set
+3. The new leader is advertised to all brokers and clients
+4. Producers and consumers retry and continue with the new leader
+
+<KafkaReplicationDemo client:visible />
+
+## Durability, Retention, and Log Compaction
+
+### Durability
+
+Kafka does not rely on in-memory buffers. Every message is written to the partition leader's disk before acknowledgment. Flushing to disk is controlled by `flush.messages` and `flush.ms` -- but even without explicit flushing, the OS page cache and Kafka's `fsync` provide strong durability guarantees.
+
+Producers can trade durability for speed:
+
+- **acks=0**: fire and forget. No acknowledgment. Fast, but messages can be lost.
+- **acks=1**: leader writes to its log, acknowledges. Good durability with moderate speed.
+- **acks=all**: leader waits for all ISR replicas to acknowledge. Strongest durability, highest latency.
+
+### Retention
+
+Kafka never deletes messages on consume. Instead, it deletes based on time or size:
+
+```bash
+kafka-configs.sh --alter --entity-type topics \
+  --entity-name orders --add-config retention.ms=604800000
+
+kafka-configs.sh --alter --entity-type topics \
+  --entity-name orders --add-config retention.bytes=53687091200
+```
+
+When retention limits are hit, Kafka deletes old log segments. A log segment is a file on disk. Only whole segments are deleted -- partial segment deletion does not happen.
+
+### Log Compaction
+
+For key-value workloads (like `__consumer_offsets`), Kafka supports **log compaction** instead of time-based retention. Compacted topics keep only the most recent message for each key.
+
+```
+Before compaction:
+offset 0: key=A, value=v1
+offset 1: key=B, value=v2
+offset 2: key=A, value=v3  (newer value for key A)
+
+After compaction:
+offset 1: key=B, value=v2
+offset 2: key=A, value=v3  (only the latest value per key)
+```
+
+Enable compaction with:
+
+```bash
+kafka-topics.sh --create \
+  --topic latest-user-profiles \
+  --partitions 6 \
+  --config cleanup.policy=compact \
+  --bootstrap-server localhost:9092
+```
+
+## Producer Acks and Consistency Levels
+
+Acks settings form a classic trade-off between throughput and safety.
+
+| Setting | Durability | Latency | Scenario |
+|---------|-----------|---------|----------|
+| `acks=0` | None | Lowest | Metrics, logs (can lose a few) |
+| `acks=1` | Leader only | Low | Default balance of speed + safety |
+| `acks=all` | All ISR | Higher | Financial transactions, critical data |
+
+With `acks=all`, a write succeeds only when `min.insync.replicas` replicas have the message. If the ISR set drops below this number, the leader stops accepting writes. This prevents a scenario where a leader accepts writes alone, then crashes, and the new leader has no data.
+
+```python
+producer = KafkaProducer(
+    bootstrap_servers=['localhost:9092'],
+    acks='all',
+    retries=3,
+    enable_idempotence=True,
+)
+```
+
+Idempotent producers (`enable_idempotence=True`) prevent duplicate messages due to retries. Each producer gets a unique ID, and each message gets a sequence number. The broker deduplicates based on `(producer_id, sequence_number)`.
+
+## Exactly-Once Semantics
+
+Exactly-once delivery is the holy grail of message processing. Kafka achieves it through three mechanisms working together.
+
+### Exactly-Once Producer
+
+The idempotent producer prevents duplicates within a single producer session. But what if the producer crashes, sends a message, the broker acknowledges, but the producer does not receive the ack?
+
+With idempotence enabled, the producer retries with the same sequence number. The broker sees the duplicate and skips it. Every message is written exactly once.
+
+### Exactly-Once Consumer
+
+The consumer side is harder. If a consumer reads a message, processes it (say, writes to a database), then crashes before committing the offset -- the next consumer instance re-processes that message. This is at-least-once.
+
+Exactly-once for consumers requires the **transactional API**. The consumer's offset commit and the output write (to the database) are part of the same transaction:
+
+```python
+producer = KafkaProducer(
+    bootstrap_servers=['localhost:9092'],
+    transactional_id='txn-order-processor',
+    enable_idempotence=True,
+)
+producer.init_transactions()
+
+consumer = KafkaConsumer('orders', group_id='processor')
+
+while True:
+    msgs = consumer.poll(timeout_ms=5000)
+    if not msgs:
+        continue
+    producer.begin_transaction()
+    for tp, records in msgs.items():
+        for record in records:
+            output = transform(record.value)
+            producer.send('processed-orders', value=output)
+        producer.send_offsets_to_transaction(
+            {tp: consumer.position(tp) for tp in msgs},
+            consumer.group_id
+        )
+    producer.commit_transaction()
+```
+
+If the transaction fails, both the output messages and the offset commit are atomically discarded. The consumer re-processes from the last committed offset.
+
+### The End-to-End Picture
+
+True exactly-once across Kafka requires three things:
+
+1. **Idempotent producer** to prevent duplicates on the write side
+2. **Transactional API** to atomically write output and commit offset
+3. **Idempotent consumer** (your application must handle the case where it sees the same message twice after a crash)
+
+Kafka does not control your database. If you write to PostgreSQL and the transaction commits but your code crashes before committing the Kafka offset, you will see the message again. Make your output operations idempotent (INSERT ... ON CONFLICT DO NOTHING, SET x = y, etc.).
+
+## KRaft: Removing the ZooKeeper Dependency
+
+For over a decade, Kafka used ZooKeeper for metadata management. ZooKeeper stored the cluster topology, topic configurations, partition leaders, and access control lists. The Kafka controller (one of the brokers) handled leader elections and partition reassignments, writing state changes back to ZooKeeper.
+
+This two-system architecture added operational complexity. You had to manage ZooKeeper's own cluster, handle its version compatibility with Kafka, and deal with a separate failure domain.
+
+**KRaft** (Kafka Raft) replaces ZooKeeper with Kafka's own Raft-based consensus protocol. Every broker runs a Raft quorum. One broker is the active controller; others are passive controllers ready to take over.
+
+Benefits:
+
+- **Single system to manage.** One set of binaries, one config, one failure domain.
+- **Faster controller failover.** No ZooKeeper session timeout (multi-second delay). Raft election completes in milliseconds.
+- **Scalable metadata.** ZooKeeper has practical limits on the number of topics and partitions. KRaft handles hundreds of thousands with lower latency.
+- **Simpler security.** One set of ACLs, one TLS config.
+
+Kafka 4.0 removes ZooKeeper support entirely. All new deployments should use KRaft.
+
+```bash
+kafka-storage.sh format \
+  --config config/kraft/server.properties \
+  --cluster-id $(kafka-storage.sh random-uuid)
+
+kafka-server-start.sh config/kraft/server.properties
+```
+
+## Partition Strategy and Throughput Tuning
+
+Choosing the right number of partitions is both art and science.
+
+### Rule of Thumb
+
+- More partitions = more parallelism, more throughput
+- More partitions = more overhead (file handles, memory, metadata)
+- More partitions = longer leader failover (controller must update metadata for each partition)
+
+A common formula:
+
+$$num\_partitions = max\left(\frac{target\_throughput}{partition\_throughput}, num\_consumers\right)$$
+
+If your target is 500 MB/s and a partition handles 25 MB/s, you need at least 20 partitions. If you have 10 consumers, round up to ensure each consumer has work.
+
+### Practical Limits
+
+Kafka handles ~4,000 partitions per broker comfortably. At 10 brokers, that is 40,000 partitions. Beyond that, metadata overhead grows and controller operations slow down.
+
+### Tuning Checklist
+
+- **Batch size:** Increase `batch.size` (default 16 KB) to 64 KB or 256 KB for higher throughput at the cost of latency.
+- **Compression:** Enable `compression.type=gzip` or `snappy` on the producer. Compression reduces network and disk usage by 3-10x for text data.
+- **Page cache:** Let the OS use its page cache. Do not set `flush.messages` too aggressively. Kafka performs best when writes go to the page cache and flush naturally.
+- **Disk:** Use sequential I/O optimized drives (NVMe SSDs). Avoid spinning disks. Each partition is a directory of sequential files.
+
+```bash
+kafka-producer-perf-test.sh \
+  --topic orders --num-records 1000000 \
+  --record-size 1000 --throughput -1 \
+  --producer-props bootstrap.servers=localhost:9092 \
+    acks=1 batch.size=65536 compression.type=snappy \
+  --print-metrics
+```
+
+## Putting It All Together
+
+A distributed message queue ties every piece we have discussed into a coherent whole. Producers write to topics. Topics are split into partitions for parallelism. Partitions are replicated across brokers for fault tolerance. Consumer groups coordinate to divide the work of reading. Offsets track progress and enable replay. KRaft manages metadata without external dependencies.
+
+<KafkaArchitectureDemo client:visible />
+
+### Self-Check
+
+Use these questions to test your understanding:
+
+- If a consumer in a group crashes, how does the group recover the partitions it was assigned?
+- You have 8 partitions and 3 consumers in the same group. How many partitions does each consumer get?
+- Why can Kafka provide ordering within a partition but not across partitions?
+- What happens to a partition's ISR set when a follower loses network connectivity for 60 seconds?
+- Can you achieve exactly-once semantics without making your consumer idempotent? Why or why not?
+- When would a single-partition topic be preferable to a multi-partition topic?
+- Does enabling compression on the producer reduce disk usage, network bandwidth, or both?
