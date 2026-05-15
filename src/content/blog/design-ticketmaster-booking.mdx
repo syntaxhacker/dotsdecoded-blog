@@ -1,0 +1,710 @@
+---
+title: "Design Ticketmaster: Building a High-Concurrency Booking System"
+description: "A complete system design walkthrough for a ticket booking system — seat selection with inventory contention, waiting room queues, transactional integrity, real-time availability, and scaling to millions of concurrent users."
+date: 2026-05-16T01:00:00
+tags: ["system-design", "interview", "ticketmaster", "booking", "design-problem"]
+---
+
+import BookingRequirementsDemo from '../../components/demos/BookingRequirementsDemo'
+import SeatInventoryDemo from '../../components/demos/SeatInventoryDemo'
+import WaitingRoomDemo from '../../components/demos/WaitingRoomDemo'
+import BookingConcurrencyDemo from '../../components/demos/BookingConcurrencyDemo'
+import PaymentFlowDemo from '../../components/demos/PaymentFlowDemo'
+import BookingArchitectureDemo from '../../components/demos/BookingArchitectureDemo'
+
+Imagine 2 million people press a button at the exact same instant, all competing for 50,000 seats. By the time you finish reading this sentence, the best seats are already gone. By the time you finish this paragraph, the event is sold out. That is the challenge Ticketmaster faces every time Taylor Swift, Beyonce, or the Super Bowl goes on sale. This is not a web app problem -- this is a distributed systems warfare problem.
+
+The system must handle millions of concurrent users selecting from a shared pool of seats, each of which can only be sold once. One seat in contention between two users must go to exactly one of them. No double-selling. No ghost holds that expire before the user checks out. And the whole thing must feel instant.
+
+## The Problem: Building for Taylor Swift Scale
+
+At its core, a ticket booking system is about inventory contention. Unlike an e-commerce system where you sell fungible goods (10,000 identical wireless headphones), tickets are uniquely positioned assets. Seat 12, Row H, Section 101 is a one-of-a-kind item. Two people cannot both occupy it.
+
+The difficulty comes from three sources. First, the concurrency: millions of users arrive at on-sale time simultaneously, not spread evenly throughout the day. Second, the scarcity: popular events sell out in seconds, so every millisecond of latency or staleness means a lost sale. Third, the transactional requirement: a booking is not just reserving a seat -- it is charging a card, sending a confirmation, and updating inventory in a single atomic operation. If any of those steps fails, the seat must be released.
+
+Real-world examples show the extremes. Taylor Swift's Eras Tour had 3.5 million registered users competing for 2.4 million tickets across multiple shows. Verified Fan registration closed at 14 million. Demand exceeded supply by 5-10x for every major event. At this scale, even a 1% over-sell rate means thousands of angry customers at the door.
+
+## Requirements
+
+What does a ticket booking system actually need to do? Let us separate the must-haves from the nice-to-haves.
+
+### Functional Requirements
+
+1. **Browse events** -- discover available shows, dates, venues with search and filtering
+2. **View event details** -- see seat map, pricing tiers, availability counts
+3. **Select seats** -- pick specific seats from an interactive map with real-time availability
+4. **Hold seats** -- temporarily reserve selected seats during checkout
+5. **Checkout and pay** -- complete purchase with payment processing
+6. **Receive tickets** -- digital delivery (email, app) with QR codes
+7. **Cancel or transfer** -- manage purchased tickets
+
+### Non-Functional Requirements
+
+1. **High concurrency** -- handle millions of simultaneous seat selection requests for a single event
+2. **Strong consistency for inventory** -- never oversell a seat (safety over speed for the last seat)
+3. **Low latency seat map** -- users must see availability within 1-2 seconds of selection
+4. **High availability** -- on-sale times are hard deadlines; 99.99% uptime during onsales
+5. **Fairness** -- all users get a reasonable shot at tickets (no bot advantage)
+6. **Durability** -- once an order is confirmed, it must never be lost
+
+### Out of Scope
+
+For this design we explicitly exclude: secondary marketplace/resale, venue management dashboards, promoter analytics, and physical ticket printing.
+
+<BookingRequirementsDemo client:visible />
+
+## Key Entities
+
+Before we talk about schema, we need to understand the entities and their relationships.
+
+**User** -- a registered account with contact info, payment methods, and purchase history.
+
+**Event** -- a specific show at a specific date and time (e.g., "Taylor Swift, July 15, 2026, 8:00 PM"). Has an associated venue, a start time, a sale start time, and pricing configuration.
+
+**Venue** -- a physical location with a seating configuration. Madison Square Garden, Wembley Stadium, your local theater. A venue hosts many events over time.
+
+**Section** -- a logical division of a venue (Floor, Lower Bowl, Upper Bowl, Balcony). Each section has a price tier, a row range, and a seat count.
+
+**Seat** -- a specific, uniquely identifiable position within a section. Seat 12, Row H, Section 101. A seat belongs to one venue and can be part of many events (each event uses the venue's seating configuration).
+
+**Inventory** -- the junction between Event and Seat. An inventory record tracks whether a specific seat is AVAILABLE, HELD, or SOLD for a specific event. This is the most contended record in the system.
+
+**Order** -- a user's purchase of one or more seat inventory records. Has a status (PENDING, CONFIRMED, CANCELLED, REFUNDED), a total price, and a payment reference.
+
+## Capacity Estimation
+
+Let us estimate for a Taylor Swift-level event: 60,000 seats, 2 million concurrent users at on-sale time, 4 million total across the presale window.
+
+### Traffic
+
+- 2 million concurrent users clicking "Find Tickets" at T+0
+- Each user makes an average of 5 seat map refreshes (looking for better seats as others time out)
+- Peak seat map reads: 10 million requests in the first 60 seconds = ~167,000 reads/second
+- Peak booking attempts: 100,000 per second (only a fraction convert to actual orders)
+- Successful orders: 60,000 seats / 6 tickets per order average = 10,000 completed orders
+
+### Write Throughput
+
+Each booking writes the following records:
+- 1 order record (small, ~500 bytes)
+- 6 inventory records (one per seat, ~150 bytes each)
+- 1 payment transaction record (~300 bytes)
+- 6 ticket records (~200 bytes each)
+
+Total: ~3KB per completed order. At 10,000 orders during the first minute: 30MB of writes in 60 seconds, or 500KB/second. Writes are actually the easy part. Reads are the bottleneck.
+
+### Storage Over Time
+
+- 100,000 events per year across all venues
+- 20,000 seats per average venue, so 2 billion inventory records per year
+- Each inventory record is ~150 bytes: 300GB/year of raw seat data
+- Order records: 500 million orders per year at ~1KB each = 500GB/year
+- Total storage: ~1TB/year for hot data, plus archival for historical orders
+
+### Bandwidth
+
+- Seat map responses: ~50KB each (JSON with 5,000 available seats per section)
+- 10M reads in 60 seconds = 500GB of outbound bandwidth in 1 minute
+- This is why you need CDN caching and aggressively stale-while-revalidate headers
+
+The key takeaway: the seat map read path is the hardest problem. 167K reads/second with sub-second freshness. The write path is modest by comparison.
+
+## Seat Inventory Schema
+
+The inventory table is the heart of the system. Every seat selection, every hold, every release, every cancellation -- they all flow through this table. Getting the schema right is non-negotiable.
+
+```sql
+CREATE TABLE event_seat_inventory (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL,
+  venue_id BIGINT NOT NULL,
+  section_id BIGINT NOT NULL,
+  seat_row VARCHAR(4) NOT NULL,
+  seat_number INT NOT NULL,
+  price_cents INT NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'AVAILABLE',
+  held_by_user_id BIGINT,
+  held_at TIMESTAMPTZ,
+  hold_expires_at TIMESTAMPTZ,
+  order_id BIGINT,
+  version INT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_event_availability
+  ON event_seat_inventory (event_id, status, id)
+  WHERE status = 'AVAILABLE';
+
+CREATE UNIQUE INDEX idx_event_seat_unique
+  ON event_seat_inventory (event_id, id);
+```
+
+The `status` field transitions through a state machine: `AVAILABLE -> HELD -> SOLD`. A seat goes from AVAILABLE to HELD when a user adds it to their cart. It goes from HELD to SOLD when the payment succeeds. If the hold expires or the user cancels, it goes back to AVAILABLE.
+
+The partial index `idx_event_availability` is critical. Without it, the database must scan all 20,000+ seat records for an event to show available seats. With it, the query `SELECT count(*) FROM event_seat_inventory WHERE event_id = ? AND status = 'AVAILABLE'` hits a compact index with only the available rows.
+
+The `version` column enables optimistic concurrency control, which we cover in the concurrency section.
+
+<SeatInventoryDemo client:visible />
+
+## Holding Seats with TTL
+
+When a user selects seats and proceeds to checkout, we cannot let those seats be sold to someone else while the user is entering their credit card details. The user needs a "locker" period -- typically 5 to 8 minutes -- during which the seats are reserved exclusively for them.
+
+This hold works like this:
+
+1. User requests seats. The system attempts to transition each seat from AVAILABLE to HELD.
+2. If all seats transition successfully, the user enters the checkout flow with a timer showing how long their hold lasts.
+3. The `hold_expires_at` column stores `NOW() + INTERVAL '8 minutes'`.
+4. A background cron job or scheduled worker runs every 30 seconds and runs: `UPDATE event_seat_inventory SET status = 'AVAILABLE', held_by_user_id = NULL, hold_expires_at = NULL, version = version + 1 WHERE status = 'HELD' AND hold_expires_at < NOW()`
+5. If the user completes checkout before the timer expires, the seats go to SOLD. If the timer expires, the seats are released.
+
+### The Timer Extension Problem
+
+What if the user is about to finish checkout but their hold is about to expire? The user should not lose their seats while submitting payment. The system allows a one-time hold extension: when the user clicks "Place Order," the hold is extended by 2 minutes to give the payment pipeline time to complete. This extension is itself time-limited to prevent indefinite holds.
+
+### What Happens at Scale
+
+With 2 million concurrent users, there might be 100,000 active holds at any moment, each occupying 6 seats. That is 600,000 held seats -- 10x the actual capacity of a 60,000-seat venue. This is intentional. Not every hold converts to a purchase. The conversion rate for a popular event might be 30-50%. The other 50-70% of holds expire and release their seats back into the pool.
+
+The release wave creates a second spike of traffic. When a batch of holds expires, those seats become available again, and users who were refreshing the seat map see them appear. This drives another burst of selection requests.
+
+## Waiting Room Queue
+
+When 2 million people hit the site at the same moment, they cannot all enter the booking flow simultaneously. The system would collapse under the load, and users with fast connections would have an unfair advantage over users on mobile data. The solution is a virtual waiting room -- a queue that meters the flow of users into the booking system.
+
+<WaitingRoomDemo client:visible />
+
+### How the Queue Works
+
+When on-sale time approaches, users click "Find Tickets" and enter a virtual waiting room. They are assigned a position in line based on when they arrived, with VIP tiers getting priority queue positions. The system releases users from the queue in batches -- say, 5,000 users per minute -- as capacity becomes available.
+
+The queue is implemented as a distributed FIFO using Redis sorted sets:
+
+```python
+import time
+import redis
+
+r = redis.Redis(connection_pool=pool)
+
+def enqueue(event_id, user_id, tier):
+    priority = {"platinum": 0, "verified_fan": 1, "general": 2}
+    score = (priority[tier] * 10**12) + int(time.time() * 10**6)
+    r.zadd(f"queue:{event_id}", {user_id: score})
+
+def dequeue_batch(event_id, batch_size):
+    users = r.zrange(f"queue:{event_id}", 0, batch_size - 1)
+    r.zremrangebyrank(f"queue:{event_id}", 0, batch_size - 1)
+    return users
+
+def queue_position(event_id, user_id):
+    rank = r.zrank(f"queue:{event_id}", user_id)
+    return rank + 1 if rank is not None else None
+```
+
+The score encodes both the user's tier and their arrival time. VIP users always appear ahead of general users, but within the same tier, arrival order is preserved. This is why it is called a FIFO queue with VIP lanes -- not a strict FIFO, but a tiered FIFO.
+
+### Client-Side Polling
+
+The user's browser polls the queue position every 3-5 seconds using HTTP long-polling or Server-Sent Events:
+
+```python
+GET /queue/position?event_id=123&user_id=456
+Response: {"position": 1423, "estimated_wait_seconds": 120}
+```
+
+The position decreases as the system depletes the queue from the front. When the user reaches position 0, the server returns a redirect token -- a signed, time-limited JWT that authorizes the user to enter the seat selection page.
+
+### Queue Bypass for Verified Fans
+
+Ticketmaster's Verified Fan program pre-screens users to filter out bots and scalpers. Verified users skip the general queue and enter a priority queue with shorter wait times. This is implemented by checking a `verified` flag in the user's profile during enqueue and assigning them to a separate score tier.
+
+## Concurrency Control
+
+This is where seat inventory contention meets distributed systems. Two users click the same two adjacent seats at the exact same microsecond. Both see them as available. Both try to hold them. Only one should succeed.
+
+<BookingConcurrencyDemo client:visible />
+
+### Optimistic Locking with Version Numbers
+
+The simplest approach is optimistic concurrency control. Each inventory record has a `version` column. When the application reads a seat's status, it also reads the version. When it attempts to transition the seat from AVAILABLE to HELD, the UPDATE statement includes `WHERE version = <read_version>`:
+
+```sql
+UPDATE event_seat_inventory
+SET status = 'HELD',
+    held_by_user_id = ?,
+    held_at = NOW(),
+    hold_expires_at = NOW() + INTERVAL '8 minutes',
+    version = version + 1
+WHERE id = ?
+  AND status = 'AVAILABLE'
+  AND version = ?;
+```
+
+If another thread already modified the row, the version no longer matches and the UPDATE affects zero rows. The application detects this, reloads the current state, and informs the user that the seat is no longer available.
+
+This works well when contention is moderate. If 100 users all try to grab the same front-row center seat simultaneously, 99 of them will get zero affected rows and must retry or choose different seats. Under extreme contention, the retry rate causes wasted database connections.
+
+### Redis Atomic Operations for Hot Seats
+
+For the hottest seats (front row, aisle seats in popular sections), we add a Redis layer in front of the database. Each seat is a Redis key:
+
+```python
+import redis
+
+r = redis.Redis(connection_pool=pool)
+
+def try_hold_seat(event_id, seat_id, user_id, hold_ttl=480):
+    key = f"hold:{event_id}:{seat_id}"
+    result = r.setnx(key, user_id)
+    if result:
+        r.expire(key, hold_ttl)
+        return True
+    current_holder = r.get(key)
+    if current_holder and int(current_holder) == user_id:
+        r.expire(key, hold_ttl)
+        return True
+    return False
+
+def release_hold(event_id, seat_id, user_id):
+    key = f"hold:{event_id}:{seat_id}"
+    current = r.get(key)
+    if current and int(current) == user_id:
+        r.delete(key)
+```
+
+`SETNX` (Set if Not eXists) is atomic -- Redis guarantees that only one client can set the key. This gives us sub-millisecond seat reservation for the hottest inventory without touching the database.
+
+The trade-off is eventual consistency. If Redis crashes, holds might be lost, and two users could briefly see a seat as available. The database is the source of truth; Redis is a performance optimization. A reconciliation job periodically scans Redis holds and verifies them against the database.
+
+### Database Transactions for Multi-Seat Bookings
+
+When a user books 6 seats, we must ensure either all 6 transition to SOLD or none do. This is a perfect use case for database transactions:
+
+```python
+from django.db import transaction
+
+def book_seats(event_id, seat_ids, user_id, order_id):
+    with transaction.atomic():
+        for seat_id in seat_ids:
+            rows = cursor.execute("""
+                UPDATE event_seat_inventory
+                SET status = 'SOLD',
+                    order_id = ?,
+                    version = version + 1
+                WHERE id = ?
+                  AND event_id = ?
+                  AND status = 'HELD'
+                  AND held_by_user_id = ?
+                  AND version = ?
+            """, [order_id, seat_id, event_id, user_id, expected_version])
+
+            if rows == 0:
+                raise SeatNotHeldError(f"Seat {seat_id} no longer held by user")
+
+        cursor.execute("""
+            INSERT INTO orders (id, user_id, event_id, status, total_cents, created_at)
+            VALUES (?, ?, ?, 'CONFIRMED', ?, NOW())
+        """, [order_id, user_id, event_id, total_cents])
+
+        cursor.execute("""
+            INSERT INTO tickets (order_id, event_id, seat_id, qr_code_hash)
+            VALUES (?, ?, ?, ?)
+        """, [order_id, event_id, seat_id, qr_hash])
+```
+
+The transaction ensures that if any UPDATE fails (zero rows affected), the entire transaction is rolled back. No partial bookings. No orphaned holds.
+
+### The Case for SELECT FOR UPDATE
+
+Under extreme contention, optimistic locking causes many retries. A pessimisstic approach uses `SELECT ... FOR UPDATE` to lock the seat rows before updating:
+
+```sql
+BEGIN;
+SELECT id, status, version
+FROM event_seat_inventory
+WHERE id IN (?, ?, ?, ?, ?, ?)
+  AND event_id = ?
+FOR UPDATE;
+
+-- Application checks all seats are HELD by this user
+-- If not, ROLLBACK
+
+UPDATE event_seat_inventory SET status = 'SOLD', ... WHERE id IN (...);
+COMMIT;
+```
+
+`FOR UPDATE` places an exclusive lock on the selected rows. All other transactions attempting to read or write these rows will block until the current transaction commits or rolls back. This eliminates retries but reduces throughput because concurrent requests queue up waiting for locks.
+
+Most production systems use a hybrid: optimistic locking with version numbers for general inventory, and `SELECT FOR UPDATE` for the last few remaining seats where contention is highest and correctness is paramount.
+
+## Payment Flow
+
+Booking seats is only half the battle. The payment must be processed reliably, without double-charging, and without losing the user's order if the payment provider has a hiccup.
+
+<PaymentFlowDemo client:visible />
+
+### Payment Gateway Integration
+
+The system communicates with external payment gateways (Stripe, PayPal, Adyen) over HTTPS. The payment flow is:
+
+1. User submits payment details (or a payment method token from a stored card)
+2. The booking service creates a payment intent with the payment gateway
+3. The gateway returns a confirmation or an error
+4. If confirmed, the booking service marks the order as CONFIRMED and the seats as SOLD
+5. If errored, the booking service releases the holds and the user can retry with a different payment method
+
+### Idempotency Keys
+
+The most important rule of payment processing: never charge a user twice for the same order. Network retries, browser refreshes, and double-clicks can cause the same payment request to arrive multiple times.
+
+Every payment request includes an idempotency key -- a UUID generated by the client and sent in the `Idempotency-Key` HTTP header or request body:
+
+```python
+import uuid
+
+def create_payment(order_id, user_id, amount_cents, payment_token):
+    idempotency_key = f"payment:{order_id}:{user_id}"
+
+    existing = cache.get(idempotency_key)
+    if existing:
+        return existing
+
+    result = stripe.PaymentIntent.create(
+        amount=amount_cents,
+        currency="usd",
+        payment_method=payment_token,
+        confirmation_method="automatic",
+        idempotency_key=idempotency_key,
+    )
+
+    cache.set(idempotency_key, result, ttl=86400)
+    return result
+```
+
+The payment gateway deduplicates by the idempotency key. If the same key arrives twice, the gateway returns the result of the first attempt rather than processing a second charge. The booking service also caches the result locally so it does not need to call the gateway on subsequent retries.
+
+### The Saga Pattern for Distributed Transactions
+
+A booking involves multiple services: Booking Service (order creation), Payment Service (charge), Inventory Service (mark seats sold), Notification Service (send tickets). These are separate services with separate databases. A distributed transaction across them requires the saga pattern.
+
+The saga for a successful booking:
+
+1. **Booking Service**: Create order record with status PENDING. Emit `OrderCreated` event.
+2. **Inventory Service**: Mark seats as SOLD. Emit `SeatsReserved` event. If this fails, emit `SeatReservationFailed` and abort.
+3. **Payment Service**: Charge the user. Emit `PaymentCompleted` or `PaymentFailed` event.
+4. If payment fails, execute compensating transaction: Inventory Service marks seats back to AVAILABLE, Booking Service marks order as CANCELLED.
+5. **Notification Service**: On `OrderConfirmed`, email tickets to the user.
+
+Each service operates independently, communicating through a message queue (Kafka, SQS). The saga coordinator (or orchestrator) tracks the state of each booking and triggers compensating actions on failure.
+
+### Handling Payment Timeouts
+
+What if the payment gateway takes longer than the hold TTL? The booking service extends the hold before calling the gateway:
+
+```python
+def place_order(user_id, event_id, seat_ids, payment_token):
+    extend_hold(event_id, seat_ids, user_id, extension_seconds=120)
+    order_id = create_order(user_id, event_id, seat_ids)
+    try:
+        result = process_payment(order_id, user_id, get_total(seat_ids), payment_token)
+        if result.status == "succeeded":
+            confirm_order(order_id, seat_ids)
+            return {"status": "success", "order_id": order_id}
+        else:
+            cancel_order(order_id, seat_ids)
+            release_hold(event_id, seat_ids, user_id)
+            return {"status": "payment_failed", "message": result.error_message}
+    except TimeoutError:
+        # Payment is still processing; async worker will handle it
+        return {"status": "processing", "order_id": order_id}
+```
+
+If the payment times out, the response says "processing" and the client shows a spinner. An async worker later checks the payment status and either confirms or cancels the order. The user receives an email either way.
+
+## Real-Time Availability Updates
+
+When one user's hold expires and a seat becomes available, every other user looking at that section should see it appear on their seat map within seconds. This requires pushing availability changes to connected clients in real time.
+
+### WebSocket Architecture
+
+The seat map is served via a combination of HTTP (initial load) and WebSocket (live updates):
+
+- On page load, the frontend fetches the seat map via HTTP GET. The response includes all seats with their current statuses.
+- A WebSocket connection is established to the availability service.
+- When inventory changes (seat held, released, or sold), the availability service broadcasts a delta to all connected clients viewing that event:
+
+```python
+async def broadcast_availability_change(event_id, seat_id, new_status):
+    message = json.dumps({
+        "type": "seat_update",
+        "seat_id": seat_id,
+        "status": new_status,
+        "timestamp": time.time()
+    })
+    for ws in active_connections.get(event_id, set()):
+        try:
+            await ws.send_text(message)
+        except WebSocketDisconnect:
+            active_connections[event_id].discard(ws)
+```
+
+The browser updates the seat color without a full page refresh. A seat that was blue (AVAILABLE) turns yellow (HELD) or red (SOLD) in real time.
+
+### Thundering Herd Prevention
+
+When a batch of holds expires, thousands of seats become available simultaneously. Broadcasting all of them at once floods clients with messages and causes a stampede of selection requests. The system rate-limits broadcasts and batches releases:
+
+```python
+def release_expired_holds_batched(event_id, batch_size=100):
+    expired = get_expired_holds(event_id, limit=batch_size)
+    if not expired:
+        return
+
+    seat_ids = [s["id"] for s in expired]
+    release_holds(event_id, seat_ids)
+
+    # Batch broadcast: send one message with all released seats
+    broadcast_availability_change(event_id, {
+        "type": "batch_release",
+        "seat_ids": seat_ids,
+        "available_count": len(seat_ids),
+    })
+```
+
+Clients handle `batch_release` by adding those seats back to the available pool without triggering individual seat animations for each one.
+
+## Handling Overselling
+
+Despite all precautions, overselling happens. A user's hold expires, the seat goes back to AVAILABLE, another user grabs it, and then the first user's payment finally arrives. Or a race condition in the Redis hold layer allows two users to think they own the same seat.
+
+### The Reconciliation Layer
+
+A periodic reconciliation job compares the database inventory state with the order state:
+
+```sql
+SELECT inv.id, inv.status, inv.held_by_user_id, inv.order_id, o.status as order_status
+FROM event_seat_inventory inv
+LEFT JOIN orders o ON inv.order_id = o.id
+WHERE inv.event_id = ?
+  AND (
+    (inv.status = 'SOLD' AND (o.id IS NULL OR o.status NOT IN ('CONFIRMED', 'REFUNDED')))
+    OR (inv.status = 'HELD' AND inv.hold_expires_at < NOW())
+  );
+```
+
+Any seat marked SOLD without a corresponding CONFIRMED order is a ghost -- it should be released back to AVAILABLE. Any hold that has expired but was not cleaned up by the cron job is released. This reconciliation runs every minute during an on-sale event and catches edge cases that the real-time pipeline missed.
+
+### Over-Booking Buffer
+
+Ticketmaster intentionally overbooks by 1-3% for popular events, similar to how airlines sell more seats than exist. They know that some percentage of confirmed orders will fail payment processing, and some users will cancel within the 24-hour refund window. The over-booking percentage is calculated from historical conversion rates and adjusted dynamically during the on-sale.
+
+If actual conversions exceed predictions and seats are genuinely oversold, the system identifies the lowest-value tickets (last to be purchased, worst seats) and offers affected users upgrades, refunds, or credit. This is a business decision, not a technical one, but the system must support it with an oversold report:
+
+```sql
+SELECT event_id, count(*) as total_sold, venue_capacity,
+       count(*) - venue_capacity as oversold_by
+FROM event_seat_inventory
+JOIN events ON event_seat_inventory.event_id = events.id
+JOIN venues ON events.venue_id = venues.id
+WHERE inv.status = 'SOLD'
+GROUP BY event_id, venue_capacity
+HAVING count(*) > venue_capacity;
+```
+
+## Scaling Reads: Event Page Caches
+
+The event page -- showing seat map, pricing, and availability count -- is the most heavily requested page in the system. At on-sale time, millions of users refresh it simultaneously. Every request must not hit the database.
+
+### Multi-Layer Cache
+
+The cache hierarchy has three layers:
+
+1. **CDN (CloudFront, Cloudflare)**: Caches the static parts of the event page (event name, venue, date, pricing tiers, section layouts). The TTL is short (30-60 seconds) with `stale-while-revalidate` so stale data is served immediately while fresh data loads in the background.
+
+2. **Redis**: Caches the availability counts per section. Keys like `count:event:123:section:456:available` are pre-warmed before on-sale time and updated atomically as seats transition:
+
+```python
+def update_section_count(event_id, section_id, delta):
+    key = f"count:{event_id}:{section_id}:available"
+    r.incrby(key, delta)
+    # Broadcast via WebSocket
+    broadcast_availability_change(event_id, {
+        "type": "section_count_update",
+        "section_id": section_id,
+        "available": int(r.get(key) or 0),
+    })
+```
+
+3. **Read Replicas**: If CDN and Redis both miss (rare during steady state, possible during traffic spikes), the request falls through to a read replica of the database. The seat inventory table is read-heavy, so read replicas absorb the load without impacting write performance on the primary.
+
+### Cache Warming Before On-Sale
+
+Thirty minutes before on-sale time, a cache warming job pre-populates:
+
+```python
+def warm_cache(event_id):
+    sections = db.query(
+        "SELECT section_id, count(*) FROM event_seat_inventory "
+        "WHERE event_id = ? AND status = 'AVAILABLE' GROUP BY section_id",
+        [event_id]
+    )
+    pipe = r.pipeline()
+    for section_id, count in sections:
+        pipe.set(f"count:{event_id}:{section_id}:available", count)
+    pipe.execute()
+
+    # Pre-warm CDN for event page
+    cdn.purge_and_prefetch(f"/events/{event_id}")
+```
+
+By the time users arrive, the data is already in Redis. The first request never hits the database.
+
+## Dead Letter Queues
+
+Not every booking succeeds, and not every failure is recoverable. When a payment repeatedly fails, or an inventory deduplication finds a conflict that the real-time pipeline cannot resolve, the system sends the failed item to a dead letter queue (DLQ).
+
+```python
+def move_to_dlq(order_id, seat_ids, reason, attempt_count):
+    dlq_message = {
+        "order_id": order_id,
+        "seat_ids": seat_ids,
+        "reason": reason,
+        "attempt_count": attempt_count,
+        "timestamp": time.time(),
+    }
+    r.lpush(f"dlq:booking_failures", json.dumps(dlq_message))
+```
+
+The DLQ is a simple Redis list (or Kafka topic) consumed by a manual review process. A support agent dashboard polls the DLQ and presents failed bookings with actions: "Retry Payment," "Force Confirm," "Release Seats," "Issue Refund."
+
+Common reasons items land in the DLQ:
+
+- **Payment gateway timeout after 3 retries**: The gateway is down or the network is flaky. The agent retries when the gateway recovers.
+- **Inventory version conflict**: Optimistic locking retried 5 times and failed each time. The agent manually checks which user should get the seat.
+- **Fraud detection flag**: The fraud model flagged the transaction with high confidence. The agent reviews the user's account and purchase history.
+- **Duplicate payment detected**: Two payment intents completed for the same order. The agent initiates a refund for one.
+
+Each DLQ item includes the full context needed for resolution: the order, the user, the seats, the payment gateway response, and the number of retry attempts already made.
+
+## Fraud Detection
+
+Ticket scalping, bot purchases, and account takeovers are constant threats. A ticket booking system without fraud detection would see 50% of premium tickets bought by automated scripts within the first 30 seconds.
+
+### Bot Detection at the Edge
+
+Before a user even reaches the booking system, the edge layer applies bot detection:
+
+- **CAPTCHA challenges**: Google reCAPTCHA v3 or Cloudflare Turnstile score each request without user interaction. Low-scoring requests are challenged with a CAPTCHA.
+- **Rate limiting per IP**: 10 requests/second max for seat map refreshes. Exceed this and the IP is temporarily blocked for 5 minutes.
+- **Browser fingerprinting**: Canvas fingerprinting, WebGL fingerprinting, and user agent analysis create a unique fingerprint. The same fingerprint purchasing 20 tickets across different accounts triggers a manual review flag.
+
+### Purchase Pattern Analysis
+
+Once inside the booking system, purchase behavior is analyzed in real time:
+
+- **Velocity check**: If the same credit card or billing address is used for 5+ orders within 60 seconds, block the transaction and flag the account.
+- **Seat hoarding detection**: One account selecting 20 premium seats across 4 browser tabs simultaneously. The system tracks active holds per user and enforces a maximum of 15 seats held concurrently.
+- **New account scrutiny**: Accounts created less than 24 hours ago face stricter limits: max 2 tickets per order, slower queue position, mandatory CAPTCHA.
+
+### The Investigation Pipeline
+
+Suspicious transactions are not blocked outright -- they are sent to an investigation pipeline:
+
+```python
+def evaluate_transaction_risk(order):
+    risk_score = 0
+
+    if order.user_age_hours < 24:
+        risk_score += 25
+    if order.ticket_count > 4:
+        risk_score += 15
+    if order.seats_are_premium:
+        risk_score += 20
+    if get_ip_reputation(order.ip_address) < 0.5:
+        risk_score += 30
+    if order.same_billing_address_count > 3:
+        risk_score += 20
+
+    if risk_score > 70:
+        order.flag_for_review("high_risk")
+        return False
+    elif risk_score > 40:
+        order.hold_for_verification()  # Email verification required
+        return False
+    return True
+```
+
+High-risk orders are placed on hold. The user receives an email asking them to verify their identity (confirm email, provide phone number, or upload ID). If they verify within 24 hours, the order proceeds. If not, the seats are released and the order is cancelled.
+
+## Booking Architecture
+
+Now let us put everything together into a single architecture diagram.
+
+<BookingArchitectureDemo client:visible />
+
+The architecture is split into distinct layers:
+
+**Edge Layer**: CDN caches static event page assets and section-level HTTP responses. The Web Application Firewall (WAF) blocks DDoS attacks and applies rate limits per IP. Bot detection scores every incoming request before passing it to the queue layer.
+
+**Queue Layer**: The waiting room service manages Redis sorted sets for FIFO queue positions. Users are released from the queue into the booking flow at a controlled rate. Verified users and VIP tiers get priority queue positions.
+
+**Service Layer**: The booking service owns the seat selection and inventory business logic. It uses Redis for fast seat holds and PostgreSQL for durable state. The payment service processes charges with idempotency keys. The notification service sends confirmation emails and push notifications.
+
+**Data Layer**: PostgreSQL with read replicas serves as the source of truth for inventory and orders. Redis clusters handle hot seat locks, queue positions, and real-time availability counts. Kafka streams inventory change events from the booking service to downstream consumers.
+
+**Observability Layer**: Every seat hold, release, payment attempt, and queue position change is logged to a time-series database. Dashboards track conversion rate (holds to purchases), hold expiry rate, average checkout time, and fraud flag rate. Alerts fire if conversion drops below 30% or if payment failure rate exceeds 5%.
+
+## Trade-offs and Follow-Up Questions
+
+Every design decision has a cost. Here are the key trade-offs and how an interviewer might probe them.
+
+### Why Not Use Strict FIFO for the Queue?
+
+Strict FIFO is fair but ignores VIP tiers. A pure FIFO means a verified fan who joined 1 second after a scalper bot would be behind the scalper. Tiered FIFO with VIP priority is a pragmatic compromise between fairness and business requirements.
+
+### Why Both Redis and PostgreSQL for Inventory?
+
+Redis provides sub-millisecond holds for the hottest inventory. PostgreSQL provides ACID guarantees for the source of truth. This is a CQRS-like pattern: Redis handles the write path for holds (high throughput, tolerate some inconsistency), and PostgreSQL handles the commit path for sales (strong consistency, lower throughput).
+
+The risk is divergence: Redis might think a seat is held while PostgreSQL thinks it is available, or vice versa. The reconciliation job running every 60 seconds detects and corrects divergence. During that 60-second window, the system might briefly show incorrect availability -- a trade-off accepted for the throughput gain.
+
+### How to Handle Multi-Region Failover?
+
+If the primary region goes down during an on-sale, the waiting room pauses releasing new users to the booking flow. The secondary region takes over with a warm Redis replica and a read replica of PostgreSQL. The catch is that in-flight holds and active queues are lost -- users are re-queued with their VIP tier intact but lose their position. The trade-off is that some users get a worse queue position, but the on-sale continues rather than cancelling entirely.
+
+### Can the System Recover If Redis Loses All Data?
+
+Redis is configured with AOF persistence and replication to a secondary node. If both nodes fail (a full cluster outage), holds are lost but orders are not -- PostgreSQL has the authoritative order and inventory state. The system enters a "degraded mode" where holds fall through to PostgreSQL directly, accepting higher latency (50-100ms instead of 1ms) while Redis is rebuilt. The on-sale continues with reduced throughput.
+
+### Design Decision Summary
+
+| Decision | Choice | Alternative | Why |
+|----------|--------|-------------|-----|
+| Seat inventory | PostgreSQL + Redis | DynamoDB | ACID for orders, Redis for hot seats |
+| Hold mechanism | SETNX in Redis | Database-based TTL | Sub-millisecond hold for high contention |
+| Queue | Tiered FIFO (Redis sorted sets) | Strict FIFO | VIP customers skip ahead of scalpers |
+| Concurrency | Optimistic locking (version) | Pessimistic (FOR UPDATE) | Higher throughput, acceptable retries |
+| Payment flow | Saga pattern with idempotency keys | 2PC distributed transaction | Better fault tolerance, async compensation |
+| Real-time updates | WebSocket push | Client polling | Lower latency, less server load |
+| Cache | CDN + Redis + Read replicas | Single cache layer | Handles 167K reads/sec with sub-second freshness |
+
+## Self-Check
+
+Before walking into an interview, make sure you can answer all of these:
+
+- [ ] Can you explain why ticket booking is harder than e-commerce checkout?
+- [ ] Can you calculate the peak read QPS for a Taylor Swift on-sale?
+- [ ] Can you draw the inventory state machine (AVAILABLE -> HELD -> SOLD)?
+- [ ] Can you explain why `SETNX` is superior to a read-then-write for seat holds?
+- [ ] Can you write the UPDATE query for optimistic locking with version numbers?
+- [ ] Can you explain how the waiting room queue prevents system collapse?
+- [ ] Can you trace the full saga for a successful order, including compensating transactions on failure?
+- [ ] Can you explain how the system prevents double-charging?
+- [ ] Can you describe the multi-layer caching strategy and why each layer exists?
+- [ ] Can you explain how the reconciliation job detects and fixes overselling?
+- [ ] Can you describe the dead letter queue and two types of failures it handles?
+- [ ] Can you explain how bot detection works at the edge layer?
+- [ ] Can you describe the trade-off between Redis holds and database holds for hot inventory?
+- [ ] Can you handle the follow-up question "what if Redis loses all data during an on-sale?"
