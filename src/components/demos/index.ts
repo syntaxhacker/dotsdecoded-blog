@@ -268,6 +268,7 @@ export { default as PaintOrderDemo } from './PaintOrderDemo'
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 export { default as RebaseDemo } from './RebaseDemo'
 export { default as ReflogDemo } from './ReflogDemo'
 export { default as CherryPickDemo } from './CherryPickDemo'
@@ -374,3 +375,11 @@ export { default as HintedHandoffDemo } from './HintedHandoffDemo'
 export { default as MerkleTreeDemo } from './MerkleTreeDemo'
 export { default as GossipProtocolDemo } from './GossipProtocolDemo'
 >>>>>>> feat/distributed-key-value-store
+=======
+export { default as MqRequirementsDemo } from './MqRequirementsDemo'
+export { default as TopicPartitionDemo } from './TopicPartitionDemo'
+export { default as OffsetManagementDemo } from './OffsetManagementDemo'
+export { default as KafkaReplicationDemo } from './KafkaReplicationDemo'
+export { default as ConsumerGroupDemo } from './ConsumerGroupDemo'
+export { default as KafkaArchitectureDemo } from './KafkaArchitectureDemo'
+>>>>>>> feat/distributed-message-queue
