@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import DemoBoundary from './DemoBoundary'
-import SpeedController, { getStepDelay } from './SpeedController'
+import SpeedController from './SpeedController'
+import { getStepDelay } from './SpeedController'
 
 const s = {
   bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
@@ -11,280 +12,298 @@ const s = {
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 
-interface StepDef {
-  id: string
-  title: string
+interface Stage {
+  id: number
+  label: string
   desc: string
-  detail: string
-  ops: string[]
+  status: 'pending' | 'active' | 'done' | 'error'
 }
 
-const STEPS: StepDef[] = [
-  {
-    id: 'book',
-    title: 'Book Initiated',
-    desc: 'Reserving seats and creating the order',
-    detail: 'The booking service creates a pending order and holds the selected seats. An idempotency key is generated to prevent duplicate bookings.',
-    ops: [
-      "INSERT INTO orders (user_id, status, total) VALUES (?, 'pending', 150.00)",
-      "UPDATE seats SET status = 'held' WHERE id IN (12, 13, 14) AND status = 'available'",
-      'INSERT INTO order_items (order_id, seat_id) VALUES (?, 12), (?, 13), (?, 14)',
-      'Redis: SET idempotency:booking:KEY STATUS pending NX EX 86400',
-    ],
-  },
-  {
-    id: 'hold',
-    title: 'Payment Hold',
-    desc: 'Authorizing the payment amount',
-    detail: 'A hold is placed on the payment source for the order total. The idempotency key prevents charging the user twice if the request is retried.',
-    ops: [
-      'Redis: SET idempotency:pay:KEY STATUS pending NX EX 86400',
-      'Redis: SET hold:order:42 amount 150.00 EX 600',
-      'Gateway: authorize(amount=150.00, source=card_xxx, idempotency=KEY)',
-      'Redis: SET idempotency:pay:KEY STATUS authorized',
-    ],
-  },
-  {
-    id: 'process',
-    title: 'Processing',
-    desc: 'Capturing the payment from the provider',
-    detail: 'The payment is captured through the payment gateway. The idempotency key guarantees this capture only happens once, even on network retries.',
-    ops: [
-      'Gateway: capture(authorization=auth_xxx, idempotency=KEY)',
-      'Redis: SET idempotency:pay:KEY STATUS completed',
-    ],
-  },
-  {
-    id: 'success',
-    title: 'Success',
-    desc: 'Payment confirmed, tickets issued',
-    detail: 'The order is confirmed, seats are marked as sold, and a notification is queued to deliver the digital tickets.',
-    ops: [
-      "UPDATE orders SET status = 'confirmed', paid_at = NOW() WHERE id = 42",
-      "UPDATE seats SET status = 'sold' WHERE id IN (12, 13, 14)",
-      'Queue: send_tickets(order_id=42, user_id=1)',
-      'Redis: DEL hold:order:42',
-      'Redis: DEL idempotency:booking:KEY',
-    ],
-  },
-  {
-    id: 'failure',
-    title: 'Failure',
-    desc: 'Payment failed, releasing resources',
-    detail: 'The payment was declined or an error occurred. The authorization is voided, seats are released back to inventory, and the user is notified.',
-    ops: [
-      'Gateway: void(authorization=auth_xxx)',
-      "UPDATE seats SET status = 'available' WHERE id IN (12, 13, 14)",
-      "UPDATE orders SET status = 'failed' WHERE id = 42",
-      'Queue: notify_failure(user_id=1, order_id=42)',
-      'Redis: DEL hold:order:42',
-      'Redis: DEL idempotency:pay:KEY',
-    ],
-  },
+const initialStages: Stage[] = [
+  { id: 0, label: 'Checkout', desc: 'Customer submits payment details', status: 'pending' },
+  { id: 1, label: 'API Request', desc: 'Payment service receives request with idempotency key "txn-abc-123"', status: 'pending' },
+  { id: 2, label: 'Validation', desc: 'Validating card number, amount, currency, and required fields', status: 'pending' },
+  { id: 3, label: 'Fraud Check', desc: 'Running fraud detection rules: velocity, amount, geography', status: 'pending' },
+  { id: 4, label: 'Processor Call', desc: 'Sending charge request to Stripe / Adyen gateway', status: 'pending' },
+  { id: 5, label: 'Result', desc: 'Payment succeeded - authorization ID: auth_8fkLm2', status: 'pending' },
+  { id: 6, label: 'Webhook', desc: 'Async webhook sent: payment_intent.succeeded', status: 'pending' },
+  { id: 7, label: 'Ledger Update', desc: 'Double-entry recorded: Debit Customer, Credit Merchant', status: 'pending' },
+]
+
+const failedStages: Stage[] = [
+  { id: 0, label: 'Checkout', desc: 'Customer submits payment details', status: 'done' },
+  { id: 1, label: 'API Request', desc: 'Payment service receives request with idempotency key "txn-abc-123"', status: 'done' },
+  { id: 2, label: 'Validation', desc: 'Invalid card number - Luhn check failed', status: 'error' },
+  { id: 3, label: 'Fraud Check', desc: 'Skipped due to validation error', status: 'pending' },
+  { id: 4, label: 'Processor Call', desc: 'Skipped due to validation error', status: 'pending' },
+  { id: 5, label: 'Result', desc: 'Payment failed - validation error', status: 'error' },
+  { id: 6, label: 'Webhook', desc: 'Async webhook sent: payment_intent.failed', status: 'pending' },
+  { id: 7, label: 'Ledger Update', desc: 'No ledger update - transaction did not succeed', status: 'pending' },
+]
+
+const idempotentStages: Stage[] = [
+  { id: 0, label: 'Checkout', desc: 'Retry with same idempotency key "txn-abc-123"', status: 'done' },
+  { id: 1, label: 'API Request', desc: 'Idempotency key "txn-abc-123" detected in cache', status: 'active' },
+  { id: 2, label: 'Idempotency Check', desc: 'Key found! Returning cached result: SUCCESS', status: 'active' },
+  { id: 3, label: 'Result', desc: 'Returned same authorization ID: auth_8fkLm2 (duplicate prevented)', status: 'done' },
 ]
 
 export default function PaymentFlowDemo() {
-  const [stepIdx, setStepIdx] = useState(0)
-  const [idempotencyKey, setIdempotencyKey] = useState('')
-  const [autoPlay, setAutoPlay] = useState(false)
-  const [simulateFailure, setSimulateFailure] = useState(false)
+  const [mode, setMode] = useState<'idle' | 'running' | 'success' | 'failed' | 'idempotent'>('idle')
+  const [stages, setStages] = useState<Stage[]>(initialStages)
+  const [step, setStep] = useState(-1)
   const [speed, setSpeed] = useState(1)
-  const [visibleOps, setVisibleOps] = useState<string[]>([])
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [idempotencyKey] = useState('txn-abc-123')
+  const [cacheHit, setCacheHit] = useState(false)
 
-  const generateKey = () => {
-    const chars = 'abcdef0123456789'
-    let k = ''
-    for (let i = 0; i < 16; i++) k += chars[Math.floor(Math.random() * chars.length)]
-    setIdempotencyKey(k)
-  }
-
-  useEffect(() => {
-    generateKey()
+  const clearTimer = useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
   }, [])
 
-  const reset = () => {
-    setStepIdx(0)
-    setAutoPlay(false)
-    setVisibleOps([])
-    generateKey()
-    if (timerRef.current) clearTimeout(timerRef.current)
-  }
+  const resetAll = useCallback(() => {
+    clearTimer()
+    setStep(-1)
+    setMode('idle')
+    setCacheHit(false)
+    setStages(initialStages.map(st => ({ ...st, status: 'pending' as const })))
+  }, [clearTimer])
 
-  const goTo = useCallback((idx: number) => {
-    if (idx < 0 || idx >= STEPS.length) return
-    setStepIdx(idx)
-    setVisibleOps([])
-    const st = STEPS[idx]
-    st.ops.forEach((_, i) => {
-      setTimeout(() => {
-        setVisibleOps(prev => [...prev, st.ops[i]])
-      }, i * 300)
+  const advanceStep = useCallback(() => {
+    setStep(prev => {
+      const next = prev + 1
+      return next
     })
   }, [])
 
-  const nextStep = useCallback(() => {
-    const next = stepIdx + 1
-    if (simulateFailure && next === 3) {
-      goTo(4)
-      return
-    }
-    if (next >= STEPS.length) {
-      setAutoPlay(false)
-      return
-    }
-    goTo(next)
-  }, [stepIdx, simulateFailure, goTo])
+  const runFlow = useCallback((flowStages: Stage[], flowMode: 'running' | 'idempotent') => {
+    resetAll()
+    setMode('running')
+    setCacheHit(false)
+    const st = flowStages.map(stage => ({
+      ...stage,
+      status: stage.id === 0 ? ('active' as const) : ('pending' as const),
+    }))
+    setStages(st)
+    setStep(0)
+  }, [resetAll])
 
-  const prevStep = () => {
-    if (stepIdx > 0) goTo(stepIdx - 1)
+  useEffect(() => {
+    if (mode !== 'running' && mode !== 'idempotent') return
+    if (step < 0) return
+
+    const currentStage = stages[step]
+    if (!currentStage) return
+
+    if (currentStage.status === 'active' || currentStage.status === 'done') {
+      const nextIdx = step + 1
+      if (nextIdx >= stages.length) {
+        clearTimer()
+        if (mode === 'idempotent') {
+          setMode('idempotent')
+        } else {
+          setMode('success')
+        }
+        return
+      }
+
+      const nextStage = stages[nextIdx]
+      if (nextStage.status === 'done' || nextStage.status === 'error') {
+        const delay = getStepDelay(600, speed)
+        timerRef.current = setTimeout(() => advanceStep(), delay)
+        return
+      }
+
+      const delay = getStepDelay(600, speed)
+      timerRef.current = setTimeout(() => {
+        setStages(prev => prev.map((st, i) => {
+          if (i === nextIdx) return { ...st, status: 'active' as const }
+          if (i === step) {
+            const current = prev[step]
+            const newStatus = current?.status === 'error' ? 'error' as const : 'done' as const
+            return { ...st, status: newStatus }
+          }
+          return st
+        }))
+        advanceStep()
+        if (mode === 'idempotent' && nextIdx === stages.length - 1) {
+          setCacheHit(true)
+          setTimeout(() => setMode('idempotent'), getStepDelay(400, speed))
+        }
+      }, delay)
+    }
+
+    return clearTimer
+  }, [step, mode, stages, speed, clearTimer, advanceStep])
+
+  const startSuccessFlow = () => runFlow(initialStages, 'running')
+  const startFailFlow = () => {
+    resetAll()
+    setMode('running')
+    const st = failedStages.map((stage, i) => ({
+      ...stage,
+      status: i === 0 ? ('active' as const) : ('pending' as const),
+    }))
+    setStages(st)
+    setStep(0)
   }
 
-  useEffect(() => {
-    if (!autoPlay) return
-    const baseDelay = 2500
-    timerRef.current = setTimeout(() => {
-      nextStep()
-    }, getStepDelay(baseDelay, speed))
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current)
-    }
-  }, [autoPlay, stepIdx, nextStep, speed])
+  const retryIdempotent = () => {
+    runFlow(idempotentStages, 'idempotent')
+    setCacheHit(true)
+  }
 
-  useEffect(() => {
-    goTo(0)
-  }, [goTo])
+  const retryNew = () => {
+    resetAll()
+    startSuccessFlow()
+  }
 
-  const st = STEPS[stepIdx]
-  const isLast = stepIdx >= STEPS.length - 1
-  const isFirst = stepIdx === 0
-  const isFailure = stepIdx === 4
+  const statusColor = (status: string, stageId: number, stagesList: Stage[]) => {
+    if (status === 'active') return s.accent
+    if (status === 'error') return s.red
+    if (status === 'done') return s.green
+    if (stageId > 0 && stagesList[stageId - 1]?.status === 'error') return s.text3
+    return s.text3
+  }
+
+  const statusBg = (status: string) => {
+    if (status === 'active') return `${s.accent}15`
+    if (status === 'error') return `${s.red}15`
+    if (status === 'done') return `${s.green}15`
+    return 'transparent'
+  }
 
   return (
-    <DemoBoundary name="Payment Flow">
+    <DemoBoundary name="Payment Flow with Idempotency">
     <div style={{ background: s.bg, padding: '32px 24px', borderRadius: 16, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", maxWidth: 820, margin: '0 auto' }}>
-      <div style={{ background: s.bg2, borderRadius: 12, padding: '24px 28px', marginBottom: 24 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <div>
           <div style={{ fontSize: 20, fontWeight: 700, color: s.text, letterSpacing: -0.3 }}>Payment Flow</div>
-          <SpeedController speed={speed} onSpeedChange={setSpeed} />
+          <div style={{ color: s.text2, fontSize: 13, marginTop: 4 }}>
+            Idempotency key: <span style={{ fontFamily: s.mono, color: s.yellow }}>{idempotencyKey}</span>
+          </div>
         </div>
+        <SpeedController speed={speed} onSpeedChange={setSpeed} />
+      </div>
 
-        <div style={{ display: 'flex', gap: 0, marginBottom: 24, borderRadius: 8, overflow: 'hidden', border: `1px solid ${s.border}` }}>
-          {STEPS.filter(st => st.id !== 'failure').map((step, i) => {
-            const actualIdx = i
-            const active = actualIdx === stepIdx && !isFailure
-            const done = actualIdx < stepIdx && !(isFailure && actualIdx === 2)
-            return (
-              <div key={step.id} style={{
-                flex: 1, textAlign: 'center', padding: '10px 4px',
-                background: active ? s.accent : done ? s.green : s.bg,
-                borderRight: i < STEPS.length - 2 ? `1px solid ${s.border}` : 'none',
-                transition: 'all 0.3s',
-              }}>
-                <div style={{
-                  fontSize: 10, textTransform: 'uppercase', letterSpacing: 1,
-                  color: active ? '#fff' : done ? '#000' : s.text3,
-                  fontWeight: active ? 700 : 400,
-                }}>{step.title}</div>
-              </div>
-            )
-          })}
-          {isFailure && (
-            <div style={{
-              flex: 1, textAlign: 'center', padding: '10px 4px',
-              background: s.red, transition: 'all 0.3s',
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 20 }}>
+        {stages.map((stage) => {
+          const isActive = stage.status === 'active'
+          const isDone = stage.status === 'done'
+          const isError = stage.status === 'error'
+          const isSkipped = stage.status === 'pending' && step >= 0 && stages.find(st => st.status === 'error') && stage.id > (stages.findIndex(st => st.status === 'error') ?? 99)
+          const color = isError ? s.red : isActive ? s.accent : isDone ? s.green : s.text3
+          const bg = isActive ? `${s.accent}12` : isError ? `${s.red}12` : isDone ? `${s.green}10` : 'transparent'
+
+          return (
+            <div key={stage.id} style={{
+              display: 'flex', alignItems: 'center', gap: 14,
+              padding: '8px 14px', borderRadius: 8,
+              background: bg, border: `1px solid ${isActive ? color : 'transparent'}`,
+              transition: 'all 0.3s ease',
             }}>
-              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, color: '#fff', fontWeight: 700 }}>
-                Failure
+              <div style={{
+                width: 28, height: 28, borderRadius: '50%',
+                background: isDone ? s.green : isError ? s.red : isActive ? s.accent : s.bg3,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0, transition: 'all 0.3s',
+              }}>
+                {isDone ? (
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7l3 3 7-7" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                ) : isError ? (
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M4 4l6 6M10 4l-6 6" stroke="#fff" strokeWidth="2" strokeLinecap="round"/></svg>
+                ) : isActive ? (
+                  <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#fff' }} />
+                ) : (
+                  <span style={{ color: s.text3, fontSize: 11, fontFamily: s.mono }}>{stage.id}</span>
+                )}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ color, fontSize: 13, fontWeight: 600, transition: 'color 0.3s' }}>{stage.label}</div>
+                <div style={{ color: isActive ? s.text2 : s.text3, fontSize: 11, marginTop: 1 }}>{stage.desc}</div>
+              </div>
+              <div style={{
+                fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5,
+                color, background: bg, padding: '2px 8px', borderRadius: 4,
+              }}>
+                {isError ? 'Error' : isActive ? 'Running' : isDone ? 'Done' : ''}
               </div>
             </div>
-          )}
-        </div>
+          )
+        })}
+      </div>
 
+      {cacheHit && (
         <div style={{
-          background: isFailure ? `${s.red}11` : s.bg3,
-          border: `1px solid ${isFailure ? s.red : s.accent}`,
-          borderRadius: 10, padding: '16px 20px', marginBottom: 16,
+          background: `${s.yellow}15`, border: `1px solid ${s.yellow}`, borderRadius: 10,
+          padding: '12px 16px', marginBottom: 20,
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <div style={{
-              width: 8, height: 8, borderRadius: '50%',
-              background: isFailure ? s.red : s.accent,
-            }} />
-            <div style={{ color: s.text, fontSize: 15, fontWeight: 600 }}>{st.title}</div>
+          <div style={{ color: s.yellow, fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+            Idempotency Cache Hit
           </div>
-          <div style={{ color: s.text2, fontSize: 12, lineHeight: 1.5, marginBottom: 12 }}>{st.detail}</div>
-
-          <div style={{ color: s.text3, fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
-            Idempotency Key
-          </div>
-          <div style={{
-            background: s.bg, border: `1px solid ${s.border}`, borderRadius: 6,
-            padding: '8px 12px', fontFamily: s.mono, fontSize: 12, color: s.yellow,
-            wordBreak: 'break-all', marginBottom: 12,
-          }}>
-            {idempotencyKey}
-          </div>
-
-          <div style={{ color: s.text3, fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
-            Operations
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontFamily: s.mono, fontSize: 11 }}>
-            {visibleOps.map((op, i) => (
-              <div key={i} style={{
-                display: 'flex', alignItems: 'center', gap: 8,
-                padding: '4px 8px', borderRadius: 4,
-                background: op.startsWith('Queue') ? `${s.yellow}11` : `${s.accent}11`,
-                animation: 'fadeIn 0.3s ease',
-              }}>
-                <div style={{
-                  width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-                  background: op.startsWith('Gateway') ? s.purple
-                    : op.startsWith('Redis') ? s.orange
-                    : op.startsWith('Queue') ? s.yellow
-                    : s.accent,
-                }} />
-                <span style={{ color: s.text2 }}>{op}</span>
-              </div>
-            ))}
+          <div style={{ color: s.text2, fontSize: 12, lineHeight: 1.5 }}>
+            Idempotency key "{idempotencyKey}" was found in the cache. Returning the original
+            result (auth_8fkLm2) without processing a new payment. The customer was not charged twice.
           </div>
         </div>
+      )}
 
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button onClick={prevStep} disabled={isFirst} style={{
-            background: s.bg3, border: `1px solid ${s.border}`, borderRadius: 8, padding: '8px 16px',
-            color: isFirst ? s.text3 : s.text2, cursor: isFirst ? 'default' : 'pointer',
-            fontSize: 13, opacity: isFirst ? 0.4 : 1,
-          }}>Prev</button>
-          <button onClick={nextStep} disabled={isLast && !simulateFailure} style={{
-            background: s.accent, border: 'none', borderRadius: 8, padding: '8px 20px',
-            color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600,
-            opacity: isLast && !simulateFailure ? 0.4 : 1,
-          }}>Next</button>
-          <button onClick={() => setAutoPlay(!autoPlay)} style={{
-            background: autoPlay ? s.red : s.green,
-            border: 'none', borderRadius: 8, padding: '8px 20px',
-            color: '#000', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button onClick={startSuccessFlow} disabled={mode === 'running'} style={{
+          background: mode === 'running' ? s.bg3 : s.green,
+          border: 'none', borderRadius: 8, padding: '10px 18px',
+          color: mode === 'running' ? s.text3 : '#fff',
+          cursor: mode === 'running' ? 'not-allowed' : 'pointer',
+          fontSize: 13, fontWeight: 600,
+        }}>
+          Run Success Flow
+        </button>
+        <button onClick={startFailFlow} disabled={mode === 'running'} style={{
+          background: mode === 'running' ? s.bg3 : s.red,
+          border: 'none', borderRadius: 8, padding: '10px 18px',
+          color: mode === 'running' ? s.text3 : '#fff',
+          cursor: mode === 'running' ? 'not-allowed' : 'pointer',
+          fontSize: 13, fontWeight: 600,
+        }}>
+          Run Failure Flow
+        </button>
+        {mode === 'success' && (
+          <>
+            <button onClick={retryIdempotent} style={{
+              background: s.yellow, border: 'none', borderRadius: 8, padding: '10px 18px',
+              color: '#000', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            }}>
+              Retry (Same Key - Idempotent)
+            </button>
+            <button onClick={retryNew} style={{
+              background: s.accent, border: 'none', borderRadius: 8, padding: '10px 18px',
+              color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+            }}>
+              Retry (New Key)
+            </button>
+          </>
+        )}
+        {mode !== 'idle' && mode !== 'running' && (
+          <button onClick={resetAll} style={{
+            background: s.bg3, border: `1px solid ${s.border}`, borderRadius: 8, padding: '10px 18px',
+            color: s.text2, cursor: 'pointer', fontSize: 13,
           }}>
-            {autoPlay ? 'Stop' : 'Auto Play'}
+            Reset
           </button>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', marginLeft: 8 }}>
-            <input type="checkbox" checked={simulateFailure} onChange={e => setSimulateFailure(e.target.checked)} style={{ accentColor: s.red }} />
-            <span style={{ color: s.text3, fontSize: 12 }}>Simulate Failure</span>
-          </label>
-          <div style={{ flex: 1 }} />
-          <button onClick={reset} style={{
-            background: 'transparent', border: `1px solid ${s.border}`, borderRadius: 8, padding: '6px 14px',
-            color: s.text3, cursor: 'pointer', fontSize: 12,
-          }}>Reset</button>
+        )}
+      </div>
+
+      <div style={{ marginTop: 20, borderTop: `1px solid ${s.border}`, paddingTop: 16 }}>
+        <div style={{ color: s.text3, fontSize: 11, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>Key Concept: Idempotency</div>
+        <div style={{ color: s.text2, fontSize: 12, lineHeight: 1.6 }}>
+          An idempotency key ensures that retrying a request produces the same result as the first attempt.
+          After a successful payment, click "Retry (Same Key)" to see how the system returns the cached
+          authorization instead of charging the card again. This prevents double charges on network retries.
         </div>
       </div>
-      <style>{`
-        @keyframes fadeIn {
-          from { opacity: 0; transform: translateX(-8px); }
-          to { opacity: 1; transform: translateX(0); }
-        }
-      `}</style>
     </div>
     </DemoBoundary>
   )

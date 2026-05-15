@@ -1,0 +1,719 @@
+---
+title: "Design a Payment System: Stripe-Style Architecture at Scale"
+description: "A complete system design walkthrough for a payment system — idempotency, double-entry ledger, escrow, payment gateways, reconciliation, fraud detection, and scaling to billions in transactions."
+date: 2026-05-18T01:00:00
+tags: ["system-design", "interview", "payments", "fintech", "stripe", "design-problem"]
+---
+
+import PaymentRequirementsDemo from '../../components/demos/PaymentRequirementsDemo'
+import PaymentFlowDemo from '../../components/demos/PaymentFlowDemo'
+import DoubleEntryLedgerDemo from '../../components/demos/DoubleEntryLedgerDemo'
+import ReconciliationDemo from '../../components/demos/ReconciliationDemo'
+import PaymentArchitectureDemo from '../../components/demos/PaymentArchitectureDemo'
+
+## What Is a Payment System?
+
+Imagine a cash register that needs to work across 50 countries, handle 10,000 transactions per second, never lose a single cent, and recover automatically when banks go offline. That is a modern payment system.
+
+A payment system is the software infrastructure that moves money from one party to another. Stripe processes over $1 trillion annually across 135+ currencies. PayPal handles 400 million active accounts. These systems must be correct (every cent accounted for), reliable (99.99%+ uptime), fast (sub-second authorization), and secure (PCI-DSS Level 1).
+
+Most engineers interact with payment systems through a few API calls. But building one from scratch means solving hard problems in distributed systems, accounting, fraud detection, and regulatory compliance. This post covers the complete architecture.
+
+## System Requirements
+
+Before we design, we need a clear list of what a payment system must do. Think of this as the functional and non-functional requirements document that every engineering team writes before building.
+
+<PaymentRequirementsDemo client:visible />
+
+Every card in that grid represents a major subsystem. A payment system is not one service -- it is a constellation of services working together. The requirements demo above shows the scope: accepting payments, handling disputes, ensuring idempotency, generating reports, detecting fraud, supporting multiple currencies, maintaining PCI compliance, and scaling reliably.
+
+## Payment Primitives
+
+Every payment transaction follows the same lifecycle. Understanding these primitives is the foundation:
+
+- **Authorization**: A hold is placed on the customer's card for a specific amount. No money moves yet. The hold expires after 7 days if not captured. This prevents spending the same money twice.
+- **Capture**: The authorized amount is actually transferred. Capture must happen within the authorization window (usually 7 days). You can capture less than the authorized amount (partial capture) but not more.
+- **Settlement**: The captured funds move from the customer's bank to the merchant's bank. This happens in batch overnight. Settlement is the final step -- once settled, the transaction cannot be reversed (only refunded).
+- **Refund**: Money flows back from merchant to customer. Refunds can be full or partial. The original transaction's authorization is referenced, and the funds are returned from the merchant's pending balance.
+- **Dispute (Chargeback)**: The customer claims the transaction was unauthorized or fraudulent. The merchant must provide evidence. If the merchant loses, the funds are deducted plus a fee.
+
+These primitives form the vocabulary of every payment API. Stripe's API surfaces them as `PaymentIntent` (authorize + capture), `Refund`, and `Dispute` objects.
+
+## The Parties Involved
+
+A payment is not just a customer paying a merchant. There are four key players:
+
+- **Customer (Cardholder)**: The person making the purchase. They hold a card issued by their bank.
+- **Merchant**: The business selling goods or services. They have a merchant account with an acquirer.
+- **Acquirer (Merchant's Bank)**: The bank that processes payments on behalf of the merchant. Stripe acts as a payment facilitator (payfac) that aggregates many merchants under its own acquiring relationship.
+- **Issuer (Customer's Bank)**: The bank that issued the customer's card. They authorize or decline the transaction based on available funds and fraud risk.
+- **Card Networks (Visa, Mastercard)**: The infrastructure that routes authorization requests between acquirer and issuer. They set interchange fees and rules.
+
+The flow: Customer enters card details -> Merchant sends to Acquirer (via Stripe) -> Acquirer forwards to Card Network -> Card Network routes to Issuer -> Issuer approves/declines -> Response travels back through the same chain.
+
+## Payment Methods
+
+Different payment methods have different characteristics. A payment system must support multiple methods because customer preference varies by region and use case:
+
+| Method | Speed | Cost | Geography | Best For |
+|--------|-------|------|-----------|----------|
+| Credit/Debit Card | Instant authorization, 1-2 day settlement | 2.9% + $0.30 (typical) | Global | Online purchases, subscriptions |
+| Digital Wallet (Apple Pay, PayPal) | Instant | 2.9% + $0.30 | Global | Mobile, one-click checkout |
+| ACH (US) | 3-5 business days | $0.20 - $1.50 | US only | High-value, recurring bills |
+| SEPA (EU) | 1-2 business days | 0.1% (capped) | EU/EEA | EU bank transfers |
+| Bank Transfer (Wire) | Same day | $10-25 flat | Global | Large B2B payments |
+| BNPL (Klarna, Afterpay) | Instant | 4-6% + $0.30 | Varies by region | High-ticket retail |
+
+Each method has different settlement timing, fee structure, and dispute rules. The payment system abstracts these differences behind a unified API.
+
+## The Payment Flow
+
+Here is the complete lifecycle of a single payment, step by step:
+
+1. **Checkout**: Customer enters card details on the merchant's checkout page. The card data is tokenized client-side by Stripe Elements (a hosted iframe), so the merchant never sees the raw PAN.
+2. **API Request**: The merchant's server calls `POST /payments` with the payment amount, currency, payment method token, and an idempotency key.
+3. **Validation**: The payment service validates the input: is the amount positive? Is the currency supported? Is the card number valid (Luhn check)?
+4. **Fraud Check**: The request is scored by the fraud service. Rules are checked: is this IP address on a blocklist? Is the amount unusually high for this customer? Is the velocity normal?
+5. **Processor Call**: The payment service calls the processor adapter, which formats the request for Stripe or Adyen's API. The processor charges the card and returns an authorization ID.
+6. **Response**: The result (success or failure) is returned to the merchant. A successful response includes the authorization ID and the last four digits of the card.
+7. **Webhook**: The processor sends an asynchronous webhook event (`payment_intent.succeeded` or `charge.succeeded`) to the merchant's webhook endpoint. This is the source of truth for reconciliation.
+8. **Ledger Update**: The ledger service records the transaction as a double-entry: debit the customer's pending balance, credit the merchant's pending balance.
+
+<PaymentFlowDemo client:visible />
+
+Run the success flow in the demo above. Watch each stage execute in order. After success, click "Retry (Same Key)" to see idempotency in action -- the system returns the cached authorization instead of charging the card again.
+
+## Idempotency
+
+Idempotency is the single most important correctness property in a payment system. An operation is idempotent if performing it multiple times produces the same result as performing it once.
+
+Why does this matter? Network failures happen. Your server sends `POST /payments` to Stripe, but the connection times out before you receive the response. Did Stripe process the payment or not? Without idempotency, you must choose between two bad options: retry (risk double-charging the customer) or give up (risk losing revenue).
+
+The solution: every API request carries a unique idempotency key (a UUID generated by the client). The server stores the result keyed by this UUID. When a retry arrives with the same key, the server returns the stored result without executing the logic again.
+
+Implementation in Python:
+
+```python
+import hashlib
+import json
+from datetime import datetime
+from typing import Optional
+
+class IdempotencyService:
+    def __init__(self, redis):
+        self.redis = redis
+
+    async def get_or_process(
+        self,
+        key: str,
+        ttl_seconds: int = 86400,
+        processor=None
+    ) -> dict:
+        existing = await self.redis.get(f"idempotency:{key}")
+        if existing:
+            return json.loads(existing)
+
+        result = await processor()
+
+        await self.redis.set(
+            f"idempotency:{key}",
+            json.dumps(result),
+            ex=ttl_seconds,
+        )
+        return result
+```
+
+The TTL on idempotency keys should be at least 24 hours to cover retry windows. Some systems use 7 days to match authorization hold windows.
+
+```bash
+# First request
+curl -X POST https://api.example.com/payments \
+  -H "Idempotency-Key: txn_abc_123" \
+  -d '{"amount": 4999, "currency": "usd"}'
+
+# Response: {"id": "pi_xxx", "status": "succeeded", "amount": 4999}
+
+# Retry with same key (network retry)
+curl -X POST https://api.example.com/payments \
+  -H "Idempotency-Key: txn_abc_123" \
+  -d '{"amount": 4999, "currency": "usd"}'
+
+# Response: {"id": "pi_xxx", "status": "succeeded", "amount": 4999}
+# Same result -- customer not charged twice
+```
+
+The PaymentFlow demo above demonstrates this. After a successful payment, retrying with the same idempotency key bypasses the processing pipeline and returns the cached authorization.
+
+## Double-Entry Ledger
+
+A payment system must be auditable. Every cent must be traceable from the customer's bank to the merchant's bank. This requires double-entry accounting.
+
+In double-entry accounting, every transaction affects two accounts: one is debited and one is credited. The sum of all debits must equal the sum of all credits. If it does not, the ledger is corrupted and must be reconciled.
+
+Example: A customer buys a product for $100.
+
+```
+Merchant Account:
+  Debit: $0   Credit: $100  (money owed to merchant)
+
+Customer Account:
+  Debit: $100 Credit: $0    (money deducted from customer)
+
+Platform Escrow:
+  Debit: $0   Credit: $0    (no escrow hold this time)
+
+Totals: Debit $100 = Credit $100 => Balanced
+```
+
+The ledger never loses money. It only re-attributes it.
+
+<DoubleEntryLedgerDemo client:visible />
+
+Try transferring money between accounts in the demo above. Notice that every transfer creates two entries: a debit from the source and a credit to the destination. The ledger always balances -- the net total is always zero. Try transferring more than the source account has to see how the system prevents invalid transactions.
+
+### Ledger Database Schema
+
+The ledger table design is critical. Every entry is immutable -- you never update a ledger entry, you only add new ones.
+
+```sql
+CREATE TABLE ledger_entries (
+  id BIGSERIAL PRIMARY KEY,
+  transaction_id UUID NOT NULL,
+  account_id UUID NOT NULL REFERENCES accounts(id),
+  entry_type VARCHAR(4) NOT NULL CHECK (entry_type IN ('DEBIT', 'CREDIT')),
+  amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+  currency CHAR(3) NOT NULL DEFAULT 'USD',
+  description TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  -- Every entry references its counterpart
+  counterparty_entry_id BIGINT REFERENCES ledger_entries(id)
+);
+
+CREATE INDEX idx_ledger_account_id ON ledger_entries(account_id);
+CREATE INDEX idx_ledger_transaction_id ON ledger_entries(transaction_id);
+
+-- Accounts table tracks current balance
+CREATE TABLE accounts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(255) NOT NULL,
+  type VARCHAR(50) NOT NULL CHECK (type IN ('MERCHANT', 'CUSTOMER', 'PLATFORM', 'ESCROW')),
+  currency CHAR(3) NOT NULL DEFAULT 'USD',
+  balance_cents BIGINT NOT NULL DEFAULT 0,
+  version INT NOT NULL DEFAULT 1,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+Key design decisions:
+
+- `amount_cents` stores amounts in the smallest currency unit (cents). Never use floats for money -- floating point rounding errors cause accounting imbalances.
+- `version` on accounts enables optimistic locking. Before updating an account's balance, check that the version matches what you read. If it does not, another transaction modified it concurrently.
+- `counterparty_entry_id` links the debit and credit entries so you can trace the full lifecycle of any transaction.
+- Entries are insert-only. No updates, no deletes. If a transaction needs to be reversed, you insert new reversing entries.
+
+### Escrow Accounts
+
+For platforms (marketplaces, crowdfunding), funds should not flow directly from customer to merchant. Instead, they go through an escrow account. The platform holds the funds until the service is delivered, then releases them.
+
+Escrow lifecycle:
+
+1. Customer pays $100 -> Customer debited $100, Escrow credited $100
+2. Service is delivered -> Escrow debited $100, Merchant credited $90 (minus 10% platform fee)
+3. Platform fee -> Escrow debited $0, Platform credited $10
+
+This ensures the platform can refund customers if the merchant fails to deliver, because the funds have not left the platform's control yet.
+
+## Payment Service Design
+
+The payment service is the orchestrator. It receives requests, coordinates validation, fraud checks, processor calls, and ledger updates. Here is the internal architecture:
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+
+class PaymentStatus(Enum):
+    PENDING = "pending"
+    AUTHORIZED = "authorized"
+    CAPTURED = "captured"
+    FAILED = "failed"
+    REFUNDED = "refunded"
+    PARTIALLY_REFUNDED = "partially_refunded"
+    DISPUTED = "disputed"
+
+@dataclass
+class PaymentRequest:
+    amount_cents: int
+    currency: str
+    payment_method: str
+    idempotency_key: str
+    merchant_id: str
+    customer_id: str
+    description: Optional[str] = None
+
+class PaymentService:
+    def __init__(self, idempotency_svc, fraud_svc, processor_svc, ledger_svc):
+        self.idempotency = idempotency_svc
+        self.fraud = fraud_svc
+        self.processor = processor_svc
+        self.ledger = ledger_svc
+
+    async def process_payment(self, req: PaymentRequest) -> dict:
+        result = await self.idempotency.get_or_process(
+            req.idempotency_key,
+            processor=lambda: self._execute_payment(req),
+        )
+        return result
+
+    async def _execute_payment(self, req: PaymentRequest) -> dict:
+        # 1. Validate
+        if req.amount_cents <= 0:
+            raise ValueError("Amount must be positive")
+
+        # 2. Fraud check
+        fraud_result = await self.fraud.score({
+            "merchant_id": req.merchant_id,
+            "customer_id": req.customer_id,
+            "amount_cents": req.amount_cents,
+            "payment_method": req.payment_method,
+        })
+        if fraud_result.score > 0.8:
+            return {"status": "failed", "reason": "fraud_declined"}
+
+        # 3. Process with gateway
+        processor_result = await self.processor.charge(req)
+
+        if processor_result.status != "succeeded":
+            return {"status": "failed", "reason": processor_result.failure_reason}
+
+        # 4. Record in ledger
+        await self.ledger.record_double_entry(
+            debit_account=f"customer:{req.customer_id}",
+            credit_account=f"merchant:{req.merchant_id}",
+            amount_cents=req.amount_cents,
+            transaction_id=processor_result.transaction_id,
+        )
+
+        return {
+            "status": "succeeded",
+            "transaction_id": processor_result.transaction_id,
+            "amount_cents": req.amount_cents,
+        }
+```
+
+The service is stateless, which makes it horizontally scalable. All state lives in the idempotency cache (Redis), the ledger database (PostgreSQL), and the processor's systems.
+
+## Processor Integration
+
+The processor adapter abstracts the specific payment gateway. Stripe and Adyen have different APIs, different error codes, and different webhook formats. The adapter normalizes these into a common interface.
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+@dataclass
+class ProcessorResult:
+    status: str  # succeeded, failed, pending
+    transaction_id: str
+    authorization_code: str
+    failure_reason: Optional[str] = None
+    raw_response: Optional[dict] = None
+
+class PaymentProcessor(ABC):
+    @abstractmethod
+    async def authorize(self, request: PaymentRequest) -> ProcessorResult: ...
+
+    @abstractmethod
+    async def capture(self, transaction_id: str, amount_cents: int) -> ProcessorResult: ...
+
+    @abstractmethod
+    async def refund(self, transaction_id: str, amount_cents: int) -> ProcessorResult: ...
+
+class StripeProcessor(PaymentProcessor):
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    async def authorize(self, request: PaymentRequest) -> ProcessorResult:
+        import stripe
+        stripe.api_key = self.api_key
+
+        try:
+            intent = stripe.PaymentIntent.create(
+                amount=request.amount_cents,
+                currency=request.currency,
+                payment_method=request.payment_method,
+                confirm=True,
+            )
+            return ProcessorResult(
+                status="succeeded" if intent.status == "succeeded" else "failed",
+                transaction_id=intent.id,
+                authorization_code=intent.charges.data[0].authorization_code,
+            )
+        except stripe.error.CardError as e:
+            return ProcessorResult(
+                status="failed",
+                transaction_id="",
+                authorization_code="",
+                failure_reason=e.error.code,
+            )
+
+class AdyenProcessor(PaymentProcessor):
+    def __init__(self, api_key: str, merchant_account: str):
+        self.api_key = api_key
+        self.merchant_account = merchant_account
+
+    async def authorize(self, request: PaymentRequest) -> ProcessorResult:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://checkout-test.adyen.com/v71/payments",
+                json={
+                    "amount": {
+                        "value": request.amount_cents,
+                        "currency": request.currency,
+                    },
+                    "paymentMethod": {"type": "scheme"},
+                    "reference": request.idempotency_key,
+                    "merchantAccount": self.merchant_account,
+                },
+                headers={"x-API-key": self.api_key},
+            )
+            data = response.json()
+            result_code = data.get("resultCode", "Error")
+            return ProcessorResult(
+                status="succeeded" if result_code == "Authorised" else "failed",
+                transaction_id=data.get("pspReference", ""),
+                authorization_code=data.get("authCode", ""),
+                failure_reason=data.get("refusalReason"),
+            )
+```
+
+The adapter pattern means you can add a new processor by implementing one class. The rest of the system does not change.
+
+## Webhooks for Async Updates
+
+Payments are asynchronous. After you send a charge request, the outcome might not be immediate. The processor sends webhook events to your endpoint with the final result.
+
+Common webhook events from Stripe:
+
+```json
+{
+  "id": "evt_1A2B3C4D5E6F7G",
+  "type": "payment_intent.succeeded",
+  "data": {
+    "object": {
+      "id": "pi_12345",
+      "amount": 4999,
+      "currency": "usd",
+      "status": "succeeded",
+      "charges": {
+        "data": [{
+          "id": "ch_67890",
+          "amount": 4999,
+          "paid": true,
+          "refunded": false
+        }]
+      }
+    }
+  }
+}
+```
+
+The webhook service verifies the signature, deduplicates (webhooks can be delivered multiple times), and updates the internal system:
+
+```python
+import hashlib
+import hmac
+from datetime import datetime
+
+class WebhookService:
+    def __init__(self, secret: str, db):
+        self.secret = secret.encode()
+        self.db = db
+
+    def verify_signature(self, payload: bytes, signature: str) -> bool:
+        expected = hmac.new(
+            self.secret,
+            payload,
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(expected, signature)
+
+    async def process_webhook(self, event: dict):
+        event_id = event["id"]
+        event_type = event["type"]
+        data = event["data"]["object"]
+
+        result = await self.db.execute(
+            "INSERT INTO webhook_events (event_id, type, data, processed_at) "
+            "VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (event_id) DO NOTHING "
+            "RETURNING id",
+            event_id,
+            event_type,
+            json.dumps(data),
+            datetime.utcnow(),
+        )
+        if not result:
+            return {"status": "duplicate"}
+
+        if event_type == "payment_intent.succeeded":
+            await self._handle_success(data)
+        elif event_type == "payment_intent.payment_failed":
+            await self._handle_failure(data)
+        elif event_type == "charge.dispute.created":
+            await self._handle_dispute(data)
+
+        return {"status": "processed"}
+```
+
+The webhook is the source of truth for reconciliation. Your internal state must match what the processor reports via webhooks. Never treat the initial API response as final -- always wait for the webhook to confirm.
+
+## Reconciliation
+
+Reconciliation is the process of comparing your internal transaction records against the processor's records (statements) to find discrepancies. It is the audit that ensures every transaction is accounted for.
+
+Reconciliation happens at multiple levels:
+
+- **Daily**: Compare yesterday's processor statement against internal ledger entries
+- **Real-time**: Each webhook event is cross-referenced with the original API request
+- **Monthly**: Full statement reconciliation for accounting and tax reporting
+
+<ReconciliationDemo client:visible />
+
+The demo above simulates a reconciliation run. It shows each transaction from the processor side and the internal side, color-coded by match status. Click any row to see details about the discrepancy. Common causes of mismatches:
+
+- **Webhook delivery failure**: The processor sent the webhook but it was not received (network issue, server down). The internal record is missing.
+- **Race conditions**: The webhook arrived before the API response was processed. Timestamps differ but amounts match.
+- **Manual adjustments**: Someone manually triggered a refund or credit in the processor dashboard without updating internal records.
+- **Fee mismatches**: The processor statement includes fees (interchange, assessment) that were not recorded internally.
+
+### Reconciliation SQL
+
+```sql
+-- Find transactions in processor statement but not in internal ledger
+SELECT ps.*
+FROM processor_statements ps
+LEFT JOIN ledger_entries le
+  ON ps.transaction_id = le.transaction_id
+  AND le.entry_type = 'DEBIT'
+WHERE le.id IS NULL
+  AND ps.created_at >= NOW() - INTERVAL '1 day';
+
+-- Find amount mismatches
+SELECT ps.transaction_id, ps.amount_cents AS processor_amount,
+       le.amount_cents AS ledger_amount
+FROM processor_statements ps
+JOIN ledger_entries le ON ps.transaction_id = le.transaction_id
+WHERE ps.amount_cents != le.amount_cents
+  AND ps.created_at >= NOW() - INTERVAL '1 day';
+```
+
+Automated reconciliation scripts run nightly and alert on discrepancies. Any unmatched transaction is escalated to the finance team.
+
+## PCI Compliance
+
+The Payment Card Industry Data Security Standard (PCI-DSS) is a set of security requirements for any business that handles credit card data. The requirements are grouped into 6 goals and 12 requirements.
+
+The easiest way to achieve compliance is to never handle card data in the first place. Stripe Elements and other hosted payment fields load card input fields from Stripe's domain into an iframe. The card number, expiry, and CVC go directly to Stripe's servers. Your server never sees the raw PAN.
+
+This qualifies for SAQ A (the simplest self-assessment questionnaire). Your server receives a token (like `tok_visa`) that represents the card but cannot be used to reconstruct the PAN.
+
+If you must handle card data directly (some processors require it), you need:
+
+- Encryption at rest and in transit (TLS 1.2+)
+- Tokenization -- replace PANs with tokens after initial processing
+- Access controls -- only authorized services can read decrypted data
+- Audit logging -- every access to card data is logged
+- Network segmentation -- card data environment (CDE) is isolated from the rest of the network
+- Regular security scans (ASV scans quarterly)
+- Penetration testing annually
+
+PCI-DSS Level 1 (over 6 million transactions/year) requires an onsite assessment by a Qualified Security Assessor (QSA). Most startups start at Level 4 and work their way up.
+
+## Fraud Detection
+
+Fraud detection in a payment system operates at multiple layers:
+
+**Layer 1: Rule-Based Checks (sub-millisecond)**
+
+Rules are evaluated for every transaction. Example rules:
+
+```
+IF amount_cents > 500000 AND payment_method == 'card' THEN score += 0.3
+IF customer_age_days < 7 AND amount_cents > 100000 THEN score += 0.4
+IF ip_country != card_country THEN score += 0.2
+IF same_ip_used > 5_times_in_1_hour THEN score += 0.5
+IF card_bin_in_blocklist THEN score = 1.0
+```
+
+Rules are fast (microseconds) and catch the obvious attacks. They are maintained by the fraud operations team.
+
+**Layer 2: Machine Learning Model (10-50 milliseconds)**
+
+A gradient-boosted model (XGBoost or LightGBM) scores every transaction based on hundreds of features: device fingerprint, behavioral patterns, velocity, and network reputation. The model is retrained daily on labeled data from chargebacks and fraud investigations.
+
+Feature engineering includes:
+
+```python
+def build_features(transaction):
+    return {
+        "amount_ratio": (
+            transaction.amount_cents
+            / transaction.customer.avg_transaction_amount
+        ),
+        "time_since_last_txn_hours": (
+            now - transaction.customer.last_transaction_at
+        ).total_seconds() / 3600,
+        "card_velocity_1h": count_recent_cards(
+            transaction.customer_id,
+            hours=1,
+        ),
+        "ip_risk_score": ip_reputation(
+            transaction.ip_address,
+        ),
+        "device_count_7d": count_devices(
+            transaction.customer_id,
+            days=7,
+        ),
+        "is_bin_prepaid": bin_database[
+            transaction.card_bin
+        ].get("type") == "prepaid",
+    }
+```
+
+**Layer 3: 3D Secure (1-5 seconds)**
+
+For high-risk transactions, the customer is redirected to their bank's authentication page (3DS 2.0). The bank verifies the customer's identity through biometrics, SMS code, or app notification. This shifts liability for fraud from the merchant to the issuer.
+
+The decision to trigger 3DS is itself a model output. Triggering 3DS on every transaction adds friction and reduces conversion. The model balances fraud risk against authentication friction.
+
+## Multi-Currency
+
+Supporting multiple currencies means more than just displaying a currency symbol. Key challenges:
+
+- **FX Rates**: Real-time exchange rates from providers like XE or Bloomberg. Rates are quoted with a spread (e.g., 0.5% above mid-market). For subscriptions, the rate is locked at the time of the first payment.
+- **Settlement Currency**: Merchants choose a settlement currency (usually USD or EUR). Payments in other currencies are converted at the prevailing rate on settlement day.
+- **Rounding**: Different currencies have different decimal places (JPY has 0, USD has 2, TND has 3). Amounts must be rounded correctly for each currency. Stripe's API accepts amounts in the smallest currency unit (cents for USD, yen for JPY).
+- **Local Payment Methods**: Each region has preferred payment methods. A payment system must route to the right method based on the customer's country and currency.
+
+```python
+CURRENCY_CONFIG = {
+    "usd": {"decimals": 2, "min_amount": 50, "max_amount": 99999999},
+    "eur": {"decimals": 2, "min_amount": 50, "max_amount": 99999999},
+    "gbp": {"decimals": 2, "min_amount": 50, "max_amount": 99999999},
+    "jpy": {"decimals": 0, "min_amount": 1, "max_amount": 9999999},
+    "tnd": {"decimals": 3, "min_amount": 10, "max_amount": 99999999},
+}
+
+def validate_amount(amount_cents: int, currency: str):
+    config = CURRENCY_CONFIG.get(currency)
+    if not config:
+        raise ValueError(f"Unsupported currency: {currency}")
+    if amount_cents < config["min_amount"]:
+        raise ValueError(
+            f"Amount below minimum for {currency}: "
+            f"{config['min_amount']} {currency}"
+        )
+    if amount_cents % (10 ** (2 - config["decimals"])) != 0:
+        raise ValueError(
+            f"Invalid decimal places for {currency}"
+        )
+```
+
+## Dispute Handling
+
+Disputes (chargebacks) are a cost of doing business. The payment system must:
+
+1. **Detect**: Receive the dispute notification from the processor (webhook)
+2. **Notify**: Alert the merchant and the customer
+3. **Evidence**: Collect and submit evidence to the processor (transaction records, delivery confirmation, customer communication)
+4. **Track**: Monitor dispute status and deadlines (typically 20-30 days to respond)
+5. **Learn**: Feed dispute data back into the fraud model to prevent future disputes
+
+The dispute lifecycle creates ledger entries too. When a dispute is initiated, funds are debited from the merchant's pending balance. If the merchant wins, they are re-credited. If they lose, the debit becomes permanent and the chargeback fee is applied.
+
+```python
+async def handle_dispute(dispute: dict):
+    dispute_id = dispute["id"]
+    transaction_id = dispute["transaction"]["id"]
+    amount_cents = dispute["amount_cents"]
+    reason = dispute["reason"]
+
+    # Debit merchant's pending balance
+    await ledger.record_double_entry(
+        debit_account=f"merchant_pending:{dispute.merchant_id}",
+        credit_account="platform_dispute_reserve",
+        amount_cents=amount_cents,
+        transaction_id=f"dispute:{dispute_id}",
+    )
+
+    # Notify merchant
+    await notification.send(
+        merchant_id=dispute.merchant_id,
+        type="dispute_opened",
+        data={
+            "dispute_id": dispute_id,
+            "amount_cents": amount_cents,
+            "reason": reason,
+            "respond_by": dispute["respond_by"],
+        },
+    )
+
+    # Update transaction status
+    await db.execute(
+        "UPDATE transactions SET status = 'disputed' "
+        "WHERE id = $1",
+        transaction_id,
+    )
+```
+
+## Scaling and Reliability
+
+A payment system must not lose data. Outages mean lost revenue and angry customers. Key architectural patterns:
+
+- **Circuit Breakers**: If the processor's API starts returning 5xx errors, the circuit breaker trips and the payment service returns a temporary failure instead of hammering the processor. After a cooldown period, traffic is gradually restored.
+- **Dead Letter Queue**: Failed webhooks are retried with exponential backoff (3, 9, 27, 81 seconds up to 3 days). After exhausting retries, the event goes to a dead letter queue for manual inspection.
+- **Database Sharding**: The ledger database is sharded by `merchant_id`. Each shard is an independent PostgreSQL instance. Cross-shard transactions are rare (only for platform-level operations) and use two-phase commit.
+- **Read Replicas**: The ledger has read replicas for reporting and reconciliation queries. The main instance handles writes only.
+- **Backups**: Point-in-time recovery (PITR) for the ledger database. In case of corruption, you can restore to any point in the last 30 days.
+- **Chaos Engineering**: Regularly kill instances, drop network packets, and throttle databases to verify the system survives.
+
+## Putting It All Together
+
+<PaymentArchitectureDemo client:visible />
+
+The architecture demo above animates the complete end-to-end flow. Click "Animate Payment Flow" to watch a payment travel from the client through every service: API Gateway (rate limiting, auth), Payment Service (idempotency, orchestration), Fraud Service (scoring), Processor Adapter (Stripe), Bank Network (authorization), Ledger Service (double-entry), Webhook Service (event delivery), and Notification (receipt email).
+
+Each step is labeled with the data flowing between services. The animation shows both the synchronous request-response path and the asynchronous webhook path.
+
+## Self-Check Questions
+
+Here are questions to test your understanding. You should be able to answer each one after reading this post:
+
+1. What is the difference between authorization, capture, and settlement? Why are they separate phases?
+2. How does an idempotency key prevent double charges? What happens if the key expires before the retry?
+3. Why must the sum of all debits equal the sum of all credits in a double-entry ledger?
+4. What is the purpose of an escrow account in a marketplace payment system?
+5. Why does reconciliation find discrepancies even when both sides think the system is correct?
+6. What is the difference between SAQ A and SAQ D PCI compliance? Which is simpler?
+7. How does 3D Secure shift fraud liability from merchant to issuer?
+8. Why should amounts be stored in the smallest currency unit rather than as floats?
+9. What is the circuit breaker pattern and how does it protect downstream processors?
+10. How would you design the webhook retry mechanism to handle a 3-day outage of the merchant's server?
+
+## Summary
+
+Building a payment system requires combining distributed systems engineering with accounting correctness. The key principles:
+
+- **Idempotency** prevents double charges on retries
+- **Double-entry ledger** ensures every cent is accounted for
+- **Escrow** protects customers on marketplace platforms
+- **Processor adapters** abstract gateway-specific logic
+- **Webhooks** provide async confirmation of payment outcomes
+- **Reconciliation** catches discrepancies between internal and processor records
+- **PCI compliance** is easiest when card data never touches your servers
+- **Fraud detection** layers rules, ML models, and 3D Secure authentication
+
+These patterns apply whether you are building a payment system from scratch or integrating with Stripe, Adyen, or any other processor. The architecture is the same -- only the scale changes.
