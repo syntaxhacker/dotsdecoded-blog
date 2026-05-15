@@ -1,0 +1,443 @@
+---
+title: "Design a Distributed Cache: Redis Cluster, Memcached, and Caching at Scale"
+description: "A complete system design walkthrough for distributed caching — cache hierarchy, sharding, replication, eviction policies, consistency models, and building a Redis-like cluster."
+date: 2026-05-17T01:00:00
+tags: ["system-design", "interview", "caching", "redis", "distributed", "design-problem"]
+---
+
+import CacheRequirementsDemo from '../../components/demos/CacheRequirementsDemo'
+import CacheHierarchyDemo from '../../components/demos/CacheHierarchyDemo'
+import CacheShardingDemo from '../../components/demos/CacheShardingDemo'
+import CacheReplicationDemo from '../../components/demos/CacheReplicationDemo'
+import EvictionPolicyDemo from '../../components/demos/EvictionPolicyDemo'
+import CacheArchitectureDemo from '../../components/demos/CacheArchitectureDemo'
+
+## What Is a Cache?
+
+Imagine a busy restaurant kitchen. The head chef has a small rack of pre-chopped vegetables right at their workstation. When an order comes in for a stir-fry, they grab a handful from the rack instead of walking to the walk-in fridge every time. That rack is a cache. It is small, fast, and keeps the most frequently needed ingredients close at hand.
+
+A cache is a high-speed data storage layer that sits between your application and your primary database. It stores a subset of data (typically the most frequently accessed data) in faster hardware so that future requests for that data can be served faster. The key insight: **reading from RAM is 1000x faster than reading from disk.**
+
+| Storage Layer | Latency | Relative Speed |
+|---------------|---------|----------------|
+| CPU L1 cache | ~1 ns | 1x |
+| CPU L2 cache | ~4 ns | 4x |
+| Main memory (RAM) | ~100 ns | 100x |
+| SSD | ~100 us | 100,000x |
+| HDD | ~10 ms | 10,000,000x |
+| Network call | ~50 ms | 50,000,000x |
+
+A cached read from Redis takes about 0.5ms. A database query over the network takes 10-50ms. When you are serving 100,000 requests per second, reducing latency by 10ms per request eliminates 1000 seconds of cumulative wait time per second. That is the difference between a snappy UI and a spinning loader.
+
+## Cache vs Database
+
+Let's be clear about what a cache is NOT. A cache is not a database. It does not offer ACID guarantees. It does not promise durability (though Redis has persistence modes). It does not support complex queries, joins, or aggregations. The cache is a **key-value store with a short memory**.
+
+| Property | Database (Postgres) | Cache (Redis) |
+|----------|-------------------|---------------|
+| Primary storage | Yes | No (volatile by nature) |
+| Query language | SQL (complex queries) | Commands (GET/SET) |
+| Data model | Relational, documents | Key-value, structures |
+| Durability | WAL, full ACID | Optional (RDB/AOF) |
+| Latency P99 | 10-50ms | 0.5-2ms |
+| Consistency | Strong | Eventually consistent |
+| Capacity | TB-PB | GB-TB (all in RAM) |
+
+The cache holds a **subset** of your database. When data is not in cache (a cache miss), the application falls through to the database. The cache is not authoritative — it is a temporary acceleration layer.
+
+## Cache Access Patterns
+
+There are three fundamental patterns for how an application interacts with a cache:
+
+### Cache-Aside (Lazy Loading)
+
+The application is responsible for both reading from and writing to the cache. On a read, the application checks the cache first. If the data is there (cache hit), it returns immediately. If not (cache miss), the application reads from the database, writes the result into the cache, and returns it. On a write, the application writes to the database and either updates or invalidates the cache entry.
+
+```python
+def get_user(user_id):
+    key = f"user:{user_id}"
+    result = cache.get(key)
+    if result is not None:
+        return result  # cache hit
+    result = db.query("SELECT * FROM users WHERE id = %s", user_id)
+    cache.set(key, result, ttl=3600)
+    return result
+```
+
+This is the most common pattern. It is simple and works for most workloads. The downside: a cache miss adds an extra hop (cache + DB) on the first request.
+
+### Read-Through
+
+The cache library itself handles the database lookup. The application calls `cache.get(key)`, and the cache automatically fetches the missing data from the database, populates itself, and returns it. The application never touches the database directly.
+
+```python
+# Read-through: cache library handles DB fallback
+class ReadThroughCache:
+    def get(self, key, loader):
+        result = self.redis.get(key)
+        if result is not None:
+            return result
+        result = loader()  # Application provides the DB loader
+        self.redis.set(key, result, ex=3600)
+        return result
+```
+
+### Write-Through
+
+Every write goes through the cache first. The cache writes the data to its own store, then immediately writes to the database. The write succeeds only if both succeed. This ensures the cache is always consistent with the database, but adds latency to every write.
+
+### Write-Behind (Write-Back)
+
+The cache acknowledges the write immediately, then asynchronously persists it to the database. This gives the fastest write latency but risks data loss if the cache fails before the database write completes.
+
+```python
+def write_behind(cache, db_queue, key, value):
+    cache.set(key, value)  # Instant ACK
+    db_queue.enqueue(lambda: db.execute(
+        "INSERT INTO data (key, value) VALUES (%s, %s) ON CONFLICT DO UPDATE",
+        key, value
+    ))  # Async DB write
+```
+
+<CacheHierarchyDemo client:visible />
+
+## Capacity Estimation
+
+How much cache do we need? The answer depends on three factors: data volume, access pattern, and budget.
+
+**Working set size** — the subset of data that is accessed frequently. For a social media app with 100 million users, the total profile data might be 500GB, but only the 10 million active users (20GB) need to be cached. Cache the working set, not the entire dataset.
+
+**Hit rate curve** — as you increase cache size, the hit rate improves, but with diminishing returns. The first 10% of capacity might capture 50% of reads. Doubling the cache might only improve hit rate by 5%. Plot a hit rate vs. capacity curve to find the sweet spot.
+
+**Memory budget** — RAM is expensive. At $5/GB/month for cloud instances, a 100GB Redis cluster costs $500/month per node. With 3 replicas, that is $1500/month. Always calculate the cost of the cache vs. the cost of serving from the database.
+
+```bash
+# Example: 100M users, 5KB per user profile
+# Working set: 20M active users
+Cache size = 20,000,000 * 5KB = 100GB
+Nodes = 100GB / 32GB per node = 4 shards (with 25GB each for headroom)
+Replicas = 2 per shard = 12 nodes total
+Monthly cost = 12 * $160 (r6g.large) = $1,920/month
+```
+
+<CacheRequirementsDemo client:visible />
+
+## Cache Hierarchy: L1, L2, L3
+
+A single cache layer is often not enough. Large systems use a hierarchy:
+
+- **L1 (On-heap cache)** — Local to the application process. A simple `Map` or `LinkedHashMap` inside the JVM (Caffeine, Guava cache). Extremely fast (~0.1ms) but limited by heap size and not shared across instances.
+- **L2 (Distributed cache)** — A shared cache like Redis or Memcached. Slower than L1 (~1ms) but shared across all application instances. Stores the working set.
+- **L3 (Database)** — The source of truth. Slowest (~10-100ms) but fully durable.
+
+A read request traverses the hierarchy: L1 check (fastest), L2 check (shared), L3 fallback (database). Each miss populates the layer above it so subsequent reads are faster.
+
+```
+Client -> L1 (on-heap) -> L2 (Redis) -> L3 (Database)
+```
+
+The L1 cache typically has a short TTL (seconds) and small capacity (hundreds of MB). The L2 cache has a longer TTL (minutes to hours) and larger capacity (tens to hundreds of GB). The database is the source of truth.
+
+## Cache Sharding
+
+A single Redis instance holds all data in memory on one machine. A single machine has maybe 512GB of RAM. To cache terabytes of data, we must split (shard) the data across many machines.
+
+### Simple Modulo Sharding
+
+The naive approach: `shard = hash(key) % N`. This distributes keys evenly across N nodes. The problem: when you add or remove a node, `N` changes, and **every key gets reassigned** to a different shard. This causes a massive cache miss storm that can take down the database.
+
+### Consistent Hashing
+
+Consistent hashing solves this. Both keys and cache nodes are hashed onto a ring (0 to 2^32 - 1). Each key is assigned to the next node clockwise on the ring. When a node is added or removed, only the keys that hash to the region between the old and new node positions are affected — roughly `1/N` of keys move.
+
+Each node is responsible for the arc between its position and the next node. If nodes are not evenly spaced, some nodes get more keys than others. **Virtual nodes** solve this by placing multiple copies of each node (with different hash seeds) around the ring, creating a more uniform distribution.
+
+Redis Cluster uses a different approach: 16384 hash slots. Each key is mapped to a slot via `CRC16(key) % 16384`. Each node owns a range of slots. When the cluster grows, slots are migrated from existing nodes to new nodes.
+
+<CacheShardingDemo client:visible />
+
+## Replication
+
+Sharding gives us capacity. Replication gives us availability. In Redis, replication is master-replica (formerly master-slave). Each shard has one master and one or more replicas.
+
+### How Replication Works
+
+1. The master handles all writes and computes a replication stream.
+2. Replicas connect to the master and issue `REPLICAOF`.
+3. The master performs a full sync: forks a child process, creates an RDB snapshot, and sends it to the replica.
+4. After the initial sync, the master streams incremental commands to replicas (the replication buffer).
+5. Replicas apply these commands in order, maintaining an exact copy of the master's dataset.
+
+### Why It Matters
+
+- **Read scaling**: Replicas can serve read traffic. If 80% of your workload is reads, three replicas can handle 3x the read throughput.
+- **High availability**: If the master fails, Redis Sentinel promotes a replica to master. The cluster continues serving writes with minimal downtime (typically 10-30 seconds for detection + promotion).
+- **Disaster recovery**: Replicas in different availability zones protect against data center failures.
+
+### Replication Lag
+
+Replication is asynchronous in Redis by default. The master does not wait for replicas to acknowledge writes before responding to the client. This creates **replication lag** — a window where the replica has stale data. The lag depends on network latency, replica load, and the size of the replication buffer.
+
+Replication lag matters when you read from replicas. A user who just updated their profile might read the old value if the replica hasn't caught up. Solutions: read from master for the user's own data, or use `WAIT` for synchronous replication (at a latency cost).
+
+<CacheReplicationDemo client:visible />
+
+## Eviction Policies
+
+Caches have finite memory. When the cache is full and a new item needs to be inserted, something must be evicted. The eviction policy determines what gets removed.
+
+### LRU (Least Recently Used)
+
+Evicts the item that was accessed the longest time ago. The intuition: if you haven't accessed something recently, you probably won't need it soon. This is Redis's default (`allkeys-lru`) and the most commonly used policy.
+
+Implementation: a doubly-linked list + hash map. On every access, move the item to the front (head). On eviction, remove from the tail. O(1) for both operations.
+
+Redis does not use an exact LRU. Instead, it uses an **approximate LRU**: it samples a small number of keys (default 5) and evicts the one with the oldest access time. This is much more memory-efficient while producing near-identical results.
+
+### LFU (Least Frequently Used)
+
+Evicts the item accessed the fewest times. Good for workloads with a stable popularity distribution (e.g., a few items get 90% of traffic). The problem: an item that was popular yesterday but is irrelevant today might never get evicted because its access count is permanently high.
+
+Redis's LFU is approximate and includes a **frequency decay** mechanism: access counts are periodically halved, so old popularity fades over time.
+
+### FIFO (First In, First Out)
+
+Evicts the item that was inserted earliest. Simple queue implementation. The problem: it ignores access patterns entirely. A high-value item might get evicted simply because it is old.
+
+### TTL-Based Eviction
+
+Items have an expiration time. Redis uses two strategies:
+- **Lazy expiration**: checks the TTL when the key is accessed. If expired, it is removed on the spot.
+- **Active expiration**: a background process samples 20 random keys every 100ms and removes all expired ones. If more than 25% of the sample is expired, it repeats.
+
+| Policy | Best For | Worst For |
+|--------|----------|-----------|
+| LRU | General purpose, most workloads | Sequential scans (pollute cache) |
+| LFU | Stable popularity, hot spots | Rapidly changing popularity |
+| FIFO | Simple bounded queues | Any LRU-friendly workload |
+| TTL | Short-lived data (sessions, temp tokens) | Long-lived cache items |
+
+<EvictionPolicyDemo client:visible />
+
+## Redis Persistence: RDB vs AOF
+
+Redis is primarily an in-memory cache, but it can persist data to disk. Two persistence modes exist:
+
+### RDB (Redis Database)
+
+A point-in-time snapshot of the entire dataset, saved as a compressed binary file. Configured by `save <seconds> <changes>` directives.
+
+```conf
+# Save every 60 seconds if at least 1000 keys changed
+save 60 1000
+# Save every 300 seconds if at least 10 keys changed
+save 300 10
+```
+
+The master forks a child process that writes the RDB file while the parent continues serving requests. On restart, Redis loads the RDB file into memory. RDB files are compact and ideal for backups.
+
+Trade-off: if Redis crashes between snapshots, all writes since the last snapshot are lost.
+
+### AOF (Append-Only File)
+
+Every write operation is appended to a log file. On restart, Redis replays the log to reconstruct the dataset. AOF is more durable than RDB but produces larger files.
+
+```conf
+appendonly yes
+# fsync every second (balance of speed and safety)
+appendfsync everysec
+# or: appendfsync always (every write, slow)
+# or: appendfsync no (let OS flush, fast but unsafe)
+```
+
+AOF files grow over time. Redis supports `BGREWRITEAOF` to compact the log by removing redundant operations.
+
+### Best Practice
+
+Use both: RDB for backups and AOF for durability. Or use neither if your cache is purely ephemeral (recommended for session caches where data loss is acceptable).
+
+```bash
+# Trigger RDB snapshot manually
+redis-cli BGSAVE
+
+# Check last save time
+redis-cli LASTSAVE
+
+# Trigger AOF rewrite
+redis-cli BGREWRITEAOF
+```
+
+## Cluster Bus and Gossip Protocol
+
+Redis Cluster nodes communicate through a secondary TCP connection called the **cluster bus** (default port + 10000). They use a gossip protocol to exchange metadata:
+
+- Which nodes are alive (heartbeat every 100ms)
+- Which hash slots each node owns
+- Cluster configuration epochs (for conflict resolution)
+
+When a node detects that another node is unreachable for `NODE_TIMEOUT` milliseconds, it marks the node as `PFAIL` (possibly failed). If a majority of masters agree that the node is down, it is promoted to `FAIL` and its slots are migrated.
+
+The gossip protocol is efficient: each node sends a few bytes per peer every heartbeat. With 1000 nodes, the overhead is roughly 100KB/s per node. There is no central coordinator, which eliminates a single point of failure.
+
+## Cache Stampede (Thundering Herd)
+
+A cache stampede happens when a popular key expires and thousands of concurrent requests all see a cache miss and hit the database simultaneously. This can overwhelm the database and cause a cascading failure.
+
+### Prevention Strategies
+
+**Mutex (Lock Around Cache Miss)**: When a cache miss occurs, only one thread is allowed to recompute the value. Other threads wait (with a timeout) for the result.
+
+```python
+def get_with_mutex(key, ttl, recompute):
+    value = cache.get(key)
+    if value is not None:
+        return value
+    lock_key = f"lock:{key}"
+    if cache.setnx(lock_key, "1", ttl=10):  # Acquire lock
+        try:
+            value = recompute()
+            cache.set(key, value, ex=ttl)
+            return value
+        finally:
+            cache.delete(lock_key)
+    else:
+        sleep(0.05)
+        return cache.get(key)  # Wait for the other thread
+```
+
+**Probabilistic Early Expiry (PEE)**: Instead of expiring a key at a fixed TTL, track the time since the value was cached and recompute early if the request arrives during the "danger zone." Facebook uses this in memcached to prevent stampedes.
+
+```python
+def get_with_pee(key, ttl=3600, beta=1.0):
+    value = cache.get(key)
+    if value is None:
+        return recompute_and_set(key, ttl)
+    age = time() - value.cached_at
+    if age + beta * ttl * -log(random()) >= ttl:
+        return recompute_and_set(key, ttl)
+    return value
+```
+
+**Lease (Permission to Recompute)**: The cache grants a lease to the first request that encounters a miss. Only the lease holder is allowed to recompute. Other requests are served stale data or wait.
+
+## Write-Behind at Scale
+
+Write-behind caching decouples write acknowledgment from write persistence. The application writes to Redis and immediately receives an acknowledgment. A background worker drains the write queue and batch-persists to the database.
+
+### Benefits
+
+- **Low write latency**: The application never waits for the database.
+- **Batch efficiency**: Groups multiple writes into a single database transaction.
+- **Peak smoothing**: The queue absorbs write bursts that would overwhelm the database.
+
+### Risks
+
+- **Data loss**: If Redis crashes before the worker persists the write, the data is lost.
+- **Duplicate writes**: If the worker crashes and restarts, it may replay already-persisted writes (need idempotency).
+- **Consistency window**: Readers may see stale data until the write is persisted.
+
+### Implementation
+
+```python
+import json, redis, time
+
+r = redis.Redis()
+BATCH_SIZE = 100
+FLUSH_INTERVAL = 1  # seconds
+
+def write_behind(key, value):
+    r.lpush("write_queue", json.dumps({"key": key, "value": value, "ts": time.time()}))
+
+def drain_queue():
+    while True:
+        batch = []
+        for _ in range(BATCH_SIZE):
+            item = r.rpop("write_queue")
+            if item is None:
+                break
+            batch.append(json.loads(item))
+        if batch:
+            db.executemany(
+                "INSERT INTO cache (key, value) VALUES (%s, %s) ON CONFLICT DO UPDATE SET value = EXCLUDED.value",
+                [(b["key"], b["value"]) for b in batch]
+            )
+        time.sleep(FLUSH_INTERVAL)
+```
+
+## Multi-Region Caching
+
+Global applications need caches in multiple geographic regions. The challenge: keeping caches consistent across continents.
+
+### Active-Passive (Single Write Region)
+
+All writes go to one primary region. Other regions maintain read-only replicas. Cross-region replication (Redis's `REPLICAOF` across regions) keeps replicas in sync.
+
+- **Pros**: Simple, no conflict resolution.
+- **Cons**: Write latency for remote clients, single point of failure for writes.
+
+### Active-Active (Multi-Writer)
+
+Multiple regions accept writes. Redis Enterprise and some forks support active-active replication with conflict-free replicated data types (CRDTs). Concurrent writes to the same key are resolved by last-writer-wins (LWW) or custom conflict resolution.
+
+- **Pros**: Low write latency everywhere, no single point of failure.
+- **Cons**: Complex conflict resolution, potential data loss with LWW.
+
+### Geo-Distributed Cache Layers
+
+A common pattern: each region has its own Redis cluster (L2 cache). A global L3 cache (like GlobalTables or a CDN-based KV store) synchronizes hot keys across regions. Most reads hit the local cache. Only cache misses for cross-region data require a remote fetch.
+
+## Putting It All Together
+
+A production distributed cache system combines all the concepts we covered:
+
+- **Client library** with smart hashing (CRC16 for Redis Cluster, consistent hashing for custom)
+- **Cluster proxy** routes requests to the correct shard
+- **Multiple shards** (masters + replicas) for capacity and HA
+- **Sentinel** or **cluster manager** monitors health and orchestrates failover
+- **Persistence layer** for durability (RDB snapshots + AOF log)
+- **Rate limiting** to prevent abuse and protect the cache itself
+
+```python
+# Production-grade Redis Cluster client example
+from redis.cluster import RedisCluster
+
+rc = RedisCluster(
+    startup_nodes=[
+        {"host": "cache-1", "port": 6379},
+        {"host": "cache-2", "port": 6379},
+        {"host": "cache-3", "port": 6379},
+    ],
+    skip_full_coverage_check=True,
+)
+
+rc.set("user:profile:42", json.dumps({"name": "Alice"}), ex=3600)
+profile = json.loads(rc.get("user:profile:42"))
+```
+
+<CacheArchitectureDemo client:visible />
+
+## Self-Check Questions
+
+1. What happens to your cache hit rate when you add a new shard with consistent hashing vs. simple modulo?
+2. Your Redis master fails. A replica is promoted. What happens to writes that were in the replication buffer but not yet applied?
+3. Your application has a workload where 90% of reads go to 10% of keys. Which eviction policy gives the best hit rate?
+4. A user updates their profile and immediately refreshes the page. They see the old data. Why? How do you fix it?
+5. Traffic doubles on Black Friday and your Redis cluster runs out of memory. Which eviction policy prevents the database from being overwhelmed?
+6. How does replication lag affect read-after-write consistency? What's the trade-off when using `WAIT`?
+7. Your cache keys have a TTL of 1 hour. At minute 59, a cache stampede occurs. Which prevention strategy works best?
+8. Redis RDB snapshot takes 30 seconds. During those 30 seconds, 10,000 writes arrive. How many are lost on a crash?
+
+## Summary
+
+| Concept | Key Takeaway |
+|---------|------------|
+| Cache what? | Cache the working set, not everything |
+| Hierarchy | L1 (local) -> L2 (Redis) -> L3 (DB) |
+| Sharding | Consistent hashing or hash slots (16384) |
+| Replication | Async by default, read from replicas |
+| Eviction | LRU for general, LFU for hot spots |
+| Persistence | RDB for backups, AOF for durability |
+| Stampede | Mutex lock or probabilistic early expiry |
+| Write-behind | Fast ACK, async batch persist |
+
+A distributed cache is not a database. It is a carefully tuned acceleration layer that sits in front of your database. Every design decision — shard count, replica factor, eviction policy, TTL, persistence strategy — is a trade-off between speed, consistency, cost, and operational complexity. Understand the trade-offs, measure the actual workload, and tune accordingly.
