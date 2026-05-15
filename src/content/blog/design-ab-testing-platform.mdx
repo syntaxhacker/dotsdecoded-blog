@@ -1,0 +1,399 @@
+---
+title: "Design an A/B Testing Platform: Experimentation at Scale"
+description: "A complete system design walkthrough for an A/B testing platform — traffic splitting, statistical significance, metric pipelines, feature flags, and running experiments for millions of users."
+date: 2026-05-17T01:00:00
+tags: ["system-design", "interview", "ab-testing", "experimentation", "analytics", "design-problem"]
+---
+
+import AbRequirementsDemo from '../../components/demos/AbRequirementsDemo'
+import TrafficSplitDemo from '../../components/demos/TrafficSplitDemo'
+import StatsSignificanceDemo from '../../components/demos/StatsSignificanceDemo'
+import AbArchitectureDemo from '../../components/demos/AbArchitectureDemo'
+
+A/B testing is the scientific method applied to product development. Every change — a new button color, a redesigned checkout flow, a different recommendation algorithm — gets tested against a control group before it ships to everyone. At scale, this means building a platform that assigns users to variants deterministically, collects metrics reliably, and analyzes results with statistical rigor.
+
+This post walks through designing an A/B testing platform from scratch. We cover requirements, traffic splitting, statistical significance, the full architecture, and the edge cases that trip up even mature experimentation systems.
+
+## What is A/B Testing
+
+A/B testing (also called split testing or bucket testing) compares two versions of something to see which performs better. Users are randomly split into two groups: the control group sees the existing version (A), and the treatment group sees the new version (B). You measure a metric of interest — conversion rate, revenue per user, retention — and ask: is the difference real, or is it just noise?
+
+Three core concepts anchor every experiment:
+
+- **Control**: The baseline version. This is what your users see today. Every experiment needs a control group to compare against.
+- **Treatment**: The variant being tested. It differs from control by exactly one thing (the treatment effect). If you change two things at once, you cannot tell which change caused the difference.
+- **Metric**: The quantitative measure you care about. Common metrics: conversion rate (did the user complete the desired action?), revenue per user (how much did they spend?), retention rate (did they come back?).
+
+Experiments let you make data-driven decisions instead of relying on intuition. A team might believe a red button converts better than a blue one — without data, that is just an opinion. With an A/B test, you get a statistically grounded answer.
+
+<AbRequirementsDemo client:visible />
+
+## Control vs Treatment
+
+Every experiment defines exactly one control variant and one or more treatment variants. The simplest design is binary: control gets the current behavior, treatment gets the proposed change.
+
+The control group represents the counterfactual — what would have happened if the change was not made. Without this baseline, you have no way to measure the treatment effect. A common mistake is to skip the control and compare post-change metrics to historical data, but this confounds the treatment effect with time trends, seasonality, and other external factors.
+
+The treatment effect is:
+
+$$ \text{Lift} = \frac{\text{Treatment Rate} - \text{Control Rate}}{\text{Control Rate}} \times 100 $$
+
+A positive lift means the treatment outperformed control. But lift alone is not enough — you need to know whether the observed lift is statistically significant or just random fluctuation.
+
+## Metrics: Choosing What to Measure
+
+The metric defines success for the experiment. Choosing the right metric is harder than running the test itself.
+
+**Conversion rate** is the most common metric. It measures the fraction of users who complete a target action (sign up, purchase, click). It is a ratio metric (count of successes divided by count of exposures). Because it is a proportion, we can model it with a binomial distribution and apply standard statistical tests.
+
+**Revenue per user** is a continuous metric with high variance. A single whale who spends $10,000 can swamp the signal from thousands of typical users. Revenue metrics often require larger sample sizes and sometimes winsorization (clipping extreme values) to control variance.
+
+**Retention** is a computed metric (did the user come back within N days?). It requires a longer observation window and is sensitive to the cohort definition.
+
+A good primary metric is:
+
+- **Sensitive**: It captures the effect you expect to see
+- **Robust**: It is not easily gamed or distorted by outliers
+- **Timely**: You do not need to wait months to measure it
+
+Secondary metrics help you understand why the primary metric moved. Did conversion drop because the new UI confused users, or because the page loaded slower? Secondary metrics (page load time, error rate, click-through rate) provide diagnostic signals.
+
+## Traffic Splitting
+
+Once you have defined your experiment and metrics, you need to assign users to variants. The assignment must be deterministic — a given user must always see the same variant, or your metrics will be contaminated by inconsistent exposure.
+
+The standard approach is hash-based bucketing:
+
+```
+bucket = hash(user_id + experiment_id) % 100
+if bucket < treatment_percent:
+    variant = "treatment"
+else:
+    variant = "control"
+```
+
+This has three desirable properties:
+
+1. **Deterministic**: The same user always lands in the same bucket
+2. **Uniform**: A good hash function distributes users uniformly across buckets
+3. **Independent**: Different experiments (with different experiment_id seeds) assign users independently, unless you intentionally couple them
+
+The traffic split is a single number: the percentage of users assigned to treatment. A 50/50 split gives maximum statistical power for a given sample size. Unequal splits (90/10, 80/20) are used when you want to limit risk — only 10% of users see the new feature.
+
+<TrafficSplitDemo client:visible />
+
+The demo shows how hash-based bucketing distributes 24 users across control and treatment. Slide the split ratio to see assignments update in real time. Notice that each user maps to the same variant regardless of how many times you toggle — that is deterministic bucketing in action.
+
+## Sample Size and Statistical Power
+
+Before running an experiment, you need to know how many users are required to detect the effect you care about. This is called a power analysis.
+
+Four factors determine the required sample size:
+
+- **Baseline conversion rate**: The control group's expected metric value
+- **Minimum detectable effect (MDE)**: The smallest lift you want to detect
+- **Significance level (alpha)**: The probability of a false positive (typically 0.05)
+- **Statistical power (1 - beta)**: The probability of detecting a true effect (typically 0.80)
+
+The formula for sample size per variant (using the normal approximation for a two-proportion z-test) is:
+
+$$ n = \frac{(Z_{\alpha/2} + Z_{\beta})^2 \cdot (p_1(1-p_1) + p_2(1-p_2))}{(p_2 - p_1)^2} $$
+
+Where $p_1$ and $p_2$ are the control and treatment conversion rates, $Z_{\alpha/2}$ is the critical value for the significance level, and $Z_{\beta}$ is the critical value for power.
+
+Let us work through an example. Suppose our baseline conversion rate is 5% and we want to detect a 10% relative lift (from 5% to 5.5%):
+
+- $p_1 = 0.05$, $p_2 = 0.055$
+- $\alpha = 0.05$ → $Z_{0.025} \approx 1.96$
+- $\beta = 0.20$ → $Z_{0.20} \approx 0.84$
+
+Plugging these into the formula gives roughly 72,000 users per variant. That is 144,000 total — a large number for a modest effect size. This is why big platforms run experiments for weeks and why small changes often fail to reach significance.
+
+A Python implementation of the sample size calculator:
+
+```python
+import math
+
+def required_sample_size(baseline: float, mde: float, alpha: float = 0.05, power: float = 0.80) -> int:
+    treatment_rate = baseline * (1 + mde)
+    p1, p2 = baseline, treatment_rate
+    z_alpha = 1.96  # approximate for alpha=0.05
+    z_beta = 0.84   # approximate for beta=0.20
+
+    numerator = (z_alpha + z_beta) ** 2 * (p1 * (1 - p1) + p2 * (1 - p2))
+    denominator = (p2 - p1) ** 2
+    return math.ceil(numerator / denominator)
+
+print(required_sample_size(0.05, 0.10))
+# Output: 72281
+```
+
+A common mistake is running the power analysis after the experiment ends. Power analysis must be done beforehand. Post-hoc power calculations are circular — if the result is not significant, the observed effect is by definition smaller than what the study was powered for.
+
+## Statistical Significance
+
+Once the experiment is running, users accumulate in each variant and we track their conversions. At any point, we can compute:
+
+- **Conversion rate**: conversions / exposures for each variant
+- **Confidence interval**: a range around the estimated conversion rate that captures the uncertainty
+- **p-value**: the probability of observing a difference at least as extreme as the one seen, assuming the null hypothesis (no real difference) is true
+
+The standard error of the difference between two proportions is:
+
+$$ SE = \sqrt{\frac{p_1(1-p_1)}{n_1} + \frac{p_2(1-p_2)}{n_2}} $$
+
+The z-score is:
+
+$$ z = \frac{p_2 - p_1}{SE} $$
+
+The p-value is derived from the z-score using the normal cumulative distribution function. If the p-value falls below our significance threshold (typically 0.05), we reject the null hypothesis and declare the result statistically significant.
+
+But statistical significance is not the same as practical significance. A result can be statistically significant with an effect size so small it is not worth shipping. Always look at the confidence interval and the magnitude of the lift, not just the p-value.
+
+<StatsSignificanceDemo client:visible />
+
+The demo simulates an experiment running over 14 days. Control holds steady at 5% conversion while treatment targets 5.8%. Watch as more users enter the experiment: the p-value drops, the confidence interval narrows, and eventually the result crosses the significance threshold.
+
+## Architecture: End-to-End Pipeline
+
+Now we put it all together into a production architecture. An A/B testing platform needs several cooperating services:
+
+1. **Feature Flag Service**: Checks if an experiment is active for a given user and context
+2. **Experiment Config Store**: Holds experiment definitions, variant configurations, and targeting rules
+3. **Assignment Service**: Computes the deterministic bucket and returns the assigned variant
+4. **Analytics Pipeline**: Ingests exposure and conversion events, validates, deduplicates, and writes to storage
+5. **Metric Storage**: Time-series or columnar store optimized for aggregation queries
+6. **Analysis Service**: Runs statistical computations — p-values, confidence intervals, power analysis
+7. **Results Dashboard**: Visualizes experiment results for stakeholders
+
+The assignment service is the heart of the system. It must be:
+
+- **Fast**: Assignment happens on every page load or API call. The service should respond in single-digit milliseconds.
+- **Consistent**: Sticky assignments must persist across sessions. If a user gets treatment on day 1, they must get treatment on day 7.
+- **Available**: If the assignment service goes down, users should still get a variant (even if it is just control). The system degrades gracefully.
+
+A common implementation stores experiment configs in a Redis-backed cache with a database of record (PostgreSQL). Assignments are computed server-side using hash bucketing, eliminating the need for per-user assignment storage. Only the experiment config (split percentages, variant mappings) needs to be cached.
+
+<AbArchitectureDemo client:visible />
+
+The architecture demo traces a single user request through all eight steps. Click individual steps or press Auto Play to see the full flow: feature flag check, config lookup, assignment computation, variant return, event emission, pipeline ingestion, metric aggregation, and dashboard rendering.
+
+## Database Schema
+
+The event store is the foundation of all analysis. Each row represents one event with enough context to group and filter by experiment, variant, date, and user segment.
+
+```sql
+CREATE TABLE experiment_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_id UUID NOT NULL UNIQUE,
+    experiment_id VARCHAR(64) NOT NULL,
+    variant VARCHAR(32) NOT NULL,
+    user_id VARCHAR(128) NOT NULL,
+    event_type VARCHAR(32) NOT NULL,  -- 'exposure' or 'conversion'
+    event_name VARCHAR(64) NOT NULL,  -- e.g. 'signup', 'purchase', 'click'
+    event_value DOUBLE PRECISION,      -- optional: revenue, duration, etc.
+    metadata JSONB,                    -- browser, region, plan tier, etc.
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    INDEX idx_experiment_id (experiment_id),
+    INDEX idx_user_id (user_id),
+    INDEX idx_created_at (created_at),
+    INDEX idx_event_type (experiment_id, event_type, created_at)
+);
+```
+
+Analytics queries typically aggregate by experiment and variant over a time window:
+
+```sql
+SELECT
+    experiment_id,
+    variant,
+    COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'exposure') AS exposures,
+    COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'conversion') AS conversions,
+    COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'conversion')::FLOAT /
+        NULLIF(COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'exposure'), 0) AS conversion_rate
+FROM experiment_events
+WHERE experiment_id = 'red-button-v2'
+  AND created_at >= '2026-05-01'
+  AND created_at < '2026-05-15'
+GROUP BY experiment_id, variant;
+```
+
+This query gives the raw counts needed for significance testing. For revenue experiments, you would SUM(event_value) instead of counting distinct users.
+
+A columnar store like ClickHouse is far more efficient for these aggregation-heavy workloads than a row-oriented database. The events table can grow to billions of rows at scale — columnar compression and vectorized aggregation keep query times under a second.
+
+## Feature Flags for Gradual Rollout
+
+A feature flag is a boolean switch that controls whether a user sees a feature. Experiment platforms typically include feature flag functionality because the two are deeply related: you experiment to decide whether to turn on a flag, then you use the flag to control the rollout.
+
+Feature flags support:
+
+- **Gradual rollout**: Incrementally increase traffic from 1% to 100%, monitoring metrics at each step
+- **Kill switch**: Instantly disable a feature if metrics degrade or bugs surface
+- **Targeted release**: Enable the feature for internal users first (dogfooding), then beta users, then general audience
+- **Canary deployment**: Roll out to a small subset of servers before hitting all traffic
+
+A feature flag evaluation looks like this in code:
+
+```python
+def evaluate_flag(user_id: str, flag_name: str, context: dict) -> dict:
+    flag = get_flag_config(flag_name)
+    if not flag.enabled:
+        return {"variant": "off", "reason": "flag_disabled"}
+
+    for rule in flag.targeting_rules:
+        if match_rule(rule, context):
+            return evaluate_rollout(user_id, flag, rule)
+
+    return evaluate_default(user_id, flag)
+
+def evaluate_rollout(user_id: str, flag: dict, rule: dict) -> dict:
+    bucket = hash(user_id + flag["name"] + rule["name"]) % 100
+    for allocation in rule["allocations"]:
+        if bucket < allocation["end_percent"]:
+            return {"variant": allocation["variant"], "reason": "rollout"}
+    return {"variant": flag["default"], "reason": "fallback"}
+```
+
+The key insight: feature flags and experiment assignments use the same underlying mechanism (hash-based bucketing). An experiment is just a feature flag with a control group, automated metrics collection, and statistical analysis.
+
+## Multiple Overlapping Experiments
+
+At scale, multiple teams run experiments simultaneously on the same user base. Without coordination, experiments interfere with each other. A user in experiment A (checkout redesign) who also falls into experiment B (recommendation algorithm) gets a compound effect that neither experiment can attribute.
+
+Three strategies for managing experiment collisions:
+
+1. **Mutually exclusive groups**: Partition users into non-overlapping groups. Experiment A runs on group 1, experiment B on group 2. No interference, but slower iteration since each experiment only gets a fraction of total users.
+
+2. **Overlapping with interaction detection**: Allow experiments to overlap but track interaction effects. This requires more sophisticated statistical models (e.g., factorial designs) and larger sample sizes.
+
+3. **Namespace-based isolation**: Each experiment runs in a namespace with its own hash seed. Users are independently bucketed per experiment. This is the most common approach — it works well when experiments affect different parts of the product and interaction effects are small.
+
+The namespace approach looks like:
+
+```python
+def assign_variant(user_id: str, experiment: dict) -> str:
+    namespace = experiment["namespace"]
+    seed = f"{user_id}:{namespace}"
+    bucket = hash(seed) % 100
+    for variant in experiment["variants"]:
+        if bucket < variant["range_end"]:
+            return variant["name"]
+    return "control"
+```
+
+Different namespaces (e.g., "checkout-color", "recommendation-engine") produce independent random assignments. A user could be in control for the checkout experiment and treatment for the recommendation experiment, with no systematic correlation.
+
+## The Peeking Problem
+
+The biggest statistical pitfall in A/B testing is peeking: repeatedly checking the results while the experiment is running and stopping as soon as the p-value crosses 0.05.
+
+If you peek every day and stop early, your effective alpha is much higher than 0.05. With enough peeks, you will almost always find a "significant" result eventually, even if the treatment has zero effect. This is the multiple comparisons problem applied to time.
+
+Simulating peeking behavior:
+
+```python
+import numpy as np
+from scipy import stats
+
+def simulate_peeking(n_peeks: int = 10, n_users_per_peek: int = 1000, effect: float = 0.0):
+    p_val = 1.0
+    for i in range(n_peeks):
+        control = np.random.binomial(1, 0.05, n_users_per_peek)
+        treatment = np.random.binomial(1, 0.05 + effect, n_users_per_peek)
+        _, p_val = stats.ttest_ind(control, treatment)
+        if p_val < 0.05:
+            return i + 1, p_val
+    return n_peeks, p_val
+
+# Try many experiments with zero effect
+false_positives = 0
+for _ in range(10000):
+    peek_day, p = simulate_peeking(n_peeks=20, n_users_per_peek=500, effect=0.0)
+    if peek_day < 20:
+        false_positives += 1
+
+print(f"False positive rate: {false_positives / 10000:.2%}")
+# Output: ~23% — much higher than 5%!
+```
+
+With 20 peeks, the false positive rate balloons from 5% to over 20%. This is the peeking problem.
+
+Solutions to the peeking problem:
+
+- **Fixed horizon test**: Pre-commit to a sample size and do not analyze until the experiment ends. Simple but wasteful — you cannot stop early even if the result is obvious.
+- **Sequential testing**: Use a spending function that adjusts the significance threshold for each look. The alpha "budget" is spent across looks. The Haybittle-Peto or O'Brien-Fleming boundaries are common choices.
+- **Always-valid p-values**: Techniques like the mSPRT (mixture Sequential Probability Ratio Test) give valid p-values at any stopping time. You can peek continuously without inflating false positives.
+- **Bayesian approaches**: Instead of p-values, compute a posterior distribution over the treatment effect. The decision rule is: "stop when the probability that treatment is better than control exceeds 95%." This approach naturally handles continuous monitoring.
+
+## Simpson's Paradox and Segmentation
+
+Simpson's paradox occurs when a trend appears in aggregated data but disappears or reverses when the data is stratified by a confounding variable. This regularly bites A/B tests that do not account for heterogeneous treatment effects.
+
+Example: Treatment shows +2% overall lift, but when segmented by country, treatment performs worse in every single country. How? Uneven traffic distribution. If treatment was accidentally sent to more users in high-converting countries, the aggregate looks positive while per-segment looks negative.
+
+The root cause is a correlation between the variant assignment and a confounding variable. In randomized experiments, this should not happen — randomization ensures confounders are balanced. But randomization can fail due to:
+
+- **Assignment bugs**: A caching layer serves the same variant to users with similar characteristics
+- **Network effects**: Users in the same social network or geographic region influence each other
+- **Time effects**: The experiment starts at a different time of day for different segments
+
+Always check balance tables before analyzing results:
+
+```sql
+SELECT
+    variant,
+    AVG(CASE WHEN region = 'US' THEN 1 ELSE 0 END) AS pct_us,
+    AVG(CASE WHEN region = 'EU' THEN 1 ELSE 0 END) AS pct_eu,
+    AVG(CASE WHEN plan = 'premium' THEN 1 ELSE 0 END) AS pct_premium,
+    AVG(CASE WHEN device = 'mobile' THEN 1 ELSE 0 END) AS pct_mobile
+FROM experiment_events
+WHERE experiment_id = 'checkout-v3'
+  AND event_type = 'exposure'
+GROUP BY variant;
+```
+
+If the control and treatment groups differ on observables, the randomization is broken and the results are unreliable. Stratified analysis or post-stratification weighting can help, but the best fix is to fix the assignment bug and restart the experiment.
+
+## Network Effects and Social Interference
+
+Standard A/B tests assume the Stable Unit Treatment Value Assumption (SUTVA): one user's assignment does not affect another user's outcome. This assumption fails in networked environments.
+
+If you test a new referral program, treated users might invite their friends (who are in the control group). The control group gets indirectly exposed to the treatment, diluting the measured effect. Similarly, if you test a new feed ranking algorithm on 10% of users, the other 90% still see content created by treated users, creating cross-contamination.
+
+Solutions for network effects:
+
+- **Cluster-based randomization**: Randomize at the cluster level (geographic region, social network community) instead of the individual level. All users in a cluster get the same variant.
+- **Switchback experiments**: Randomize over time intervals instead of users. The treatment runs for an hour, then control runs for an hour. This is common for marketplace experiments where supply and demand are tightly coupled.
+- **Ego-network randomization**: Randomize at the user level but only measure outcomes that involve exposure to treated users. This requires careful experimental design and more complex statistical models.
+
+Network effects are the hardest problem in applied A/B testing. They are why large platforms invest heavily in experimentation infrastructure — the naive solution of "just randomize users" falls apart when users interact.
+
+## Self-Check Questions
+
+Test your understanding with these questions:
+
+1. A product manager peeks at their experiment every day and stops when the p-value hits 0.03 on day 3. What statistical problem have they introduced? How would you fix it?
+
+2. Your experiment shows a 12% lift in conversion with p = 0.04. Should you ship the feature? What additional information would you want before deciding?
+
+3. Two teams launch experiments on the same user population simultaneously. Team A's experiment shows no effect. Team B's experiment shows a large positive effect. Could these results be misleading? Why?
+
+4. You need to detect a 0.5% absolute lift on a baseline of 2% conversion. Your platform has 10,000 daily active users. How long should the experiment run? Walk through the calculation.
+
+5. A treatment shows +5% overall but -2% on both mobile and desktop when segmented. What is happening? How do you investigate?
+
+## Summary
+
+Designing an A/B testing platform requires connecting product decisions, statistical methodology, and distributed systems engineering. The core ideas are:
+
+- **Deterministic hash-based bucketing** ensures consistent user assignment without per-user storage
+- **Feature flags and experiment assignments** share the same infrastructure — an experiment is a measurable feature flag
+- **Statistical rigor** requires pre-registering sample sizes or using sequential testing to avoid the peeking problem
+- **Event pipelines** need to handle billions of events with deduplication, validation, and low-latency aggregation
+- **Network effects and Simpson's paradox** break naive randomization — always check balance tables and consider cluster-based designs
+
+The architecture demo summarizes the full pipeline: client requests flow through flag evaluation, config lookup, assignment, and variant return. Events flow through ingestion, storage, analysis, and dashboarding. Each layer has its own failure modes and scaling challenges.
+
+Building a production-grade A/B testing platform is a multi-year effort. The good news: you do not need to build it yourself at first. Start with a simple hash-based split, log events to a database, and compute p-values in a Jupyter notebook. As your experimentation culture matures, invest in the infrastructure — automated significance testing, feature flag management, and real-time dashboards.
