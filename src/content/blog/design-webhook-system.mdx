@@ -1,0 +1,393 @@
+---
+title: "Design a Webhook System: Reliable Event Delivery at Scale"
+description: "A complete system design walkthrough for a webhook delivery system — event signing, retry with backoff, idempotency keys, delivery guarantees, dead letter queues, and Stripe-style webhook architecture."
+date: 2026-05-18T01:00:00
+tags: ["system-design", "interview", "webhook", "events", "delivery", "design-problem"]
+---
+
+import WebhookRequirementsDemo from '../../components/demos/WebhookRequirementsDemo'
+import WebhookDeliveryDemo from '../../components/demos/WebhookDeliveryDemo'
+import WebhookSigningDemo from '../../components/demos/WebhookSigningDemo'
+import WebhookArchitectureDemo from '../../components/demos/WebhookArchitectureDemo'
+
+## What Are Webhooks?
+
+Webhooks are automated HTTP callbacks triggered by events. When something happens in a source system -- a payment succeeds, a repository is pushed to, a new user signs up -- the source sends an HTTP POST request to a pre-registered URL owned by the consumer.
+
+Unlike polling, where the client repeatedly asks "is there new data?", webhooks push the data the moment it exists. The client does nothing but listen.
+
+Real-world examples:
+
+- **Stripe** sends `payment_intent.succeeded` to your endpoint after a charge goes through
+- **GitHub** sends `push` events to CI systems like Jenkins or GitHub Actions
+- **Slack** sends `event_callback` for messages, reactions, and channel activity
+- **Twilio** sends `status_callback` when an SMS is delivered or fails
+- **Shopify** sends `orders/create` when a customer places an order
+
+### Polling vs Webhooks
+
+| Aspect | Polling | Webhooks |
+|---|---|---|
+| Direction | Client pulls from server | Server pushes to client |
+| Latency | Depends on poll interval (seconds to minutes) | Near real-time (milliseconds) |
+| Server load | Wasted requests when no data | Zero wasted requests |
+| Complexity | Simple to implement | Requires public endpoint, retry logic |
+| Reliability | Client controls retry | Server must handle retry + delivery guarantees |
+| Firewall | Client initiates, no inbound needed | Client must expose a public endpoint |
+
+### When to Use Webhooks
+
+Webhooks shine when you need real-time event delivery and control over the consumer is limited (third-party integrations). They struggle when clients are behind strict firewalls, cannot maintain a public endpoint, or need ordered exactly-once delivery (which webhooks do not natively guarantee).
+
+<WebhookRequirementsDemo client:visible />
+
+## Event Delivery Lifecycle
+
+Every webhook delivery follows the same lifecycle. Understanding this lifecycle is the foundation of any webhook system design.
+
+### The Delivery Sequence
+
+1. **Event creation** -- An event occurs in the source system (e.g., a Stripe charge succeeds)
+2. **Persistence** -- The event is stored in the database with a unique ID and status `pending`
+3. **Enqueue** -- A delivery job is pushed onto a queue (per client or shared)
+4. **Delivery attempt** -- A worker pulls the job and sends an HTTP POST to the registered URL
+5. **Response evaluation** -- The worker checks the HTTP response code:
+   - `2xx`: mark as `delivered`, done
+   - `4xx` (client error): the endpoint is misconfigured or rejecting -- do not retry
+   - `5xx` (server error): retry with exponential backoff
+   - Timeout or network error: retry (same as 5xx)
+6. **Retry or DLQ** -- On failure, the event is re-enqueued with a delay. After max retries, it moves to the dead letter queue
+
+### Exponential Backoff Schedule
+
+Each retry waits longer than the last. A typical schedule:
+
+```json
+{
+  "retry_1": "1 minute",
+  "retry_2": "5 minutes",
+  "retry_3": "15 minutes",
+  "retry_4": "1 hour",
+  "retry_5": "6 hours",
+  "retry_6": "24 hours"
+}
+```
+
+Total time before DLQ: approximately 32.7 hours. Each delay is computed as `base * 2^(attempt - 1)` plus a small random jitter to prevent the thundering herd problem when many clients fail simultaneously.
+
+```python
+import random
+import time
+
+def compute_delay(attempt: int, base_minutes: int = 1) -> float:
+    jitter = random.uniform(0, 0.3 * base_minutes)
+    return base_minutes * (2 ** (attempt - 1)) + jitter
+
+# Simulate retry schedule
+for attempt in range(1, 7):
+    delay_min = compute_delay(attempt)
+    print(f"Retry {attempt}: wait {delay_min:.1f} minutes")
+```
+
+<WebhookDeliveryDemo client:visible />
+
+## Idempotency via Event IDs
+
+Idempotency means performing an operation multiple times produces the same result as doing it once. In webhooks, this is critical because the at-least-once delivery model means the same event might be delivered twice.
+
+Every event carries a unique idempotency key in the payload:
+
+```json
+{
+  "id": "evt_3QpLmN7XyZ",
+  "idempotency_key": "evt_3QpLmN7XyZ_1716000000",
+  "type": "payment_intent.succeeded",
+  "data": { ... }
+}
+```
+
+The receiver stores seen keys in a cache or database. When a duplicate arrives, the receiver detects the known key and returns a 200 OK without processing the event again.
+
+```python
+seen_keys = redis_cache()
+
+def handle_webhook(payload: dict):
+    key = payload["idempotency_key"]
+    if seen_keys.exists(key):
+        return {"status": "duplicate", "existing_response": seen_keys.get(key)}
+
+    result = process_event(payload)
+    seen_keys.set(key, result, ttl=86400)
+    return result
+```
+
+Common gotcha: the TTL on the idempotency cache must exceed the total retry window. If retries span 32.7 hours, the cache TTL should be at least 48 hours.
+
+## Security: Webhook Payload Signing
+
+Without signing, a malicious actor could forge webhook requests and trigger unintended actions in your system. Every webhook provider signs requests so the receiver can verify authenticity.
+
+### HMAC-SHA256 Signing
+
+The sender computes a signature over the raw request body using a shared secret:
+
+```text
+signature = HMAC-SHA256(webhook_secret, request_body)
+```
+
+The signature is sent in a header. Stripe's format:
+
+```text
+webhook-signature: t=1716000000,v1=5257a869e7ecebeda32affa62cd4fa7c27f6c7d5d5f6e5c5c5f6a7b8c9d0e1f2
+```
+
+The timestamp `t` prevents replay attacks. The receiver verifies:
+
+1. Extract `t` and `v1` from the header
+2. Recompute `HMAC-SHA256(secret, f"{t}.{body}")`
+3. Compare the computed signature to `v1` using constant-time comparison
+4. Check that `t` is within an acceptable time window (e.g., 5 minutes)
+
+```python
+import hmac
+import hashlib
+import time
+
+def verify_signature(
+    payload: bytes,
+    header: str,
+    secret: str,
+    tolerance_seconds: int = 300,
+) -> bool:
+    params = {}
+    for part in header.split(","):
+        key, value = part.strip().split("=", 1)
+        params[key] = value
+
+    timestamp = int(params["t"])
+    if abs(time.time() - timestamp) > tolerance_seconds:
+        return False
+
+    signed_payload = f"{timestamp}.{payload.decode()}".encode()
+    expected = hmac.new(
+        secret.encode(), signed_payload, hashlib.sha256
+    ).hexdigest()
+
+    return hmac.compare_digest(expected, params["v1"])
+```
+
+<WebhookSigningDemo client:visible />
+
+## Rate Limiting Per Client
+
+A misbehaving client should not degrade service for others. Each client gets a rate limit defined at registration time (e.g., 100 requests per second). Workers use a token bucket or sliding window counter to throttle delivery.
+
+```python
+import asyncio
+from token_bucket import TokenBucket
+
+client_limits = {
+    "client_a": TokenBucket(rate=100, capacity=100),
+    "client_b": TokenBucket(rate=10, capacity=10),
+}
+
+async def deliver(webhook_url: str, payload: dict):
+    bucket = client_limits.get(url_to_client(webhook_url))
+    if not bucket.consume():
+        await queue.reenqueue(payload, delay=1.0)
+        return
+    await http_post(webhook_url, payload)
+```
+
+If a client consistently exceeds their limit, excess events queue up. The admin can adjust the limit or pause delivery entirely.
+
+## Delivery Service Architecture
+
+The delivery service sits between event producers and client endpoints. It handles persistence, queuing, rate-limited delivery, retries, and observability.
+
+### Queue-Per-Client Design
+
+A shared queue works for low volumes but creates a head-of-line blocking problem: when one client's endpoint is slow, deliveries for all other clients wait behind it.
+
+The fix: give each client its own queue (a separate Redis list, SQS queue, or RabbitMQ exchange). Workers poll from all queues in a round-robin or priority-based fashion.
+
+```python
+class WebhookQueueManager:
+    def __init__(self, redis_client):
+        self.redis = redis_client
+
+    def enqueue(self, client_id: str, event: dict):
+        queue_key = f"webhook_queue:{client_id}"
+        self.redis.lpush(queue_key, json.dumps(event))
+
+    def dequeue_multi(self, client_ids: list[str], batch_size: int = 10):
+        events = []
+        for cid in client_ids:
+            for _ in range(batch_size):
+                event = self.redis.rpop(f"webhook_queue:{cid}")
+                if not event:
+                    break
+                events.append((cid, json.loads(event)))
+        return events
+```
+
+### Delivery Worker Pool
+
+A fixed pool of workers (e.g., 50 threads) continuously polls queues, sends HTTP POSTs, and evaluates responses. Workers mark events as delivered, re-enqueue for retry with delay, or move them to DLQ.
+
+```python
+async def worker_loop():
+    while True:
+        events = queue.dequeue_multi(client_registry.all_ids())
+        for client_id, event in events:
+            url = client_registry.get_url(client_id)
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(url, json=event, timeout=10)
+                if resp.status_code in (200, 201, 204):
+                    db.mark_delivered(event["id"])
+                elif 400 <= resp.status_code < 500:
+                    db.mark_failed(event["id"])  # no retry
+                else:
+                    queue.reenqueue_with_delay(event, compute_delay(event["attempt"]))
+            except (httpx.TimeoutException, httpx.NetworkError):
+                queue.reenqueue_with_delay(event, compute_delay(event["attempt"]))
+```
+
+<WebhookArchitectureDemo client:visible />
+
+## Dead Letter Queues
+
+After the maximum number of retries (typically 6), the event moves to a dead letter queue. A DLQ is a separate queue or database table that stores undeliverable events for manual inspection.
+
+```python
+def move_to_dlq(event: dict):
+    dlq_key = f"webhook_dlq:{event['id']}"
+    redis.set(dlq_key, json.dumps({
+        **event,
+        "dlq_reason": "max_retries_exceeded",
+        "dlq_timestamp": time.time(),
+        "attempts": event.get("attempts", 0),
+    }))
+    notify_admin(event)
+```
+
+Events in the DLQ can be:
+
+- **Replayed** -- a new delivery attempt is triggered manually via the admin panel
+- **Inspected** -- logs show every attempt with request/response bodies
+- **Expired** -- automatically deleted after a retention period (e.g., 14 days)
+- **Forwarded** -- sent to an alternative fallback endpoint
+
+### Replaying Events
+
+The admin panel shows every failed event with full delivery history. An operator can click "Replay" to re-enqueue the event with fresh delivery attempts. This is essential for handling transient infrastructure issues on the client side.
+
+## Delivery Guarantees: At-Least-Once vs Exactly-Once
+
+Webhooks fundamentally provide at-least-once delivery. The event will eventually reach the endpoint or land in the DLQ, but duplicates are possible.
+
+**At-least-once** means:
+- Every event is delivered at least one time
+- Duplicates can happen (network retry, timing edge cases)
+- The receiver must handle duplicates via idempotency
+
+**Exactly-once** is not achievable with HTTP-based webhooks over an unreliable network. The closest you can get is:
+
+- Idempotent receivers (deduplicate via event IDs)
+- Strong ordering guarantees within a single queue
+- Exactly-once semantics within your internal system, surfaced as idempotent webhooks
+
+```python
+# Receiver-side deduplication
+def handle_webhook(request):
+    event_id = request.json["id"]
+    with db.transaction():
+        if db.events.exists(event_id):
+            return {"status": "already_processed"}, 200
+        db.events.insert(event_id, request.json)
+        process_event(request.json)
+    return {"status": "ok"}, 200
+```
+
+## Delivery Analytics and Observability
+
+A production webhook system needs comprehensive observability:
+
+- **Delivery log** -- every attempt with timestamp, status code, response body, and latency
+- **Metrics** -- delivery success rate, average attempts per event, DLQ rate, queue depth per client
+- **Alerts** -- notify the team when a client's success rate drops below 90% or DLQ grows rapidly
+- **Dashboard** -- real-time view of delivery health per client
+
+```sql
+-- Sample query: delivery success rate per client
+SELECT
+    client_url,
+    COUNT(*) AS total_events,
+    SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) AS delivered,
+    ROUND(SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS success_rate
+FROM webhook_deliveries
+WHERE created_at > NOW() - INTERVAL '24 hours'
+GROUP BY client_url
+ORDER BY success_rate ASC;
+```
+
+## Putting It All Together: Stripe-Style Architecture
+
+Stripe's webhook architecture exemplifies the patterns we have covered. Here is the complete architecture end to end:
+
+```text
+Event Producer (Payment Service)
+        |
+        v
+Event Service (validates, assigns ID, signs payload)
+        |
+        v
+Event Store (PostgreSQL)
+        |
+        v
+Per-Client Queue (Redis streams or RabbitMQ)
+        |
+        v
+Delivery Workers (N processes, rate-limited per client)
+        |
+        v
+Client Endpoint (HTTP POST with Stripe-Signature header)
+        |
+        +--> 200 OK: mark delivered, log success
+        |
+        +--> 5xx/Timeout: re-enqueue with backoff delay
+        |
+        +--> Max retries: move to Dead Letter Queue
+                           |
+                           v
+                    Admin Panel (view, replay, inspect)
+```
+
+### What You Need to Implement
+
+Building a webhook system from scratch requires these components:
+
+1. **Event schema** with unique ID, type, data, idempotency key, and timestamp
+2. **Database** for event persistence and delivery tracking
+3. **Queue**   per client (Redis streams, SQS, or RabbitMQ)
+4. **Worker pool** for HTTP delivery with rate limiting
+5. **Retry engine** with exponential backoff and jitter
+6. **Signing layer** using HMAC-SHA256
+7. **Dead letter queue** for failed events
+8. **Admin panel** for monitoring and replaying
+9. **Observability pipeline** with metrics, logs, and alerts
+
+### Self-Check Questions
+
+Before deploying your webhook system, ask yourself:
+
+- Can clients verify the authenticity of every webhook request?
+- What happens if the client's endpoint returns 500 for 32 hours straight?
+- How does a client recover from data loss if they miss a webhook?
+- Can a slow client block delivery to other clients?
+- How do you handle a compromised webhook secret?
+- Can an operator view, filter, and replay any failed delivery?
+- What is the TTL on your idempotency cache, and does it exceed the retry window?
+
+Building a reliable webhook system is not complicated at the component level, but the edge cases around retries, duplicates, and misbehaving clients make the difference between a system that is trusted and one that is constantly on fire.
