@@ -1,0 +1,406 @@
+---
+title: "Design Twitter: Building a Social Feed at Scale"
+description: "A complete system design walkthrough for a Twitter-like social feed — tweet distribution (push vs pull), timeline generation, trending topics, search, and scaling to billions of users."
+date: 2026-05-15T01:00:00
+tags: ["system-design", "interview", "twitter", "social-feed", "design-problem"]
+---
+
+import TwitterRequirementsDemo from '../../components/demos/TwitterRequirementsDemo'
+import TweetStorageDemo from '../../components/demos/TweetStorageDemo'
+import TimelineFanoutDemo from '../../components/demos/TimelineFanoutDemo'
+import TwitterTimelineDemo from '../../components/demos/TwitterTimelineDemo'
+import TrendingTopicsDemo from '../../components/demos/TrendingTopicsDemo'
+import TwitterSearchDemo from '../../components/demos/TwitterSearchDemo'
+import TwitterArchitectureDemo from '../../components/demos/TwitterArchitectureDemo'
+
+## Introduction
+
+Imagine a town square where anyone can pin a note to a board, and everyone who follows them gets an instant copy of that note in their personal mailbox. That is Twitter at its core. A user posts a 280-character tweet, and every follower sees it in their timeline.
+
+Now scale this to 330 million monthly active users posting 500 million tweets every day. Each timeline load must complete in under 500 milliseconds. This is the system design challenge we will solve together.
+
+We will walk through every layer of a Twitter-like social feed system: from requirements and data modeling to the complete architecture that makes it work at global scale.
+
+## Requirements Gathering
+
+Before we design anything, we need a clear list of what we are building. We split requirements into two categories: functional (what the system must do) and non-functional (how well it must perform).
+
+Functional requirements define the features users interact with directly:
+
+- **Post a tweet**: Users create text (up to 280 chars) with optional media attachments
+- **View home timeline**: Users see a chronologically merged feed of tweets from everyone they follow
+- **Follow/unfollow**: Users subscribe to or unsubscribe from another user's tweets
+- **Search tweets**: Users find tweets by keywords, hashtags, or phrases
+- **Trending topics**: Users see what is popular right now based on aggregated tweet content
+- **Like and retweet**: Users engage with tweets to boost their visibility
+- **View user profile**: Users see all tweets from a specific author
+
+Non-functional requirements define the quality attributes:
+
+- **Timeline load latency**: P99 under 500ms -- users will not wait for their feed
+- **High availability**: 99.9% uptime -- the feed must be accessible nearly always
+- **Write throughput**: Support 500M+ tweets per day with spikes during events
+- **Read throughput**: Support 20B+ timeline loads per day
+- **Eventual consistency**: Tweets should appear in followers' timelines within 5 seconds
+- **Global reach**: Serve users worldwide with regional data centers
+
+<TwitterRequirementsDemo client:visible />
+
+Each toggle above affects specific architectural decisions. Timeline latency demands a cache-heavy approach with precomputed feeds. Write throughput pushes us toward a hybrid fanout model. Search requires an inverted index. Trending needs approximate counting to keep computation feasible.
+
+## Entities and Data Model
+
+With requirements clear, we define the core entities. Every social feed system revolves around four primary objects:
+
+**User** -- anyone who can post, follow, and engage
+**Tweet** -- the atomic content unit
+**Follow** -- the directed relationship between users
+**Timeline** -- the aggregated view of tweets from followed users
+
+Here is the relational schema:
+
+```sql
+CREATE TABLE users (
+    user_id BIGINT PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    display_name VARCHAR(100),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE tweets (
+    tweet_id BIGINT PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(user_id),
+    content VARCHAR(280) NOT NULL,
+    media_urls TEXT[],
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_tweets_user_id ON tweets(user_id, created_at DESC);
+
+CREATE TABLE follows (
+    follower_id BIGINT NOT NULL REFERENCES users(user_id),
+    followee_id BIGINT NOT NULL REFERENCES users(user_id),
+    created_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (follower_id, followee_id)
+);
+
+CREATE TABLE timeline_entries (
+    user_id BIGINT NOT NULL,
+    tweet_id BIGINT NOT NULL REFERENCES tweets(tweet_id),
+    author_id BIGINT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (user_id, tweet_id)
+);
+
+CREATE INDEX idx_timeline_user ON timeline_entries(user_id, created_at DESC);
+
+CREATE TABLE likes (
+    user_id BIGINT NOT NULL,
+    tweet_id BIGINT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (user_id, tweet_id)
+);
+```
+
+The `timeline_entries` table is the heart of the fanout system. It is a materialized view -- precomputed rows inserted when a followed user tweets. This is what makes timeline reads fast: no need to query N different users and merge results at read time.
+
+In production, these tables live in a distributed database like Cassandra or Vitess. The relational schema helps us reason about the data model, but the physical storage is partitioned across hundreds of nodes.
+
+## API Design
+
+We expose a RESTful API for clients. Every endpoint is stateless, allowing horizontal scaling behind a load balancer.
+
+```python
+POST /api/v1/tweet
+Request:
+{
+    "content": "Hello world!",
+    "media_ids": ["img_abc123"]
+}
+Response (201):
+{
+    "tweet_id": 9876543210,
+    "user_id": 42,
+    "content": "Hello world!",
+    "created_at": "2026-05-15T12:00:00Z"
+}
+
+GET /api/v1/timeline?page=1&count=20
+Response (200):
+{
+    "tweets": [
+        {
+            "tweet_id": 9876543210,
+            "author": {
+                "user_id": 42,
+                "username": "alice",
+                "display_name": "Alice"
+            },
+            "content": "Hello world!",
+            "likes_count": 15,
+            "retweet_count": 3,
+            "created_at": "2026-05-15T12:00:00Z"
+        }
+    ],
+    "next_page": 2
+}
+
+POST /api/v1/follow/{user_id}
+Response (200): { "status": "following" }
+
+GET /api/v1/search?q=system+design&page=1&count=20
+Response (200):
+{
+    "tweets": [...],
+    "total_hits": 1234
+}
+
+GET /api/v1/trending?window=1h
+Response (200):
+{
+    "topics": [
+        {"hashtag": "SystemDesign", "tweet_count": 45200},
+        {"hashtag": "Scalability", "tweet_count": 23100}
+    ]
+}
+```
+
+Two design decisions deserve attention. First, timelines use cursor-based pagination. Offset pagination breaks when new tweets arrive mid-query. Second, the follow endpoint is idempotent -- following someone you already follow returns the same success response. This simplifies retry logic on the client.
+
+## Capacity Estimation
+
+Let us estimate the scale. These numbers drive our hardware provisioning and sharding strategy.
+
+- **Daily active users**: 200 million
+- **Tweets per day**: 500 million (peak 15,000/second)
+- **Timeline views per day**: 20 billion (peak 250,000/second)
+- **Follows per user (avg)**: 400
+- **Tweet size**: 1 KB average (280 chars + metadata + media URLs)
+
+Daily tweet storage: 500M tweets x 1 KB = 500 GB/day = 180 TB/year in raw tweet data alone.
+
+Read-to-write ratio: 20B timeline views / 500M tweets = 40:1. This is a read-heavy system. Every design choice should optimize for reads, even if it adds write cost.
+
+Timeline fanout writes per second: if the average user has 400 followers and we use push-based fanout, each tweet generates 400 writes to `timeline_entries`. At 15,000 tweets/sec peak, that is 6M writes/second to the timeline table. This is why naive push fanout does not scale for celebrity accounts.
+
+Now we understand the problem. Let us build the solution layer by layer.
+
+## Tweet Storage
+
+Tweets are the atomic unit of content. They must be written once and read in bulk (timeline generation) or singly (profile view). The storage strategy must handle both patterns efficiently.
+
+Each tweet occupies roughly 1 KB in the primary store, but with indexes and replication the storage multiplier is 3-5x. We store tweets in a distributed key-value store (Cassandra, ScyllaDB, or DynamoDB) partitioned by tweet_id.
+
+The sharding key decision is critical:
+
+- **Shard by tweet_id**: Writes are evenly distributed across nodes. But reading all tweets for a user requires a scatter-gather query across every shard. This is slow.
+- **Shard by user_id**: Reads for a single user hit one shard (fast). But a celebrity with millions of tweets creates a hot partition.
+
+The solution: shard by `(user_id % num_shards)` for the primary tweet store, then add a secondary index on `(user_id, created_at)` in a separate table with a more granular sharding scheme.
+
+<TweetStorageDemo client:visible />
+
+The demo shows how tweets are stored, how sharding distributes load, and how the timeline cache bridges the gap between write and read paths.
+
+## Fan-out: Push vs Pull
+
+Here is the central architectural decision for any social feed system. When Alice posts a tweet, how do Bob and Charlie (her followers) see it?
+
+Two fundamental strategies exist:
+
+**Fan-out on Write (Push)**: When Alice tweets, the system immediately copies the tweet ID into every follower's timeline cache. Reading the timeline is a single cache lookup -- O(1). The cost is paid at write time.
+
+**Fan-out on Read (Pull)**: When Bob opens his timeline, the system queries all users Bob follows, fetches their recent tweets, merges them by timestamp, and returns the result. The cost is paid at read time.
+
+**Hybrid**: Most users get push. Celebrities (with millions of followers) get pull. When a celebrity tweets, the tweet is not fanned out. Followers pull that celebrity's tweets at timeline load time and merge them with their precomputed feed.
+
+<TimelineFanoutDemo client:visible />
+
+The hybrid approach is what Twitter actually uses. The key insight is that push fanout does not scale for celebrities. If Taylor Swift tweets to 100M followers, push fanout generates 100M writes to the timeline table. That would saturate the database for a single tweet. Instead, celebrity tweets are pulled at read time.
+
+Twitter's Fanout Service maintains two tiers:
+
+- **Tier 1 (push)**: Users with fewer than 30,000 followers get push fanout. Their tweets are immediately written to all followers' timelines.
+- **Tier 2 (pull)**: Users with more than 30,000 followers get pull fanout. Their tweets are stored normally, and followers' timeline services fetch them during timeline generation.
+
+The threshold is configurable and accounts for tweet rate, not just follower count. A user with 50K followers who tweets once a day might stay in push. A user with the same count who tweets 100 times a day gets moved to pull.
+
+## Timeline Generation
+
+When you open Twitter, your timeline must appear in under 500ms. The timeline service orchestrates three data sources:
+
+1. **Precomputed cache (push)**: Tweet IDs from users in the push tier. Stored in Redis as a sorted set keyed by `timeline:{user_id}`. Covers 90%+ of timeline content.
+
+2. **Pull tier tweets**: Tweet IDs from celebrity followed users in the pull tier. Fetched on the fly by querying the tweet service for recent tweets from those specific users.
+
+3. **Real-time inserts**: Tweets that arrived in the last few seconds but have not yet been flushed to the cache. Stored in a small in-memory buffer.
+
+The timeline service merges these three sources, deduplicates, sorts by created_at, and returns the top N tweets.
+
+<TwitterTimelineDemo client:visible />
+
+Caching strategy for timelines:
+
+- **L1 (Redis)**: Holds precomputed timeline entries. TTL of 24 hours. Warmed on tweet fanout.
+- **L2 (CDN/edge)**: Timeline pages can be cached at the CDN edge for anonymous or infrequently refreshing users.
+- **Local cache**: Each timeline service instance caches the pull-tier user list for 60 seconds to avoid hammering the user service.
+
+## Trending Topics
+
+Trending topics show what the world is talking about right now. The naive approach -- count every hashtag in every tweet over the last hour -- does not scale. At 15,000 tweets/second, the hashtag count crosses 30,000 events/second.
+
+Real trending systems use approximate counting algorithms:
+
+- **Count-Min Sketch**: A probabilistic data structure that counts frequency with sub-linear memory. It can overcount but never undercounts. A 64KB sketch can track millions of distinct hashtags with 99% accuracy.
+- **HyperLogLog**: Used for cardinality estimation (how many unique users are tweeting about a topic), not frequency.
+
+Twitter's actual Trending algorithm considers three factors:
+
+1. **Velocity**: How quickly a hashtag's frequency is accelerating, not just its absolute count
+2. **Novelty**: Hashtags that trended recently are deprioritized to surface fresh topics
+3. **Diversity**: Topics should trend across multiple geographic regions and user segments
+
+<TrendingTopicsDemo client:visible />
+
+The demo shows how tweets stream in, hashtags are extracted, and the top N trending topics update in real-time. The time window slider controls how far back we look -- shorter windows show breaking news, longer windows show sustained trends.
+
+The approximate count column demonstrates the trade-off: exact counting uses more memory but gives precise results. Count-Min Sketch uses a fraction of the memory with a small margin of error.
+
+## Tweet Search
+
+Searching 500M+ tweets in under 200ms requires an inverted index. When a tweet is posted, the search service tokenizes the content, removes stop words, and updates an inverted index stored in Elasticsearch.
+
+The inverted index maps each word to the list of tweet IDs containing that word:
+
+```
+"system" -> [tweet_1001, tweet_1002, tweet_1003]
+"design" -> [tweet_1001, tweet_1004]
+"twitter" -> [tweet_1002, tweet_1005, tweet_1006]
+```
+
+A search for "system design" intersects the posting lists: tweet_1001 contains both words and is the top result.
+
+Ranking uses a composite score:
+
+```
+score = 0.4 * text_relevance + 0.3 * recency_score + 0.2 * follower_boost + 0.1 * engagement_boost
+```
+
+- **Text relevance**: BM25 score from Elasticsearch
+- **Recency score**: Exponential decay based on tweet age
+- **Follower boost**: Log of the author's follower count
+- **Engagement boost**: Normalized likes + retweets in the first hour
+
+<TwitterSearchDemo client:visible />
+
+The demo lets you type a query and see real-time search results with their scoring breakdown. The inverted index panel shows which terms match and the document frequency for each.
+
+## Caching Strategy
+
+Caching is the backbone of a performant social feed. We use a multi-layered approach:
+
+**Timeline Cache (Redis)**: The most important cache. Stores precomputed tweet ID lists for each user. Key pattern: `timeline:{user_id}` stored as a sorted set sorted by timestamp. TTL of 24 hours. Updated synchronously during fanout.
+
+**Tweet Content Cache (Redis/Memcached)**: Individual tweet objects. Key pattern: `tweet:{tweet_id}`. Cache-aside pattern -- timeline service reads tweet IDs, then batch-fetches tweet content from cache. Misses hit the database and populate the cache.
+
+**User Cache (Redis)**: User profiles and follower/following lists. Key patterns: `user:{user_id}`, `followers:{user_id}`, `following:{user_id}`. Stored as Redis sets for efficient intersection and union.
+
+**Search Cache (Elasticsearch)**: The inverted index itself is the cache layer. Elasticsearch's internal caching provides sub-100ms search latency for most queries.
+
+Cache population strategies:
+
+- **Write-through**: On tweet creation, write to both DB and cache in the same transaction. Ensures cache is always fresh but adds write latency.
+- **Write-behind**: Write to cache immediately, batch writes to DB. Higher write throughput but risk of data loss on cache failure.
+- **Cache-aside (lazy loading)**: On cache miss, fetch from DB and populate cache. Used for tweet content and user data where stale data is acceptable for short periods.
+
+For timeline cache, we use write-through for push-tier users and lazy population for pull-tier users (assembled at read time and cached for 5 minutes).
+
+## System Architecture
+
+Now we assemble all the pieces into a complete system architecture. The diagram below shows every component and the data flow when a tweet is posted.
+
+<TwitterArchitectureDemo client:visible />
+
+The architecture follows a microservices pattern. Each service owns its data and communicates through well-defined interfaces:
+
+| Service | Responsibility | Data Store |
+|---------|---------------|------------|
+| Tweet Service | Create, retrieve, delete tweets | Cassandra (tweets) |
+| Timeline Service | Generate and serve timelines | Redis (timeline cache) |
+| User Service | User profiles, follow graph | PostgreSQL (users, follows) |
+| Search Service | Index and search tweets | Elasticsearch |
+| Trending Service | Compute trending topics | Redis + Count-Min Sketch |
+| Media Service | Upload and serve images/video | Object store (S3) |
+| Notification Service | Push notifications | Kafka + WebSocket |
+
+Data flows for a tweet post:
+
+1. Client sends POST /tweet to API Gateway
+2. Gateway validates auth, forwards to Tweet Service
+3. Tweet Service stores the tweet in Cassandra
+4. Tweet Service publishes a "tweet_created" event to Kafka
+5. Timeline Fanout Service consumes the event, checks follower count:
+   - If push-tier: writes tweet_id to Redis timeline cache of all followers
+   - If pull-tier: no immediate fanout (fetched at read time)
+6. Search Service consumes the event, tokenizes content, updates Elasticsearch index
+7. Trending Service consumes the event, extracts hashtags, updates Count-Min Sketch
+8. Notification Service consumes the event, sends push notifications
+
+Timeline load flow:
+
+1. Client sends GET /timeline
+2. Timeline Service checks Redis cache for precomputed entries
+3. If entries exist, fetches tweet content from tweet content cache (batch)
+4. For pull-tier follows, queries Tweet Service for recent tweets
+5. Merges and sorts results, returns to client
+
+## Scaling Bottlenecks
+
+Every system has weak points. Here are the critical bottlenecks for a social feed at scale:
+
+**Celebrity Fanout**: A single tweet from a major celebrity can generate 100M+ timeline writes. The hybrid approach mitigates this, but if a celebrity switches from pull to push tier temporarily, the fanout service must rate-limit gracefully. Solution: per-user write quotas and a dedicated fanout worker pool for high-profile accounts.
+
+**Hot Partition on Followers**: Users with viral tweets get millions of likes and retweets simultaneously. The `likes` table sharded by tweet_id creates a hot partition on that tweet's shard. Solution: shard likes by `(tweet_id % shards)` and use in-memory counters (Redis) for the first hour, then flush to the database.
+
+**Timeline Cache Stampede**: When a cache entry expires, multiple requests simultaneously try to regenerate it. This can cascade. Solution: use lock-around regeneration (only one request regenerates, others wait) and always-return-stale (serve stale data while asynchronously refreshing).
+
+**Search Indexing Lag**: Ingesting 15,000 tweets/second into Elasticsearch creates indexing backpressure. Solution: batch indexing (flush every 5 seconds or every 10,000 docs) and use separate index nodes from query nodes.
+
+**Cross-Region Replication**: A user in Europe follows a user in the US. The tweet must propagate across regions. Solution: use a global message bus (Kafka with cross-region mirroring). Each region independently computes trending topics and search indexes.
+
+## Data Consistency and Trade-offs
+
+A social feed system operates in the eventual consistency spectrum. Here is where we relax consistency:
+
+**Timeline Consistency**: If Alice follows Bob, Bob's tweet appears in Alice's timeline within 5 seconds. We do not guarantee immediate visibility. The fanout service processes events asynchronously through Kafka. This is a deliberate trade-off: we accept stale timelines for write throughput.
+
+**Like Counts**: Like counts on tweets are approximated for the first few minutes using Redis counters. The exact count in Cassandra may lag by up to 60 seconds. For a social feed, 99.9% accuracy is indistinguishable from 100% at the UI level.
+
+**Search Freshness**: New tweets appear in search results within 10 seconds (Elasticsearch refresh interval). This is acceptable -- users do not expect real-time search.
+
+**Delete Propagation**: Deleting a tweet must remove it from all timelines, search indexes, and trending computations. This is the hardest consistency problem. We use a tombstone approach: the deleted tweet is marked in the primary store, and a deletion event propagates through Kafka. Timeline cache entries are lazily cleaned up (checked on read).
+
+The CAP theorem applies here: we prioritize availability and partition tolerance over strict consistency. Eventual consistency with a 5-second window is the right trade-off for a social feed.
+
+## Summary
+
+We have designed a Twitter-scale social feed system from the ground up. The key architectural decisions are:
+
+1. **Hybrid fanout**: Push for regular users, pull for celebrities. Balances write cost against read latency.
+2. **Precomputed timeline cache**: Tweet IDs stored in Redis sorted sets for O(log N) timeline reads.
+3. **Approximate counting for trending**: Count-Min Sketch and HyperLogLog make trending feasible at 15K tweets/second.
+4. **Inverted index for search**: Elasticsearch provides sub-200ms search across 500M+ tweets.
+5. **Multi-layered caching**: Redis for timelines, memcached for tweet content, ES cache for search.
+6. **Eventual consistency with Kafka**: Asynchronous event propagation for fanout, search indexing, and trending.
+7. **Microservices architecture**: Each service independently scalable and owns its data store.
+
+The system handles 500M tweets/day, 20B timeline views/day, and 200M DAU with P99 timeline latency under 500ms. It scales horizontally by adding more service instances, cache nodes, and database shards.
+
+Self-check questions to test your understanding:
+
+- Why does push fanout not work for celebrity accounts? What is the threshold?
+- How does the timeline service merge push and pull data sources?
+- What data structure does Twitter use for approximate trending counts?
+- Why is cursor-based pagination preferred over offset-based for timelines?
+- What happens when a Redis timeline cache entry expires?
