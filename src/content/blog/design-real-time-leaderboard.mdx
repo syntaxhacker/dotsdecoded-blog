@@ -1,0 +1,537 @@
+---
+title: "Design a Real-Time Leaderboard: Redis Sorted Sets, Ranking, and Scaling"
+description: "A complete system design walkthrough for a real-time leaderboard — Redis sorted sets for ranking, score updates, tie-breaking, global vs friend leaderboards, and scaling to millions of players."
+date: 2026-05-17T01:00:00
+tags: ["system-design", "interview", "leaderboard", "redis", "real-time", "gaming", "design-problem"]
+---
+
+import LeaderboardRequirementsDemo from '../../components/demos/LeaderboardRequirementsDemo'
+import SortedSetDemo from '../../components/demos/SortedSetDemo'
+import LeaderboardPaginationDemo from '../../components/demos/LeaderboardPaginationDemo'
+import LeaderboardArchitectureDemo from '../../components/demos/LeaderboardArchitectureDemo'
+
+You are in a system design interview. The interviewer says: "Design a real-time leaderboard for a competitive mobile game with millions of players." Where do you start?
+
+A leaderboard is not just a sorted list of scores. It is a live ranking system that updates every time a player finishes a match. It must handle bursts of writes during peak hours, serve reads with sub-50ms latency, and support features like friend-only views, percentile badges, and daily/weekly resets.
+
+This is the full walkthrough -- from the first requirements question to sharding at 100 million players.
+
+## Understanding the Problem
+
+Think of a leaderboard like a race track scoreboard. Runners cross the finish line, and their names appear on the board in order. Now imagine the race never ends -- runners keep crossing, the board keeps updating, and millions of spectators want to see the current standings at any instant.
+
+Every competitive game has one. Fortnite shows your rank among all players in your region. Wordle shows how your guess count compares to everyone else. Duolingo shows your daily XP vs your friends. Each is a leaderboard with different constraints:
+
+| Example | Scale | Update Frequency | Reset Period |
+|---------|-------|-----------------|--------------|
+| Fortnite Battle Royale | Millions of players | Per match (every 5-20 min) | Seasonal (months) |
+| Daily Wordle | Tens of millions | Once per day per user | Daily |
+| Duolingo XP | Hundreds of millions | Per lesson (every 2-5 min) | Weekly |
+| Fantasy Sports | Millions of teams | Per game event (every few seconds) | Weekly |
+
+The core abstraction is the same: a **sorted collection** where each member has a numeric score, and members are ranked by score descending. The challenge is making this work at scale with real-time writes.
+
+## Requirements Gathering
+
+Every system design interview starts with clarity. What are we actually building? Ask these questions before writing a single line of code.
+
+<LeaderboardRequirementsDemo client:visible />
+
+### Functional Requirements
+
+1. **Real-time score updates** -- scores must reflect in the leaderboard within one second of submission. Players compete live and expect instant feedback on rank changes.
+2. **Global ranking** -- every player ranked by score worldwide. The default view. Handles millions of entries.
+3. **Friend-only leaderboard** -- a player sees rankings among their friends. A subset filtered by social graph.
+4. **Top-N + rank-around-me** -- most players check the top 100. A player at rank 45,000 wants to see the 20 players around them.
+5. **Percentile distribution** -- "you are in the top 5%." Derived from total player count and rank.
+6. **Reset periods** -- daily, weekly, and seasonal leaderboards that reset independently.
+
+### Non-Functional Requirements
+
+1. **Sub-50ms p99 read latency** -- leaderboard queries complete in under 50 milliseconds at the 99th percentile.
+2. **100K+ writes per second** -- peak hours see millions of concurrent score submissions.
+3. **Strong consistency on reads** -- a player who just scored must see their correct rank immediately. Eventual consistency confuses players.
+4. **High availability** -- the leaderboard must never go down during tournaments or events.
+
+### Out of Scope
+
+For this interview, we are not building: player authentication, anti-cheat detection, matchmaking, or detailed analytics dashboards. Mentioning these shows the interviewer you understand the boundaries.
+
+## Leaderboard Types
+
+Different leaderboard types have different query patterns. The right data structure supports all of them without separate infrastructure.
+
+**Global leaderboard:** All players ranked by score. This is a single Redis sorted set. Query with `ZREVRANGE leaderboard:global 0 99 WITHSCORES` for the top 100. For rank-around-me, get the player's rank with `ZREVRANK`, then `ZREVRANGE` around that position.
+
+**Friend leaderboard:** A subset of the global set, filtered to only the player's friends. Redis handles this with `ZINTERSTORE` or `ZUNIONSTORE`. Compute the intersection of the global leaderboard with a friend-list set, then read from the temporary result.
+
+```
+redis-cli ZINTERSTORE temp:leaderboard:friends 2 leaderboard:global friends:user_42 WEIGHTS 1 0
+redis-cli ZREVRANGE temp:leaderboard:friends 0 -1 WITHSCORES
+redis-cli DEL temp:leaderboard:friends
+```
+
+**Percentile distribution:** Use `ZCARD` to get total player count, `ZREVRANK` to get the player's position. Percentile = (rank / total) * 100. Redis does both in O(1) time.
+
+```python
+def get_percentile(user_id: str) -> float:
+    total = r.zcard('leaderboard:global')
+    rank = r.zrevrank('leaderboard:global', user_id)
+    if total == 0 or rank is None:
+        return 100.0
+    return (rank / total) * 100
+```
+
+## Redis Sorted Sets
+
+Redis sorted sets are the ideal data structure for leaderboards. Every member has a score. Members are always sorted by score. All operations are O(log N).
+
+The shell commands are intuitive:
+
+```bash
+# Add or update a player's score
+redis-cli ZADD leaderboard:global 2450 "player_42"
+
+# Add multiple players
+redis-cli ZADD leaderboard:global 3200 "player_17" 1800 "player_99" 2100 "player_55"
+
+# Get a player's rank (0-indexed, highest score = rank 0)
+redis-cli ZREVRANK leaderboard:global "player_17"
+# (integer) 0
+
+# Get top 5 players and their scores
+redis-cli ZREVRANGE leaderboard:global 0 4 WITHSCORES
+# 1) "player_17"
+# 2) "3200"
+# 3) "player_42"
+# 4) "2450"
+
+# Get bottom 5 (ascending order)
+redis-cli ZRANGE leaderboard:global 0 4 WITHSCORES
+
+# Increment a player's score mid-game
+redis-cli ZINCRBY leaderboard:global 50 "player_42"
+
+# Get a player's current score
+redis-cli ZSCORE leaderboard:global "player_42"
+# "2500"
+
+# Count total players
+redis-cli ZCARD leaderboard:global
+# (integer) 3
+
+# Get score range (e.g., players with score between 2000 and 3000)
+redis-cli ZCOUNT leaderboard:global 2000 3000
+# (integer) 2
+```
+
+Python code wraps these into a clean service layer:
+
+```python
+import redis
+
+r = redis.Redis(host='leaderboard-redis', port=6379, decode_responses=True)
+
+LEADERBOARD_KEY = 'leaderboard:global'
+
+def submit_score(user_id: str, score: float) -> int:
+    r.zadd(LEADERBOARD_KEY, {user_id: score})
+    rank = r.zrevrank(LEADERBOARD_KEY, user_id)
+    return (rank or 0) + 1
+
+def get_top_n(n: int = 100) -> list[dict]:
+    entries = r.zrevrange(LEADERBOARD_KEY, 0, n - 1, withscores=True)
+    return [
+        {'rank': i + 1, 'player': name, 'score': int(score)}
+        for i, (name, score) in enumerate(entries)
+    ]
+
+def get_rank_around(user_id: str, window: int = 10) -> list[dict]:
+    rank = r.zrevrank(LEADERBOARD_KEY, user_id)
+    if rank is None:
+        return []
+    start = max(0, rank - window)
+    end = rank + window
+    entries = r.zrevrange(LEADERBOARD_KEY, start, end, withscores=True)
+    return [
+        {'rank': start + i + 1, 'player': name, 'score': int(score)}
+        for i, (name, score) in enumerate(entries)
+    ]
+
+def get_player_rank(user_id: str) -> int | None:
+    rank = r.zrevrank(LEADERBOARD_KEY, user_id)
+    return (rank or 0) + 1 if rank is not None else None
+```
+
+The `ZREVRANGE` command is the most important -- it returns members in descending score order. `ZRANGE` returns ascending. Both accept `WITHSCORES` to include the score value.
+
+## Skiplist Internals
+
+How does a sorted set maintain order with every insert? Redis uses a **skiplist** -- a probabilistic data structure that gives O(log N) insert, delete, and search time.
+
+A skiplist is a hierarchy of linked lists. The bottom level (Level 0) contains every element in sorted order. Higher levels act as "express lanes" that skip over groups of elements, letting the search zoom past them.
+
+Here is how it works: to find rank 6 in a set of 10 members, the search starts at the top express lane. It moves right until it finds a node whose value is >= the target, then drops down one level and repeats. In O(log N) steps, it reaches the exact node.
+
+The interactive demo below lets you select a player, change their score, and watch the entry move in the sorted set. The skiplist visualization shows the search path Redis takes to find that player's position.
+
+<SortedSetDemo client:visible />
+
+The beauty of the skiplist: no rebalancing needed. Unlike a balanced tree (AVL or Red-Black), the skiplist's structure is randomized. Nodes are promoted to higher levels with probability 1/2, giving an expected O(log N) performance without complex rotation logic. Redis picked the skiplist over a B-tree specifically because it is simpler to implement, lock-free operations are easier, and memory overhead is lower for in-memory workloads.
+
+## Score Write Path
+
+Every time a player finishes a match, their score needs to reach the leaderboard. Here is the full write path:
+
+1. Game client sends `POST /api/scores` with `{ "user_id": "player_42", "score": 2450 }`
+2. API gateway authenticates the player and rate-limits the request
+3. Score service validates the score (anti-cheat: is it below the world record? is the rate of increase plausible?)
+4. Score service calls `ZADD leaderboard:global 2450 "player_42"` on Redis
+5. If the new score enters the top 100, Redis publishes a notification to invalidate the cache
+6. Score service returns the player's new rank
+7. The score is queued for async persistence to the database
+
+```python
+from flask import Flask, request, jsonify
+import redis
+import json
+
+app = Flask(__name__)
+r = redis.Redis(decode_responses=True)
+LEADERBOARD_KEY = 'leaderboard:global'
+
+@app.post('/api/scores')
+def submit_score():
+    body = request.get_json()
+    user_id = body['user_id']
+    score = body['score']
+
+    # Anti-cheat: basic validation
+    if score < 0 or score > 100000:
+        return jsonify({'error': 'invalid score'}), 400
+
+    # Write to Redis sorted set
+    r.zadd(LEADERBOARD_KEY, {user_id: score})
+    rank = r.zrevrank(LEADERBOARD_KEY, user_id)
+
+    # Check if this score enters top 100
+    top_score = r.zrevrange(LEADERBOARD_KEY, 99, 99, withscores=True)
+    if top_score and score >= top_score[0][1]:
+        r.delete('cache:leaderboard:top100')
+
+    # Queue async DB persistence
+    r.lpush('queue:score_persist', json.dumps({
+        'user_id': user_id, 'score': score, 'ts': time.time()
+    }))
+
+    return jsonify({'rank': (rank or 0) + 1}), 200
+```
+
+The write path must be fast. Redis handles 100K+ operations per second on a single node, so the ZADD call takes under a millisecond. The bottleneck is usually the API gateway and score validation -- these should be stateless and horizontally scalable.
+
+## Leaderboard Read Path
+
+Reading the leaderboard is more frequent than writing (read-to-write ratio is often 100:1 or higher). The read path must be optimized for sub-50ms latency at P99.
+
+The typical query patterns and their Redis commands:
+
+| Query | Redis Command | Complexity |
+|-------|--------------|------------|
+| Top 100 | `ZREVRANGE key 0 99 WITHSCORES` | O(log N + 100) |
+| Rank around me | `ZREVRANK` + `ZREVRANGE` | O(log N) + O(log N + M) |
+| Single player rank | `ZREVRANK` | O(log N) |
+| Player count | `ZCARD` | O(1) |
+| Percentile | `ZREVRANK` + `ZCARD` | O(log N) + O(1) |
+
+The demo below simulates a leaderboard with 1000 players. Try the pagination controls: top 100, jump to a specific rank, or browse page by page.
+
+<LeaderboardPaginationDemo client:visible />
+
+```python
+@app.get('/api/leaderboard')
+def get_leaderboard():
+    type_ = request.args.get('type', 'top100')
+    user_id = request.args.get('user_id')
+    page = int(request.args.get('page', 1))
+    page_size = 20
+
+    if type_ == 'top100':
+        return jsonify(get_top_n(100))
+
+    elif type_ == 'around_me' and user_id:
+        rank = r.zrevrank(LEADERBOARD_KEY, user_id)
+        if rank is None:
+            return jsonify({'error': 'player not found'}), 404
+        start = max(0, rank - 10)
+        end = rank + 10
+        entries = r.zrevrange(LEADERBOARD_KEY, start, end, withscores=True)
+        return jsonify({
+            'your_rank': rank + 1,
+            'entries': [
+                {'rank': start + i + 1, 'player': name, 'score': int(score)}
+                for i, (name, score) in enumerate(entries)
+            ]
+        })
+
+    elif type_ == 'page':
+        start = (page - 1) * page_size
+        end = start + page_size - 1
+        entries = r.zrevrange(LEADERBOARD_KEY, start, end, withscores=True)
+        total = r.zcard(LEADERBOARD_KEY)
+        return jsonify({
+            'page': page,
+            'total_pages': (total + page_size - 1) // page_size,
+            'entries': [
+                {'rank': start + i + 1, 'player': name, 'score': int(score)}
+                for i, (name, score) in enumerate(entries)
+            ]
+        })
+
+    return jsonify({'error': 'invalid type'}), 400
+```
+
+## Caching Top-N
+
+Every leaderboard follows a power-law distribution: 90% of views hit the top 100. Caching the top 100 eliminates Redis calls for the most common query.
+
+The cache strategy is straightforward:
+
+- **Key:** `cache:leaderboard:top100`
+- **Value:** JSON string of the pre-computed top 100
+- **TTL:** 30 seconds (short enough that staleness is invisible to players)
+- **Invalidation:** When any score enters or leaves the top 100, delete the cache key immediately
+
+```python
+CACHE_KEY = 'cache:leaderboard:top100'
+CACHE_TTL = 30
+
+def get_top_n_cached(n: int = 100) -> list[dict]:
+    cached = r.get(CACHE_KEY)
+    if cached:
+        return json.loads(cached)
+
+    entries = r.zrevrange(LEADERBOARD_KEY, 0, n - 1, withscores=True)
+    result = [
+        {'rank': i + 1, 'player': name, 'score': int(score)}
+        for i, (name, score) in enumerate(entries)
+    ]
+    r.setex(CACHE_KEY, CACHE_TTL, json.dumps(result))
+    return result
+
+def invalidate_top_cache_if_needed(new_score: float):
+    # Check if new score is >= the current 100th place score
+    bottom_top = r.zrevrange(LEADERBOARD_KEY, 99, 99, withscores=True)
+    if bottom_top and new_score >= bottom_top[0][1]:
+        r.delete(CACHE_KEY)
+```
+
+For the rank-around-me query (which is player-specific), caching is less effective since every player has a different "around me" window. But these queries are much rarer -- a player checks their rank once per session, while the top 100 is viewed thousands of times per second during tournaments.
+
+## Tie-Breaking with Timestamps
+
+Two players with the same score need a deterministic ordering rule. Common tie-breakers:
+
+| Tie-breaker | Rule | Implementation |
+|-------------|------|---------------|
+| First to achieve | Earlier submission ranks higher | Encode timestamp as fractional part of score |
+| Last to achieve | Later submission ranks higher | Encode inverted timestamp |
+| Secondary metric | Lower deaths, higher accuracy | Encode secondary metric as fractional part |
+| Random | Deterministic but arbitrary | Append random tiebreaker bits |
+
+The most common approach: **encode the submission timestamp into the score**. Since Redis sorted sets sort by score numerically, we embed the tiebreaker as a fractional decimal.
+
+```python
+import time
+
+def submit_score_with_tiebreak(user_id: str, base_score: float):
+    # Tiebreaker: earlier submission ranks higher
+    # We encode: score = base_score + (1 - timestamp / MAX_TIMESTAMP)
+    # This gives earlier timestamps a higher fractional part
+    MAX_TS = 10_000_000_000  # far in the future, ~2316
+    now = time.time()
+    tiebreaker = 1 - (now / MAX_TS)
+    combined = round(base_score + tiebreaker, 10)
+    r.zadd(LEADERBOARD_KEY, {user_id: combined})
+```
+
+The fractional part is tiny (less than 1.0) so it never pushes a player past the next integer score boundary unless scores are identical. Since Redis sorted sets use double-precision floats, the 10 decimal places are well within the precision budget.
+
+For more complex tie-breaking (e.g., fewest deaths, then earliest achievement), you can use a compound score:
+
+```python
+def compound_score(base_score: int, deaths: int, timestamp: float) -> float:
+    # Format: base_score.deaths_timestamp
+    # Since ZREVRANGE sorts descending, we want:
+    # - Higher base_score first
+    # - Fewer deaths first (invert: max_deaths - deaths)
+    MAX_DEATHS = 1000
+    MAX_TS = 10_000_000_000
+    deaths_part = (MAX_DEATHS - deaths) / MAX_DEATHS
+    time_part = 1 - (timestamp / MAX_TS)
+    return round(base_score + deaths_part * 0.001 + time_part * 0.000001, 12)
+```
+
+## System Architecture
+
+Putting it all together: the game client communicates through an API gateway to a score service, which talks to Redis for ranking, a cache layer for top-N results, and a database for persistence.
+
+<LeaderboardArchitectureDemo client:visible />
+
+The architecture separates two concerns:
+
+**Score submission path (write-heavy):** Game client sends score to API gateway. Score service validates, writes to Redis sorted set, checks cache invalidation, and queues async persistence to the database. The response returns the player's new rank immediately.
+
+**Leaderboard query path (read-heavy):** Game client requests leaderboard data. Score service checks the cache first. On cache hit, return immediately. On cache miss, query Redis sorted set with ZREVRANGE, populate the cache, and return. The database is never queried for real-time leaderboard reads -- it only serves historical data.
+
+## Sharding Leaderboards
+
+A single Redis sorted set with 10 million entries is about 400MB of memory. At 100 million entries, it is 4GB -- still feasible on a single Redis instance. But at 500 million entries and 200K writes/second, you need to shard.
+
+The sharding strategy: **shard by player ID hash**. Each shard holds a subset of players. The top 100 globally must be computed by querying all shards and merging.
+
+```python
+import heapq
+
+NUM_SHARDS = 16
+
+def shard_key(user_id: str) -> int:
+    return hash(user_id) % NUM_SHARDS
+
+def submit_score_sharded(user_id: str, score: float) -> int:
+    shard = shard_key(user_id)
+    r = redis_client(shard)
+    r.zadd(f'leaderboard:shard:{shard}', {user_id: score})
+    rank = r.zrevrank(f'leaderboard:shard:{shard}', user_id)
+    return (rank or 0) + 1
+
+def get_global_top_n(n: int = 100) -> list[dict]:
+    heap = []
+    for shard in range(NUM_SHARDS):
+        r = redis_client(shard)
+        entries = r.zrevrange(f'leaderboard:shard:{shard}', 0, n - 1, withscores=True)
+        for name, score in entries:
+            heapq.heappush(heap, (-score, name))
+
+    result = []
+    seen = set()
+    while len(result) < n and heap:
+        neg_score, name = heapq.heappop(heap)
+        if name not in seen:
+            seen.add(name)
+            result.append({'rank': len(result) + 1, 'player': name, 'score': int(-neg_score)})
+    return result
+```
+
+The merge operation uses a min-heap across all shards. With 16 shards, this is 16 `ZREVRANGE` calls (each O(log N_shard + 100)) plus a heap merge of 1600 entries. Total time: 2-5ms with Redis on local network.
+
+**Consistent hashing** is essential for sharding. When you add or remove shards, only 1/N of the keys need to move instead of all of them. This allows resharding without downtime.
+
+For friend leaderboards in a sharded setup, you need to query the specific shard for each friend:
+
+```python
+def get_friend_leaderboard(user_id: str, friend_ids: list[str]) -> list[dict]:
+    scores = []
+    for fid in friend_ids:
+        shard = shard_key(fid)
+        r = redis_client(shard)
+        score = r.zscore(f'leaderboard:shard:{shard}', fid)
+        if score is not None:
+            scores.append((fid, score))
+    scores.sort(key=lambda x: -x[1])
+    return [
+        {'rank': i + 1, 'player': name, 'score': int(score)}
+        for i, (name, score) in enumerate(scores)
+    ]
+```
+
+## Approximate Ranking for Massive Scale
+
+At truly massive scale (100M+ players), even sharded sorted sets become expensive. Every new player must be inserted into the set, consuming memory and write throughput.
+
+For features that do not need exact ranking (e.g., "what percentile am I in?"), you can use **probabilistic data structures**:
+
+**Count-Min Sketch:** Estimates the number of players above a given score using sublinear memory. Trade-off: O(1) memory, O(1) time, but the estimate has a tunable error margin.
+
+```bash
+# Redis Stack has Count-Min Sketch built in
+redis-cli CMS.INITBYPROB player_skill_dist 0.01 0.99
+redis-cli CMS.INCRBY player_skill_dist "player_42" 2450
+redis-cli CMS.QUERY player_skill_dist "player_42"
+```
+
+**Approximate percentile with t-digest:** Redis Stack also provides the t-digest data structure, which computes approximate percentiles with high accuracy at the tails (where leaderboard players care most).
+
+For daily or weekly leaderboards where exact ranking matters only for the top 1%, you can use a hybrid approach: maintain exact rankings in a sorted set for the top 10,000 players, and use approximate structures for everyone else. Players outside the top 10,000 see a percentile range ("Top 25%") instead of an exact rank.
+
+## Data Resets and Persistence
+
+Leaderboards reset on daily/weekly/seasonal cycles. The key naming convention isolates each period:
+
+```
+leaderboard:daily:2026-05-17
+leaderboard:weekly:2026-W20
+leaderboard:seasonal:2026-summer
+```
+
+When a new period starts, write to the new key. The old key remains for historical queries and eventually expires.
+
+```python
+from datetime import datetime
+
+def daily_key() -> str:
+    return f"leaderboard:daily:{datetime.utcnow().strftime('%Y-%m-%d')}"
+
+def weekly_key() -> str:
+    return f"leaderboard:weekly:{datetime.utcnow().strftime('%Y-W%W')}"
+
+def submit_score(user_id: str, score: float):
+    r.zadd(daily_key(), {user_id: score})
+    r.zadd(weekly_key(), {user_id: score})
+    r.zadd('leaderboard:global', {user_id: score})
+```
+
+### Persistence
+
+Redis is in-memory -- data is lost on restart unless you configure persistence. Two options:
+
+- **RDB (snapshot):** Periodic point-in-time snapshots. Good for recovery from catastrophic failure. Loss of up to the configured save interval (e.g., 5 minutes) of data.
+- **AOF (append-only file):** Logs every write operation. Replay on restart to reconstruct state. Minimal data loss (fsync every second). Higher overhead.
+
+For leaderboards, use **both** (Redis calls this `aof-use-rdb-preamble`). RDB for fast recovery, AOF for durability. The combination gives you at-most-1-second of data loss with sub-second recovery for a 10GB dataset.
+
+For long-term history, periodically snapshot the Redis sorted set to PostgreSQL or S3:
+
+```python
+import json
+
+def archive_leaderboard(key: str):
+    entries = r.zrevrange(key, 0, -1, withscores=True)
+    archive = [
+        {'player': name, 'score': int(score), 'rank': i + 1}
+        for i, (name, score) in enumerate(entries)
+    ]
+    # Store in S3 or PostgreSQL
+    s3.put_object(
+        Bucket='leaderboard-archives',
+        Key=f'{key}.json',
+        Body=json.dumps(archive)
+    )
+    # Expire the Redis key after archiving
+    r.expire(key, 86400)  # TTL 1 day for old period
+```
+
+## Summary
+
+A real-time leaderboard is fundamentally a sorted collection problem. Redis sorted sets solve it elegantly with O(log N) operations and sub-millisecond latency. The key design decisions:
+
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Data structure | Redis sorted set (skiplist) | O(log N) insert/query, simple API |
+| Caching | Top-N in Redis string with TTL | 90% of views hit top 100 |
+| Tie-breaking | Encode timestamp as score fraction | Deterministic ordering, no extra data structure |
+| Sharding | Hash by player ID, heap merge | Linear scalability |
+| Resets | Key naming by period, archive old data | Clean separation, easy expiration |
+| Persistence | RDB + AOF + periodic archival | Durability without sacrificing speed |
+
+The interview checklist: start with requirements, use Redis sorted sets as the core, handle tie-breaking with timestamps, cache the top-N for reads, shard by player ID at scale, and use key naming for reset periods. Each layer adds capacity without changing the core abstraction -- a single sorted set where every player has their place.
+
