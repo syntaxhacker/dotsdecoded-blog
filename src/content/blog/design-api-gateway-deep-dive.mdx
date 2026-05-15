@@ -1,0 +1,729 @@
+---
+title: "API Gateway Deep Dive: Kong, Envoy, and the Gateway Pattern"
+description: "A comprehensive deep dive into API gateways -- routing, rate limiting, authentication, request/response transformation, circuit breaking, service discovery integration, and comparison of Kong vs Envoy vs AWS API Gateway."
+date: 2026-05-18T01:00:00
+tags: ["system-design", "interview", "api-gateway", "kong", "envoy", "backend"]
+---
+
+import GatewayRequirementsDemo from '../../components/demos/GatewayRequirementsDemo'
+import GatewayPluginChainDemo from '../../components/demos/GatewayPluginChainDemo'
+import GatewayRoutingDemo from '../../components/demos/GatewayRoutingDemo'
+import GatewayArchitectureDemo from '../../components/demos/GatewayArchitectureDemo'
+
+## What Is an API Gateway?
+
+Imagine you walk into a large office building. At the entrance, there is a front desk with a receptionist. Before you can go anywhere, the receptionist checks your ID, figures out who you are here to see, gives you a visitor badge, and points you to the right floor. You do not wander around the building opening random doors -- the receptionist handles that.
+
+An API gateway is the digital front desk. Every client request enters through the gateway, which handles authentication, routing, rate limiting, and logging before forwarding the request to the right backend service.
+
+In a microservices architecture, you might have 10, 50, or 200 separate services. Without a gateway:
+- Every client would need to know the address of every service
+- Each service would implement its own auth, rate limiting, CORS, and logging -- duplicated and inconsistent
+- Internal service endpoints would be exposed to the public internet
+- There would be no single place to enforce security policies or monitor traffic
+
+The gateway solves all of this by sitting at the boundary between clients and your internal infrastructure.
+
+What a gateway handles:
+- **Request routing** -- sends /api/users to the Users Service, /api/orders to the Orders Service
+- **Authentication** -- verifies JWT tokens, API keys, or OAuth before forwarding
+- **Rate limiting** -- prevents any single client from overwhelming your system
+- **Request/response transformation** -- adds headers, rewrites paths, converts formats
+- **Logging & monitoring** -- records every request for debugging and analytics
+- **Circuit breaking** -- stops forwarding to failing upstream services
+- **CORS handling** -- manages cross-origin requests without configuring each service
+
+Without a gateway, each of these concerns is spread across every microservice. With a gateway, they are centralized in one place. Change the auth logic once, and every route is updated.
+
+## Why Use an API Gateway?
+
+The primary reason: **separation of concerns**. Your backend services should focus on business logic -- processing orders, managing users, generating recommendations. They should not worry about authentication, rate limiting, or request logging.
+
+Consider a gateway-free architecture. Every service needs to:
+
+```python
+# Every microservice needs this boilerplate
+from flask import Flask, request, jsonify
+import jwt
+
+app = Flask(__name__)
+
+@app.before_request
+def check_auth():
+    token = request.headers.get('Authorization')
+    if not token:
+        return jsonify({'error': 'unauthorized'}), 401
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        request.user_id = payload['sub']
+    except jwt.InvalidTokenError:
+        return jsonify({'error': 'invalid token'}), 401
+
+@app.before_request
+def rate_limit():
+    client_ip = request.remote_addr
+    # Every service needs Redis and rate limiting logic
+    # This code is duplicated across N services
+
+@app.route('/api/orders', methods=['GET'])
+def get_orders():
+    # Business logic starts here
+    ...
+```
+
+Now replicate that `before_request` logic across 20 services. If the auth logic changes? You touch 20 files. If a rate limiting bug is discovered? You patch 20 services. If a new security requirement comes in? 20 more changes.
+
+With a gateway, backend services are simple:
+
+```python
+# Clean -- no auth, no rate limiting, no logging
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route('/api/orders', methods=['GET'])
+def get_orders():
+    user_id = request.headers.get('X-User-Id')  # Set by gateway
+    role = request.headers.get('X-User-Role')     # Set by gateway
+    orders = db.query('SELECT * FROM orders WHERE user_id = ?', user_id)
+    return jsonify(orders)
+```
+
+The gateway validates the token, extracts the user ID and role, and injects them as headers. The backend service reads these headers and trusts them because they came from the gateway (internal network). This is clean, consistent, and secure.
+
+Other reasons to use a gateway:
+- **Client simplification** -- mobile apps and SPAs talk to one URL, not 20. This avoids CORS issues and reduces client-side complexity.
+- **Protocol translation** -- the gateway can accept REST requests and forward them as gRPC to internal services, or vice versa.
+- **Response aggregation** -- a single client request can trigger multiple upstream calls and merge results.
+- **Canary deployments** -- route 5% of traffic to a new version of a service via header-based routing.
+- **Caching** -- serve repeated requests from the gateway cache instead of hitting the upstream service.
+
+## API Gateway vs Load Balancer vs Service Mesh
+
+These three terms are often confused. They solve different problems at different layers.
+
+**Load balancer** distributes traffic across multiple instances of the same service. Its job is spreading load and detecting server failures. It operates at L4 (IP:port) or L7 (HTTP). It does not care about auth, rate limiting, or request transformation.
+
+**API gateway** manages API access across different services. Its job is routing, auth, rate limiting, transformation, and monitoring. It operates at L7 (HTTP) and is aware of application-level concepts like users, tokens, and API versions.
+
+**Service mesh** handles internal service-to-service communication. Its job is encrypting traffic, providing observability, and implementing retries/timeouts for inter-service calls. It deploys as a sidecar proxy alongside each service instance and does not handle external client traffic.
+
+| Concern | Load Balancer | API Gateway | Service Mesh |
+|---------|--------------|-------------|--------------|
+| Traffic direction | External to service | External to internal | Internal to internal |
+| Auth | No | Yes | mTLS between services |
+| Rate limiting | No | Yes | No |
+| Routing | Same service, different instances | Different services by path | Service discovery, retries |
+| Request transform | No | Yes | No (L4 mostly) |
+| Observability | Basic (connection count) | Rich (per-route metrics) | Rich (per-call tracing) |
+| Deployment | Standalone | Standalone cluster | Sidecar per pod |
+| Examples | NLB, HAProxy | Kong, Envoy, AWS GW | Istio, Linkerd, Consul |
+
+In a typical production deployment, all three coexist:
+
+```
+Client -> CDN -> L4/L7 LB -> API Gateway Cluster -> Service Mesh (sidecar) -> Backend Services
+```
+
+The LB distributes across gateway instances. The gateway handles auth and routing. The service mesh handles inter-service encryption and retries. Each layer has a distinct job.
+
+## Gateway Patterns
+
+There are four common patterns for how a gateway is deployed, each solving a different problem.
+
+**Reverse proxy** is the simplest pattern. The gateway forwards each request to exactly one upstream service based on the request path. No aggregation, no protocol conversion. The gateway acts as a transparent pass-through with auth and rate limiting bolted on. This is the default pattern for Kong and most Envoy deployments.
+
+**Router** extends the reverse proxy with sophisticated matching rules. Routes can match on path, method, host, headers, query parameters, or any combination. The router pattern is essential for API versioning (v1 vs v2) and canary deployments (X-Canary: true). Envoy's route configuration is the gold standard here with its full HTTP request matcher.
+
+**Gateway aggregation** combines multiple upstream responses into one response. The client sends one request, the gateway fans out to several services, merges the results, and returns a single response. This is useful for dashboard pages or mobile home screens that need data from multiple sources. The trade-off: the gateway becomes tightly coupled to the response schema of each aggregated service.
+
+**Backend for Frontend** creates a dedicated gateway per client type. A mobile app gets one gateway, a web SPA gets another, and a third-party API gets a third. Each BFF is tailored to its client's needs -- the mobile gateway might return smaller payloads and merge more aggressively, while the web gateway caches heavily. This pattern was popularized by SoundCloud and is now common in large systems.
+
+| Pattern | Client Types | Aggregation | Complexity |
+|---------|-------------|-------------|------------|
+| Reverse proxy | One or many | No | Low |
+| Router | One or many | No | Medium |
+| Gateway aggregation | One | Yes | Medium-High |
+| Backend for Frontend | Multiple BFFs | Per-BFF | High |
+
+Most systems start with the reverse proxy pattern and evolve toward BFFs as different client requirements diverge. There is no shame in starting simple.
+
+## Plugin Architecture
+
+The plugin system is what makes a gateway extensible. Instead of hard-coding every feature, the gateway provides a **plugin pipeline** -- an ordered list of handlers that process each request and response.
+
+```
+Request -> Auth -> Rate Limit -> Transform -> Route -> [Upstream] -> Response -> Transform -> Log -> Client
+```
+
+Each plugin runs in sequence. A plugin can:
+- Short-circuit the pipeline (auth fails, return 401)
+- Modify the request (add headers, rewrite path)
+- Modify the response (strip headers, transform body)
+- Record data (logging, metrics)
+- Call external services (rate limit via Redis, auth via OIDC provider)
+
+Plugins operate on a **context object** that carries the request, response, and plugin-specific data through the pipeline. This context is the contract between plugins -- auth writes `user_id` to the context, rate limit writes `remaining` and `limit`, and the logger reads them both.
+
+```lua
+-- Kong plugin skeleton (Lua)
+local KongRateLimiter = {
+  PRIORITY = 901,  -- Controls order in pipeline
+  VERSION = "1.0",
+}
+
+function KongRateLimiter:access(conf)
+  -- Runs in the "access" phase (before upstream call)
+  local client_id = kong.client.get_consumer().id
+  local key = "ratelimit:" .. client_id
+
+  local current, ttl = kong.redis:eval([[
+    local c = redis.call('INCR', KEYS[1])
+    if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+    if c > tonumber(ARGV[2]) then return {0, c} end
+    return {1, c}
+  ]], {key}, {conf.window, conf.limit})
+
+  if current == 0 then
+    return kong.response.exit(429, {
+      message = "API rate limit exceeded",
+      retry_after = ttl
+    })
+  end
+
+  kong.response.set_header("X-RateLimit-Remaining", conf.limit - current)
+end
+
+return KongRateLimiter
+```
+
+The plugin priority determines the execution order. Higher priority runs first. Kong's built-in plugins have defined priorities (e.g., authentication at 1000+, rate limiting at 900+, logging at 100-). When building custom plugins, you assign a priority to place it correctly in the chain.
+
+Envoy uses a similar concept called **HTTP filters**. Instead of Lua, filters are written in C++ (or WASM in newer versions). The filter chain is defined in the Envoy config:
+
+```yaml
+http_filters:
+- name: envoy.filters.http.jwt_authn
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+    providers:
+      my_provider:
+        issuer: https://auth.example.com
+        audiences:
+        - api.example.com
+        remote_jwks:
+          http_uri:
+            uri: https://auth.example.com/.well-known/jwks.json
+            cluster: jwt_cluster
+- name: envoy.filters.http.router
+```
+
+The filter chain processes requests in order. Each filter can continue to the next filter, stop iteration, or send a direct response. The `router` filter must be the last filter -- it forwards the request to the upstream cluster.
+
+## Request Lifecycle Through the Gateway
+
+A complete request lifecycle through the gateway has distinct phases. Understanding these phases is essential for debugging, performance tuning, and plugin development.
+
+1. **Connection** -- The client establishes a TCP connection. TLS handshake (if HTTPS) terminates at the gateway. The gateway may perform Client Hello inspection for SNI-based routing.
+
+2. **Request parsing** -- The gateway reads the HTTP request: method, path, headers, body. This is where request size limits and body validation happen.
+
+3. **Authentication** -- The gateway extracts credentials (Bearer token, API key, Basic auth) and validates them. JWT validation involves checking the signature, expiry (`exp`), not-before (`nbf`), and issuer (`iss`). API key lookup checks a local or Redis-backed key store.
+
+4. **Rate limiting** -- Gateway checks the client's current request count against the limit. Distributed rate limiting uses a Lua script in Redis for atomic increment-and-check. If exceeded, returns 429 with `Retry-After` header.
+
+5. **Request transformation** -- Gateway modifies the request before forwarding. Common transformations: add `X-Request-Id` (UUID), inject `X-User-Id` from auth context, strip the path prefix (`/api/v1/users` -> `/users`), add `X-Forwarded-For` and `X-Forwarded-Proto`.
+
+6. **Routing** -- Gateway matches the request against its route table. Rules are evaluated in priority order: exact path matches first, then prefix matches, then regex. The first match wins. The route specifies the upstream service URL, load balancing algorithm, and any per-route plugins.
+
+7. **Upstream call** -- Gateway forwards the request to the chosen upstream service. If the service is behind a load balancer, the gateway may perform its own load balancing (round-robin, least connections). If the upstream fails (timeout, connection refused, 5xx), the circuit breaker checks error rates.
+
+8. **Response transformation** -- Gateway modifies the upstream response before returning to the client. Strip internal headers (`X-Internal-Token`, `X-Upstream-Host`), add CORS headers, compress response body, convert format (protobuf to JSON).
+
+9. **Logging** -- Gateway records the completed request: method, path, status code, response time, client IP, request ID. This data feeds into metrics pipelines for dashboards and alerts.
+
+10. **Response** -- Gateway sends the final response to the client.
+
+Each phase has configurable timeouts. If any phase exceeds its timeout, the gateway returns a `504 Gateway Timeout` and logs the failure. The total request timeout is usually 30-60 seconds for most APIs.
+
+## Routing Strategies
+
+Routing is the core of the gateway. The route table defines how incoming requests map to upstream services. There are three primary routing strategies, and most production gateways use all three simultaneously.
+
+**Path-based routing** is the most common. The URL path determines the upstream:
+
+```yaml
+routes:
+- paths: ["/api/users/*"]
+  methods: ["GET", "POST", "PUT", "DELETE"]
+  upstream:
+    name: users-service
+    url: http://users.internal:3000
+  strip_path: true
+
+- paths: ["/api/orders/*"]
+  methods: ["GET", "POST"]
+  upstream:
+    name: orders-service
+    url: http://orders.internal:3000
+  strip_path: true
+
+- paths: ["/api/products/*"]
+  methods: ["GET"]
+  upstream:
+    name: products-service
+    url: http://products.internal:3000
+```
+
+With `strip_path: true`, the gateway removes the matched prefix before forwarding. `GET /api/users/123` becomes `GET /users/123` to the upstream. This lets each service assume it is mounted at the root.
+
+**Host-based routing** uses the `Host` header:
+
+```yaml
+routes:
+- hosts: ["api.example.com"]
+  paths: ["/*"]
+  upstream: http://api-gateway-cluster
+
+- hosts: ["admin.example.com"]
+  paths: ["/*"]
+  upstream: http://admin-service
+
+- hosts: ["docs.example.com"]
+  paths: ["/*"]
+  upstream: http://docs-service
+```
+
+This is how a single gateway instance serves multiple domains. The `Host` header tells the gateway which virtual host handles the request.
+
+**Header-based routing** enables fine-grained traffic splitting:
+
+```yaml
+routes:
+- paths: ["/api/*"]
+  headers:
+    X-Version: v2
+  upstream: http://v2-stack
+
+- paths: ["/api/*"]
+  headers:
+    X-Canary: "true"
+  upstream: http://canary-stack
+
+- paths: ["/api/*"]
+  upstream: http://stable-stack  # Default
+```
+
+This is essential for canary deployments and A/B testing. Route 5% of traffic to a canary stack by having your load balancer or client set `X-Canary: true` for a subset of requests. Monitor error rates and latency. If the canary looks good, gradually increase the percentage.
+
+Route matching priority (highest to lowest):
+1. Exact path match
+2. Longest prefix match
+3. Host + path match
+4. Header-based match
+5. Regex path match
+6. Catch-all (`/*`)
+
+## Authentication at the Gateway
+
+Centralizing authentication at the gateway is one of the strongest arguments for adopting one. Instead of every microservice implementing JWT validation, API key lookup, or OAuth token exchange, the gateway does it once.
+
+**JWT authentication** is the most common approach. The gateway validates the JWT on every request:
+
+```
+Client sends: Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+Gateway:
+  1. Decodes the JWT header to find the key ID (kid)
+  2. Fetches the public key from the JWKS endpoint (cached)
+  3. Verifies the RSA/ECDSA signature
+  4. Checks exp (not expired), nbf (not before), iss (issuer matches)
+  5. Extracts claims: sub (user_id), role, email
+  6. Injects X-User-Id and X-User-Role as downstream headers
+  7. Forwards the request to the upstream service
+```
+
+The upstream service trusts these headers because they came from the gateway on the internal network. The upstream service never sees the original JWT -- it only receives the authenticated identity.
+
+**API key authentication** is simpler:
+
+```
+Client sends: X-API-Key: sk_live_abc123
+Gateway:
+  1. Looks up the key in the key store (Redis or database)
+  2. Retrieves the associated consumer/application
+  3. Checks if the key is active and not expired
+  4. Applies rate limiting based on the key's tier
+  5. Injects X-API-Key-Id and X-Consumer-Id headers
+  6. Forwards the request
+```
+
+**OAuth 2.0 / OIDC** adds token introspection:
+
+```
+Client sends: Authorization: Bearer <opaque token>
+Gateway:
+  1. Calls the OAuth provider's introspection endpoint:
+     POST /introspect
+     Authorization: Basic <gateway-client-credentials>
+     token=<opaque-token>
+  2. Provider responds with:
+     {"active": true, "sub": "user123", "scope": "read write"}
+  3. Gateway caches the introspection result (short TTL)
+  4. Injects identity headers and forwards
+```
+
+OAuth is more complex than JWT because the gateway must make an external API call on every request (unless the response is cached). The trade-off: opaque tokens are revocable (you can invalidate them server-side), while JWTs are valid until expiry.
+
+## Rate Limiting at the Gateway Level
+
+Rate limiting at the gateway protects your entire upstream infrastructure from a single point. Unlike rate limiting in individual services, gateway-level rate limiting catches abuse before it reaches any upstream.
+
+The gateway applies rate limits at multiple scopes simultaneously:
+
+| Scope | Example | Implementation |
+|-------|---------|---------------|
+| Per consumer | 100 req/min per API key | Keyed by consumer ID |
+| Per route | 10 writes/sec on POST /orders | Keyed by route + method |
+| Per IP | 1000 req/min per IP | Keyed by client IP |
+| Global | 50000 req/s total | Keyed by a global counter |
+
+Each scope is a separate counter. A request can pass the per-IP check (100/min for this IP) but fail the per-consumer check (this API key has hit 100/min). The gateway checks all applicable limits and rejects if any one is exceeded.
+
+```lua
+-- Rate limiting check (pseudocode)
+for _, limiter in ipairs(limiters) do
+  local key = limiter.key_fn(request)
+  local allowed = redis:eval(CHECK_SCRIPT, {key}, {limiter.window, limiter.limit})
+  if not allowed then
+    return 429, {
+      message = limiter.error_message,
+      retry_after = redis:ttl(key),
+    }
+  end
+end
+```
+
+The standard approach is to use a Redis-backed Lua script for atomicity. The script increments the counter, sets the TTL on first increment, and checks if the counter exceeds the limit:
+
+```lua
+local key = KEYS[1]
+local limit = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local current = redis.call('INCR', key)
+if current == 1 then
+  redis.call('EXPIRE', key, window)
+end
+if current > limit then
+  return 0  -- Reject
+end
+return 1  -- Allow
+```
+
+Response headers inform the client about their rate limit status:
+
+```
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 87
+X-RateLimit-Reset: 1620000000
+```
+
+When the limit is exceeded:
+
+```
+HTTP/1.1 429 Too Many Requests
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 0
+Retry-After: 42
+Content-Type: application/json
+
+{"error": "rate_limit_exceeded", "message": "Too many requests. Please retry after 42 seconds."}
+```
+
+The client should parse `Retry-After` and back off. Well-behaved clients also monitor `X-RateLimit-Remaining` to slow down before hitting the limit.
+
+## Circuit Breaking at the Gateway
+
+Circuit breaking at the gateway protects upstream services from cascading failures. When a service starts failing, the gateway detects it and stops sending traffic there before the service collapses entirely.
+
+The circuit breaker has three states, defined by Michael Nygard in "Release It!":
+
+**Closed** -- normal operation. Requests flow through. The gateway tracks the number of failures (5xx errors, timeouts, connection refused) in a sliding window. As long as the failure rate stays below the threshold, the circuit stays closed.
+
+**Open** -- circuit is tripped. All requests to this upstream are immediately rejected without attempting the call. The gateway returns `503 Service Unavailable` immediately. No upstream connection is made. After a configured cooldown period (e.g., 30 seconds), the circuit transitions to half-open.
+
+**Half-open** -- probe mode. The gateway allows a limited number of requests (usually 1) to test if the upstream has recovered. If the probe succeeds, the circuit closes and full traffic resumes. If the probe fails, the circuit goes back to open and the cooldown timer restarts.
+
+```
++---------+      failure rate > threshold      +--------+
+|  CLOSED  | ---------------------------------> |  OPEN  |
++---------+                                     +--------+
+    ^                                                |
+    |                                          cooldown expires
+    |                                                |
+    |          probe succeeds                 +-----------+
+    +---------------------------------------- | HALF-OPEN |
+                                              +-----------+
+```
+
+Configuring circuit breaking:
+
+```yaml
+upstreams:
+- name: orders-service
+  circuit_breaker:
+    max_failures: 5          # Failures in the window
+    failure_window: 10       # Window in seconds
+    cooldown: 30             # Open -> Half-open wait
+    half_open_requests: 1    # Probes before closing
+    max_connections: 100     # Hard limit on concurrent connections
+```
+
+Circuit breaking is especially important when upstream services are interdependent. If the Orders Service calls the Payments Service and Payments starts failing, the Orders Service's connections pile up, consuming threads and memory. The gateway's circuit breaker catches this at the entry point, rejecting new requests to the failing service and giving it time to recover.
+
+## Gateway vs Service Mesh
+
+The line between API gateways and service meshes blurs as both evolve. Here is the practical distinction:
+
+An **API gateway** faces external traffic. It deals with concerns that matter to API consumers: authentication, rate limiting, API keys, usage plans, developer portals, and request transformation. It is the public face of your system.
+
+A **service mesh** faces internal traffic. It deals with concerns that matter to service owners: mTLS encryption, traffic shifting, circuit breaking at the service level, distributed tracing, and access control between services.
+
+The gateway handles north-south traffic (external to internal). The mesh handles east-west traffic (internal to internal).
+
+When should you use a service mesh alongside a gateway?
+
+| Scenario | Use |
+|----------|-----|
+| Fewer than 10 services | Gateway only. Service mesh adds too much complexity for the benefit. |
+| 10-50 services | Gateway + basic mesh features (mTLS). Consider Istio or Consul. |
+| 50+ services | Gateway + full mesh. Retries, timeouts, traffic splitting, observability. |
+
+In a mesh environment, the gateway becomes the ingress point:
+
+```
+Client -> Gateway (auth, rate limit, routing) -> Sidecar (mTLS) -> Service A -> Sidecar -> Service B
+```
+
+The gateway does not need mTLS to services -- that is the mesh's job. The gateway forwards the request to the sidecar proxy (localhost:15001), which encrypts and routes it to the destination service's sidecar. The gateway never sees unencrypted internal traffic.
+
+Envoy is unique in that it serves both roles. As a standalone gateway, it handles north-south traffic. As a sidecar in Istio, it handles east-west traffic. The same binary can power both the gateway and the mesh.
+
+Kong also has a mesh offering (Kong Mesh) built on Envoy, so it can bridge the gateway and mesh worlds. AWS API Gateway stays purely north-south, while AWS App Mesh (Envoy-based) handles east-west.
+
+## Deploying Gateways at Scale
+
+A single gateway instance is a single point of failure. Production deployments run a **gateway cluster** behind a load balancer.
+
+```
+                   +---> Gateway Instance 1
+                   |
+Client -> LB -----+---> Gateway Instance 2 ---> Upstream Services
+                   |
+                   +---> Gateway Instance 3
+```
+
+Each gateway instance is stateless from a request-handling perspective. Stateful data (rate limit counters, cache entries, config) lives in external stores:
+
+| Data | Store | Notes |
+|------|-------|-------|
+| Rate limit counters | Redis | Lua script for atomic operations |
+| Cache entries | Redis or local memory | TTL-based, LRU eviction |
+| Route config | etcd / Consul / DB | Watched by gateway for hot reload |
+| Plugin config | Same as route config | Per-route or per-service |
+| JWT JWKS keys | Local memory | Fetched from provider, cached until expiry |
+
+The key insight: **the gateway instances themselves are stateless**. They can be scaled horizontally by adding more instances behind the load balancer. No sticky sessions needed. No shared state between instances for request processing.
+
+Gateway deployment sizing:
+
+| Traffic Level | Instances | CPU per Instance | Memory per Instance |
+|---------------|-----------|------------------|-------------------|
+| Low (< 1K req/s) | 2 | 2 cores | 2 GB |
+| Medium (1K-10K req/s) | 4-8 | 4 cores | 4 GB |
+| High (10K-100K req/s) | 8-32 | 8 cores | 8 GB |
+| Very High (> 100K req/s) | 32+ | 16 cores | 16-32 GB |
+
+These numbers depend heavily on plugin complexity. A gateway with auth + rate limit + logging on every request handles roughly 50-70% of the throughput of a plain pass-through. Heavier plugins (request body transformation, XML parsing) reduce throughput further.
+
+**Hot reload** is a critical feature. You should be able to add a route, update a rate limit, or disable a plugin without restarting the gateway. Kong supports this via the Admin API:
+
+```bash
+# Add a new service (hot reload -- no restart)
+curl -X POST http://localhost:8001/services \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "new-service",
+    "url": "http://new-service.internal:3000"
+  }'
+
+# Add a route to the service
+curl -X POST http://localhost:8001/services/new-service/routes \
+  -H "Content-Type: application/json" \
+  -d '{
+    "paths": ["/api/new-service/*"],
+    "methods": ["GET"]
+  }'
+
+# Enable rate limiting on the route
+curl -X POST http://localhost:8001/routes/{route-id}/plugins \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "rate-limiting",
+    "config": {
+      "minute": 100,
+      "policy": "redis"
+    }
+  }'
+```
+
+Envoy achieves hot reload via the xDS API. A control plane (like Istio Pilot or Consul Server) pushes config changes to Envoy instances over gRPC streams. Envoy applies the changes without dropping connections.
+
+```bash
+# Envoy config discovery via xDS:
+# Control plane watches etcd/K8s and pushes updates to Envoy
+# Envoy reacts: new routes, new clusters, new listeners
+# Zero downtime, zero dropped connections
+```
+
+## Canary Deployments via the Gateway
+
+The gateway is the ideal place to implement canary deployments. Because all traffic passes through the gateway, you can split traffic between service versions without the client knowing.
+
+A canary deployment works like this:
+
+1. Deploy the new version of a service alongside the current version.
+2. Configure the gateway to route a small percentage of traffic (e.g., 5%) to the new version.
+3. Monitor error rates, latency, and business metrics for the canary.
+4. If the canary looks good, gradually increase the percentage (10%, 25%, 50%, 100%).
+5. If the canary fails, roll back by setting the canary weight to 0%.
+
+Header-based routing enables this at the gateway:
+
+```yaml
+routes:
+- paths: ["/api/users/*"]
+  headers:
+    X-Canary: "true"
+  upstream: http://users-v2:3000    # New version
+  weight: 5                          # 5% of traffic
+
+- paths: ["/api/users/*"]
+  upstream: http://users-v1:3000    # Current version
+  weight: 95                         # 95% of traffic (implicit)
+```
+
+Alternatively, weight-based routing without headers:
+
+```yaml
+upstreams:
+- name: users-service
+  targets:
+  - target: users-v1:3000
+    weight: 95
+  - target: users-v2:3000
+    weight: 5
+```
+
+Envoy supports this natively through weighted clusters. Kong supports it via the `upstream` entity with weighted targets.
+
+The canary should be monitored on:
+- **Error rate** -- p90 increase of 5xx responses
+- **Latency** -- p95 response time increase more than 10%
+- **Throughput** -- unusual drop in request rate
+- **Business metrics** -- conversion rate, sign-ups, order completion (requires application-level monitoring)
+
+If any of these metrics degrade, roll back by setting the canary weight to 0. The rollback is instant -- just a config change with no redeployment.
+
+## Putting It All Together
+
+A complete API gateway deployment combines every concept covered here:
+
+```
+                              +---> Redis (rate limit, cache)
+                              |
+Client -> Cloudflare CDN --> NLB (L4) --> Kong Gateway Cluster
+                                            |
+                                            +---> etcd (config store)
+                                            |
+                                            +--- Plugin Pipeline ----> Users Service
+                                                                     |-> Orders Service
+                                                                     |-> Payments Service
+                                                                     |-> Products Service
+```
+
+1. CDN handles static caching and DDoS mitigation.
+2. NLB distributes traffic across Kong instances (L4, no content inspection).
+3. Kong validates JWT tokens, applies rate limiting (Redis-backed), transforms requests, routes to the correct upstream.
+4. Each upstream service receives clean requests with user identity headers.
+5. All requests are logged and metrics are emitted to Datadog/Grafana.
+6. Circuit breakers protect failing upstream services.
+7. Canary deployments route percentage-based traffic to new versions.
+8. Config changes are applied via Admin API with zero downtime.
+
+The gateway is the single control point for all API concerns. When you need to add a new security policy, change rate limits, or roll out a new service version, you do it once -- at the gateway.
+
+## Self-Check
+
+- What is the difference between a gateway and a load balancer? Can a single tool do both?
+- Name 5 things an API gateway does that a load balancer typically does not.
+- What are the four gateway deployment patterns and when would you use each?
+- Explain the plugin pipeline. What happens when an auth plugin fails?
+- How does the gateway handle JWT authentication? What headers does it inject downstream?
+- What are the three routing strategies? Give an example use case for each.
+- How does a circuit breaker work? Explain the three states.
+- What is the difference between north-south and east-west traffic?
+- When would you add a service mesh alongside a gateway?
+- How do you deploy a gateway at scale? What external stores does it depend on?
+- How would you implement a canary deployment using the gateway?
+- What happens when a rate limit is exceeded? What headers does the gateway return?
+
+
+<GatewayRequirementsDemo client:visible />
+
+## Foundation: Plugin Architecture
+
+This is the engine that makes gateways extensible. Instead of hard-coding every feature, plugins compose into a pipeline.
+
+The order matters. Auth runs before rate limit (no point rate-limiting an unauthenticated request). Rate limit runs before routing (reject early if over limit). Request transform runs before the upstream call. Response transform runs after. Logging runs last.
+
+<GatewayPluginChainDemo client:visible />
+
+## Concept: Routing Strategies
+
+Routing is the core function of any gateway. The route table defines how incoming requests map to upstream services. Every production gateway uses all three strategies simultaneously.
+
+Path-based routing is most common. Host-based routing lets a single gateway serve multiple domains. Header-based routing enables canary deployments and A/B testing.
+
+<GatewayRoutingDemo client:visible />
+
+## Implementation: Full Architecture
+
+Every production gateway deployment has the same high-level architecture: client traffic enters through a load balancer, hits the gateway cluster, which reads configuration from a distributed store (etcd, Consul, database), applies plugins, and forwards to upstream services.
+
+The choice of gateway technology shapes your operational model. Kong gives you an admin API and plugin ecosystem. Envoy gives you raw performance and xDS-based dynamic config. AWS API Gateway gives you a fully managed service with no servers to operate.
+
+<GatewayArchitectureDemo client:visible />
+
+## Mastery: Gateway at Scale
+
+Beyond the basics, real mastery comes from understanding how gateways behave under load. The gateway must never become the bottleneck. Each plugin adds latency -- measure the p50/p95/p99 impact of each plugin in isolation. Rate limiting via Redis adds ~1ms per check. JWT validation adds ~2ms (RSA) or ~0.5ms (HMAC). Request body transformation adds proportional to payload size.
+
+The number of gateways you need depends on throughput and plugin complexity. A single Nginx-based gateway instance handles ~50K req/s with minimal plugins. With a full auth + rate limit + logging chain, expect ~30K req/s per instance. Envoy handles roughly 2x that for the same workload.
+
+Configuration management is the operational challenge. Every route, service, and plugin is configuration that must be version-controlled, reviewed, and deployed consistently. Treat gateway config as infrastructure code: store it in Git, review changes via pull requests, test in staging, and deploy with CI/CD.
+
+**Best practice checklist for production gateways:**
+
+| Practice | Why |
+|----------|-----|
+| Always run at least 2 gateway instances | Single instance = single point of failure |
+| Put a load balancer in front of the gateway | Distribute traffic, handle instance failure |
+| Use Redis for distributed rate limiting | Counters must be shared across instances |
+| Monitor gateway health (not just upstream) | Gateway can fail independently |
+| Set request timeouts at every phase | Prevent hung connections |
+| Version your gateway config | Rollback after bad config push |
+| Cache JWKS keys | Avoid fetching on every request |
+| Test plugin chains in isolation | Each plugin adds latency and failure modes |
+| Use sticky config (DB-backed or xDS) | Config must survive instance restarts |
+| Plan for 3x peak traffic | Graceful degradation under load spikes |
