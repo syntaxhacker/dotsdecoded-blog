@@ -1,0 +1,621 @@
+---
+title: "Design a Collaborative Editor: Google Docs, CRDTs, and Real-Time Sync"
+description: "A complete system design walkthrough for real-time collaborative editing -- operational transformation vs CRDTs, cursor synchronization, conflict resolution, and building a Google Docs-like experience."
+date: 2026-05-17T01:00:00
+tags: ["system-design", "interview", "collaboration", "real-time", "crdt", "design-problem"]
+---
+
+import CollabRequirementsDemo from '../../components/demos/CollabRequirementsDemo'
+import OtTransformDemo from '../../components/demos/OtTransformDemo'
+import CrdtDemo from '../../components/demos/CrdtDemo'
+import MultiCursorDemo from '../../components/demos/MultiCursorDemo'
+import CollabArchitectureDemo from '../../components/demos/CollabArchitectureDemo'
+
+Designing a real-time collaborative editor is one of the most rewarding system design problems you will encounter. It touches on distributed systems, conflict resolution, networking, data structures, and UI engineering -- all within a single system. By the end of this post, you will understand how Google Docs, Notion, and Figma handle dozens of users editing the same document simultaneously, and you will be able to design one yourself.
+
+## The Problem: Many Hands, One Document
+
+Imagine three people editing the same document at the same time. Alice types "Hello" at the beginning. Bob deletes the third word. Charlie inserts a paragraph in the middle. Every keystroke must appear on every screen within milliseconds. No one should lose their work. The document must end up in the same state for everyone, regardless of network delays or the order in which changes arrive at the server.
+
+This is the core challenge of collaborative editing: **concurrent modification of shared state**. The problem is fundamentally about distributed consensus applied to character-level operations.
+
+Think of it like a group of people physically writing on a whiteboard. If two people grab the same marker and try to write in the same spot, you get a mess. A collaborative editor is the digital equivalent -- except it must produce a clean, consistent result every time, with no human coordination.
+
+The scale is surprising. Google Docs serves billions of collaborative sessions per month. A single document can have 100+ collaborators editing simultaneously. Every keystroke generates an operation that must be propagated, transformed, and applied across all clients.
+
+## Why Naive Approaches Fail
+
+Before diving into the real solutions, let us examine why straightforward approaches do not work.
+
+**Last-writer-wins (LWW):** The server keeps one copy of the document. The last operation to arrive overwrites any conflicting changes. This is simple but unacceptable -- if Alice and Bob both edit the same paragraph, one person's work vanishes. Users lose trust immediately.
+
+**Locking:** Only one user can edit a section at a time. Google Docs experimented with this early on (paragraph-level locking). It prevents conflicts but destroys the real-time collaboration experience. Users cannot type freely. The interface becomes a battle for locks.
+
+**Differential Synchronization (DS):** Send diffs between client and server, patch them together. This works for some applications (like source control) but breaks under high-frequency edits. Diffs can conflict in ways that produce corrupted document state.
+
+**Periodic polling:** Clients poll the server every few seconds for changes. This has terrible latency (seconds of delay), creates high server load, and still has race conditions where two clients overwrite each other between polls.
+
+The core insight: we need a system where **concurrent operations are mathematically guaranteed to produce the same result** regardless of order. This leads us to two major approaches: Operational Transformation and CRDTs.
+
+## System Requirements
+
+A production collaborative editor must satisfy seven key requirements. Each one influences the architecture in significant ways.
+
+<CollabRequirementsDemo client:visible />
+
+## Operational Transformation: The Classic Approach
+
+Operational Transformation (OT) is the technology behind Google Docs. It was invented by Clarence Ellis and Simon Gibbs in 1989 and has been refined over decades. The core idea: when two operations conflict, **transform one operation against the other** so both can be applied without data loss.
+
+Here is how it works at a high level:
+
+1. A user makes an edit. The client creates an **operation** describing the change (insert at position X, delete Y characters).
+2. The operation is sent to the server.
+3. The server receives operations from multiple clients concurrently.
+4. Before applying an operation to the document, the server **transforms** it against any operations that arrived between when the client sent its operation and when the server processes it.
+5. The transformed operation is applied to the server document and broadcast to all other clients.
+
+<OtTransformDemo client:visible />
+
+The transform function is the heart of OT. Two concurrent operations `opA` and `opB` are transformed into `opA'` and `opB'` such that applying `opA` then `opB'` produces the same result as applying `opB` then `opA'`. This property is called **transformation property 1 (TP1)**.
+
+There is also **TP2**: if you have three operations, transforming them pairwise in any order produces the same final state. This ensures multi-user convergence.
+
+The transform rules are intuitive:
+
+```python
+def transform(op_a, op_b):
+    if op_a.type == "insert" and op_b.type == "insert":
+        if op_a.pos < op_b.pos:
+            # op_a is before op_b, no change to op_b's position
+            return (op_a, Op("insert", op_b.text, op_b.pos + len(op_a.text)))
+        elif op_a.pos > op_b.pos:
+            return (Op("insert", op_a.text, op_a.pos + len(op_b.text)), op_b)
+        else:
+            # Same position: lower site ID keeps position
+            if op_a.site_id < op_b.site_id:
+                return (op_a, Op("insert", op_b.text, op_b.pos + len(op_a.text)))
+            else:
+                return (Op("insert", op_a.text, op_a.pos + len(op_b.text)), op_b)
+
+    if op_a.type == "delete" and op_b.type == "insert":
+        if op_b.pos <= op_a.pos:
+            op_a = Op("delete", op_a.len, op_a.pos + len(op_b.text))
+        return (op_a, op_b)
+
+    if op_a.type == "insert" and op_b.type == "delete":
+        if op_a.pos <= op_b.pos:
+            op_b = Op("delete", op_b.len, op_b.pos + len(op_a.text))
+        return (op_a, op_b)
+
+    if op_a.type == "delete" and op_b.type == "delete":
+        # Complex overlap logic omitted for brevity
+        return (op_a, op_b)
+```
+
+The rules are simple for insert-insert and insert-delete pairs but become significantly more complex for delete-delete and multi-user scenarios. This complexity is why OT implementations are notoriously difficult to get right.
+
+### Limitations of OT
+
+- **Server required:** OT typically needs a central server to order and transform operations. Peer-to-peer OT is theoretically possible but much harder.
+- **Transform complexity:** The transform function must handle every possible combination of operation types. Edge cases (like overlapping deletes) require careful mathematical reasoning.
+- **Undo complexity:** Undoing an operation in OT requires generating an inverse operation and transforming it against all intervening operations, which can lead to cascading complexity.
+
+## CRDTs: Conflict-Free Replicated Data Types
+
+CRDTs take a fundamentally different approach. Instead of transforming operations, **the data structure itself is designed to be mergeable**. Two replicas that accept operations in different orders will still converge to the same state. There is no central server required for convergence -- just the mathematical properties of the data structure.
+
+<CrdtDemo client:visible />
+
+The key insight behind CRDTs for collaborative editing: every character gets a **unique identifier**. Characters are ordered in a list structure where each character knows its position relative to its neighbors. When two users insert characters at the same logical position, the CRDT assigns each character a position (using fractional indexing or a similar scheme) and uses tie-breaking rules to determine the final order. Because the ordering is deterministic and commutative, every client converges to the same document state.
+
+There are two main types of CRDTs:
+
+**State-based CRDT (CvRDT):** Each replica periodically sends its entire state to other replicas. The merge function combines states using a **join semilattice** -- a mathematical structure where every pair of states has a unique least upper bound. This guarantees convergence. State-based CRDTs are simple to reason about but expensive in bandwidth (sending the full document state).
+
+**Operation-based CRDT (CmRDT):** Each replica broadcasts operations. The operations are designed to commute -- applying them in any order produces the same result. This is more bandwidth-efficient (only the operation is sent) but requires a reliable broadcast mechanism (no dropped or duplicated operations).
+
+For collaborative editing, the most common CRDT is a **list CRDT** based on position intervals or fractional indexing. Here is a simplified implementation:
+
+```python
+class Char:
+    def __init__(self, id, value, position, site_id):
+        self.id = id          # Unique identifier: site_id + counter
+        self.value = value    # The character
+        self.position = position  # Position in the order (fractional)
+        self.site_id = site_id    # Which user added this
+
+class CrdtDocument:
+    def __init__(self):
+        self.chars = {}  # Map of id -> Char
+        self.counter = 0
+        self.site_id = None
+
+    def local_insert(self, char, index):
+        """Insert a character at the given index."""
+        self.counter += 1
+        char_id = f"{self.site_id}-{self.counter}"
+        sorted_chars = self.get_sorted()
+
+        if len(sorted_chars) == 0:
+            position = 0.0
+        elif index == 0:
+            position = sorted_chars[0].position - 1.0
+        elif index >= len(sorted_chars):
+            position = sorted_chars[-1].position + 1.0
+        else:
+            # Insert between two existing characters
+            left = sorted_chars[index - 1].position
+            right = sorted_chars[index].position
+            position = (left + right) / 2.0
+
+        new_char = Char(char_id, char, position, self.site_id)
+        self.chars[char_id] = new_char
+        return new_char
+
+    def remote_insert(self, char):
+        """Apply an insert from another user."""
+        self.chars[char.id] = char
+
+    def get_sorted(self):
+        """Return characters sorted by (position, site_id)."""
+        return sorted(
+            self.chars.values(),
+            key=lambda c: (c.position, c.site_id)
+        )
+
+    def get_text(self):
+        return "".join(c.value for c in self.get_sorted())
+
+    def merge(self, other_doc):
+        """Merge with another replica (commutative)."""
+        for char_id, char in other_doc.chars.items():
+            if char_id not in self.chars:
+                self.chars[char_id] = char
+```
+
+The critical property: `merge` is **commutative** and **idempotent**. Applying merge(A, B) then merge(A, C) gives the same result as any other ordering. This means peers can exchange updates without coordination.
+
+### Fractional Indexing: The Secret Sauce
+
+When inserting between two characters with positions 1.0 and 2.0, the new character gets position 1.5. This is called **fractional indexing**. The position is always the midpoint between neighbors. Because JavaScript numbers have 53 bits of precision, you can insert between characters about 50 times before running out of precision.
+
+For production systems, string-based fractional indexing (like the approach used in **automergable** or **Logoot**) provides unlimited insertions. Positions are represented as strings that can always be subdivided by appending characters from an alphabet.
+
+```python
+# String-based fractional indexing
+# Insert between "abc" and "abd" -> "abca"
+# Insert between "a" and "b"    -> "am"
+# The alphabet is typically the 64 printable ASCII characters
+```
+
+## OT vs CRDT: Head to Head
+
+Both approaches solve the same problem but with different tradeoffs. Here is a comparison:
+
+| Property | OT | CRDT |
+|---|---|---|
+| Convergence guarantee | TP1/TP2 properties | Mathematical (semilattice) |
+| Server requirement | Usually required | Optional (P2P works) |
+| State complexity | Single document state | Per-character metadata |
+| Bandwidth | Small (just ops) | Small (ops) or large (full state) |
+| Operation types | Insert, delete, format | Insert, delete, (format) |
+| Undo complexity | High (inverse ops + transform) | Lower (tombstones + skip) |
+| Implementation difficulty | Very high (edge cases) | High (data structure design) |
+| Production use | Google Docs, Etherpad | Figma, Teletype for Atom, Yjs |
+
+**Google Docs uses OT.** The team at Google built a custom OT system called **The Google Docs OT Engine** that handles formatting, rich text, and images. It runs on a centralized server infrastructure.
+
+**Figma uses CRDTs.** Their **LiveGraph** system is a CRDT-based architecture for collaborative design. The graph structure (objects, properties, connections) is more complex than text, making CRDTs a natural fit.
+
+**Yjs** is a popular open-source CRDT library for JavaScript. It powers collaborative features in many applications (including the Teletype package for Atom). It uses a technique called **YATA** (Yet Another Transformation Approach) that combines ideas from OT and CRDTs.
+
+The choice between OT and CRDT depends on your requirements:
+
+- **Need simplicity for text-only editing?** OT is well-understood with decades of research.
+- **Need peer-to-peer or offline support?** CRDTs are the only viable choice. No central order, no convergence issues.
+- **Need complex data structures?** CRDTs (or a hybrid) handle graphs, maps, and custom types more naturally.
+- **Need maximum performance?** OT has lower memory overhead (no per-character metadata). CRDTs trade memory for mathematical simplicity.
+
+## Real-Time Architecture
+
+Now let us put the pieces together into a complete system architecture. The architecture has several layers, each with a distinct responsibility.
+
+<CollabArchitectureDemo client:visible />
+
+The data flow for a single keystroke:
+
+1. **Client** captures the keystroke and creates an operation (e.g., insert "a" at position 5).
+2. The operation is **optimistically applied** to the local document state so the user sees instant feedback.
+3. The operation is sent over the **WebSocket** connection to the server.
+4. The server's **Document Service** receives the operation, validates it (checks permissions, applies OT transform if needed), and applies it to the canonical document state.
+5. The **Broadcast** layer sends the processed operation (or the diff) to all other connected clients.
+6. The **Persistence** layer appends the operation to the immutable operation log and periodically creates snapshots.
+7. Other clients receive the operation, apply it to their local state, and update their UI.
+
+This architecture is cleanly separated: each layer does one thing and can be scaled independently. The WebSocket server is stateless (operations are forwarded to the document service). The document service maintains the authoritative state. The persistence layer is write-optimized.
+
+### WebSocket Server
+
+The WebSocket server is the first point of contact for clients. It manages connections, handles authentication, and routes messages. A single server can handle 10,000+ concurrent connections with proper tuning.
+
+```python
+import asyncio
+import websockets
+
+connected_clients = {}  # document_id -> set of websocket connections
+
+async def handler(websocket, path):
+    # Extract document_id and user_id from path or initial message
+    document_id = extract_document_id(path)
+    user_id = await authenticate(websocket)
+
+    if document_id not in connected_clients:
+        connected_clients[document_id] = set()
+    connected_clients[document_id].add(websocket)
+
+    try:
+        async for message in websocket:
+            operation = json.loads(message)
+            result = await document_service.apply_operation(
+                document_id, user_id, operation
+            )
+            # Broadcast to all other clients
+            for client in connected_clients[document_id]:
+                if client != websocket:
+                    await client.send(json.dumps(result))
+    finally:
+        connected_clients[document_id].discard(websocket)
+
+async def main():
+    async with websockets.serve(handler, "0.0.0.0", 8080):
+        await asyncio.Future()  # Run forever
+```
+
+### Document Service with OT
+
+The document service maintains the authoritative document state and applies OT transforms:
+
+```python
+class DocumentService:
+    def __init__(self):
+        self.documents = {}  # document_id -> Document
+        self.revision_logs = {}  # document_id -> [Operation]
+
+    async def apply_operation(self, doc_id, user_id, operation):
+        doc = self.documents.get(doc_id)
+        if not doc:
+            doc = Document()
+            self.documents[doc_id] = doc
+
+        # Get operations that were applied since the client's last revision
+        client_revision = operation.get("revision", 0)
+        concurrent_ops = self.revision_logs.get(doc_id, [])[client_revision:]
+
+        # Transform the incoming operation against concurrent ops
+        for concurrent_op in concurrent_ops:
+            operation = self.transform(operation, concurrent_op)
+
+        # Apply the (possibly transformed) operation
+        result = doc.apply(operation)
+
+        # Append to revision log
+        if doc_id not in self.revision_logs:
+            self.revision_logs[doc_id] = []
+        revision_number = len(self.revision_logs[doc_id])
+        self.revision_logs[doc_id].append(operation)
+
+        return {
+            "operation": operation,
+            "revision": revision_number,
+            "result": result,
+        }
+```
+
+### Persistence Layer
+
+The persistence layer uses an **append-only log** for operations plus periodic **snapshots** for fast recovery:
+
+```python
+import json
+import time
+
+class Persistence:
+    SNAPSHOT_INTERVAL = 100  # Snapshot every 100 operations
+
+    def __init__(self, storage):
+        self.storage = storage
+
+    async def append_operation(self, doc_id, operation):
+        entry = {
+            "doc_id": doc_id,
+            "timestamp": time.time(),
+            "operation": operation,
+        }
+        log_path = f"logs/{doc_id}.log"
+        with open(log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+        # Check if we need a snapshot
+        op_count = self.count_operations(doc_id)
+        if op_count % self.SNAPSHOT_INTERVAL == 0:
+            await self.create_snapshot(doc_id)
+
+    async def create_snapshot(self, doc_id):
+        # Rebuild document state from log
+        document = await self.replay(doc_id)
+        snapshot = {
+            "doc_id": doc_id,
+            "timestamp": time.time(),
+            "op_count": self.count_operations(doc_id),
+            "state": document.serialize(),
+        }
+        with open(f"snapshots/{doc_id}.json", "w") as f:
+            json.dump(snapshot, f)
+
+    async def restore(self, doc_id):
+        # Load latest snapshot
+        with open(f"snapshots/{doc_id}.json") as f:
+            snapshot = json.load(f)
+        document = Document.deserialize(snapshot["state"])
+
+        # Replay subsequent operations
+        with open(f"logs/{doc_id}.log") as f:
+            for line in f:
+                entry = json.loads(line)
+                if entry["timestamp"] > snapshot["timestamp"]:
+                    document.apply(entry["operation"])
+
+        return document
+```
+
+## Cursor Synchronization
+
+Cursors are the most visible part of collaboration. Every user sees colored cursor indicators showing where others are editing. The implementation is simpler than document synchronization because cursor positions are **ephemeral** -- they do not need conflict resolution or persistence.
+
+<MultiCursorDemo client:visible />
+
+The cursor sync protocol:
+
+1. Every time the user moves their cursor (click, arrow key, typing), the client sends a cursor update message over WebSocket: `{type: "cursor", user_id: "alice", position: 42, selection: [40, 45]}`.
+2. These updates are **throttled** to about 30fps to avoid flooding the network.
+3. The server receives cursor updates and broadcasts them to all other clients in the same document session.
+4. Each client renders remote cursors as **overlays** on the document view. Cursors are usually styled as a colored vertical bar with a user name label above.
+5. Selection ranges are rendered as colored highlights behind the text.
+6. When a user disconnects, their cursor fades out over a few seconds.
+
+Key design decisions for cursor sync:
+
+- **No reliability needed.** If a cursor update is lost, the next update will correct the position. Use UDP-style delivery (fire and forget) on the transport layer.
+- **No OT transform needed.** Cursor positions are ephemeral and approximate. If a remote user's cursor briefly shows at a wrong position, it will correct on the next update.
+- **Throttle aggressively.** A user typing at 100 wpm generates about 8 characters per second. Even at 30fps, that is 30 cursor updates per second per user. With 100 users, that is 3,000 updates per second. Throttle to 15fps or lower for large sessions.
+
+## The Append-Only Operation Log
+
+The operation log is the source of truth for the entire system. It is an **append-only, immutable** record of every change ever made to the document.
+
+```
+# ops.log for document "abc123"
+{"rev": 0, "user": "alice", "ts": 1747360000.0, "op": {"type": "insert", "pos": 0, "text": "H"}}
+{"rev": 1, "user": "alice", "ts": 1747360000.1, "op": {"type": "insert", "pos": 1, "text": "i"}}
+{"rev": 2, "user": "bob",   "ts": 1747360000.2, "op": {"type": "insert", "pos": 2, "text": "!"}}
+{"rev": 3, "user": "alice", "ts": 1747360001.0, "op": {"type": "delete", "pos": 1, "len": 1}}
+```
+
+The log serves multiple purposes:
+
+- **Source of truth:** The document state at any revision can be reconstructed by replaying the log from the beginning (or from the last snapshot).
+- **Audit trail:** Every change is recorded with user and timestamp. This is critical for compliance in enterprise documents.
+- **Version history:** The log structure directly supports "show me what the document looked like at revision N."
+- **Replication:** New clients joining a session can catch up by replaying all log entries since their last revision.
+
+The log is **never mutated**. Entries are only appended. If an operation needs to be rolled back (e.g., permission revoked), a compensating operation is appended. This is the event sourcing pattern applied to collaborative editing.
+
+### Snapshot + Delta Strategy
+
+Replaying the full log from the beginning becomes impractical as the log grows. Production systems use a **snapshot + delta** strategy:
+
+- Every N operations (e.g., 100), a full document snapshot is created.
+- To restore state at revision R, load the nearest snapshot before R and replay operations from the snapshot's revision to R.
+- When a client connects, the server sends the latest snapshot plus any operations since the snapshot. The client applies the snapshot and replays the operations.
+
+```json
+{
+  "snapshot": {
+    "doc_id": "abc123",
+    "revision": 1000,
+    "state": "Hello World...",
+    "created_at": "2026-05-17T01:00:00Z"
+  },
+  "deltas": [
+    {"rev": 1001, "user": "bob", "op": {"type": "insert", "pos": 5, "text": ","}},
+    {"rev": 1002, "user": "alice", "op": {"type": "insert", "pos": 6, "text": " "}},
+    {"rev": 1003, "user": "charlie", "op": {"type": "delete", "pos": 0, "len": 1}}
+  ],
+  "cursor_positions": {
+    "alice": {"pos": 42, "selection": null},
+    "bob": {"pos": 10, "selection": [8, 15]}
+  }
+}
+```
+
+This snapshot/delta approach gives O(1) connect time in the common case. The server sends the current snapshot and recent deltas (which are small enough to fit in a single WebSocket message).
+
+## Undo and Version History
+
+Undo in a collaborative editor is surprisingly complex. Each user expects to undo **only their own changes**, even if other users have made changes in between. This requires tracking which operations belong to which user and generating **inverse operations**.
+
+### Per-User Undo Stack
+
+The server maintains a separate undo stack for each user. When a user issues undo:
+
+1. Find the user's most recent operation in the operation log.
+2. Generate an inverse operation (insert becomes delete, delete becomes insert).
+3. Transform the inverse operation against any operations that were applied after the original operation.
+4. Apply the transformed inverse to the document.
+5. Append the inverse operation to the log (with the original user's ID so their undo stack stays consistent).
+
+```python
+def undo(user_id, document, revision_log):
+    # Find the user's most recent operation
+    user_ops = [op for op in reversed(revision_log)
+                if op.user_id == user_id]
+    if not user_ops:
+        return None
+
+    target_op = user_ops[0]
+
+    # Generate inverse
+    if target_op.type == "insert":
+        inverse = Operation("delete", target_op.pos, len(target_op.text))
+    elif target_op.type == "delete":
+        inverse = Operation("insert", target_op.pos, target_op.deleted_text)
+
+    # Transform against operations after target
+    target_idx = revision_log.index(target_op)
+    subsequent_ops = revision_log[target_idx + 1:]
+
+    for subsequent in subsequent_ops:
+        inverse = transform(inverse, subsequent)
+
+    return inverse
+```
+
+### Version History
+
+Version history is a natural consequence of the append-only log. Every operation is recorded, so the entire document evolution is available. The version history UI typically shows:
+
+- A timeline of edits grouped by user and time.
+- The ability to view any revision as a read-only snapshot.
+- Snapshot comparison showing what changed between two revisions.
+
+The implementation reconstructs a historical revision by replaying the log from the last snapshot to the target revision. This is O(n) in the number of operations since the last snapshot. For most documents, this is fast (a few milliseconds for thousands of operations).
+
+## Offline Editing and Conflict Resolution
+
+Offline editing is where CRDTs shine and OT struggles. When a user edits while disconnected, their changes are queued locally. When they reconnect, the queued operations must be merged with changes made by other users in the meantime.
+
+With OT:
+- Offline operations must be transformed against all operations that happened while offline. The transform function needs all intervening operations -- which can be thousands or millions.
+- The server must store the complete operation history for every document, which is expensive.
+- OT does not naturally support peer-to-peer offline sync. Two offline users who edit the same document and then sync cannot easily merge.
+
+With CRDTs:
+- Offline edits are simply appended to the local CRDT state. When the user reconnects, their characters (with unique IDs and positions) are sent to the server, which merges them commutatively.
+- No transform is needed. The CRDT merge function handles everything.
+- Peer-to-peer sync works naturally since merging is commutative.
+- The tradeoff is metadata overhead -- each character carries its ID and position, which adds bytes to the wire.
+
+### Conflict Resolution Strategies
+
+Even with OT or CRDTs, some conflicts require human-level resolution:
+
+**Last-writer-wins (LWW):** Simple but destructive. Used for non-critical fields like document titles or comments. The last write always wins. Not suitable for document body.
+
+**Merge:** Used for collaborative editing (OT/CRDT). All changes are preserved. Conflicts are resolved algorithmically. This is the standard approach for document bodies.
+
+**Manual resolution:** The system detects conflicting edits and presents a diff to the user for manual resolution. This is what git does for merge conflicts. Not suitable for real-time editing but common for version history (Google Docs "suggesting" mode).
+
+**Three-way merge:** A combination of the original document, user A's changes, and user B's changes. The system computes a diff between the original and each user's version, then combines them. This is how git merges work internally. It is not real-time but works for asynchronous collaboration.
+
+## Scaling to Thousands of Collaborators
+
+Large-scale collaborative editing (100+ users on one document) introduces new challenges beyond basic OT/CRDT.
+
+### Operation Batching
+
+When hundreds of users are typing simultaneously, the server receives thousands of operations per second. Broadcasting each operation individually creates a flood of WebSocket messages. The solution: **batch operations** into groups and broadcast the batch.
+
+```python
+class BatchBroadcaster:
+    def __init__(self, interval_ms=50):
+        self.buffers = {}  # doc_id -> [operations]
+        self.interval = interval_ms
+
+    async def add_operation(self, doc_id, operation):
+        if doc_id not in self.buffers:
+            self.buffers[doc_id] = []
+            asyncio.create_task(self.flush_later(doc_id))
+        self.buffers[doc_id].append(operation)
+
+    async def flush_later(self, doc_id):
+        await asyncio.sleep(self.interval / 1000)
+        batch = self.buffers.pop(doc_id, [])
+        if batch:
+            await self.broadcast(doc_id, {"type": "batch", "ops": batch})
+```
+
+### Sharding by Document
+
+Each document is an independent unit. The system scales horizontally by sharding documents across multiple server instances. A consistent hash ring maps document IDs to server instances:
+
+```python
+import hashlib
+
+class DocumentRouter:
+    def __init__(self, server_pool):
+        self.servers = server_pool
+
+    def get_server(self, doc_id):
+        hash_val = int(hashlib.sha256(doc_id.encode()).hexdigest(), 16)
+        return self.servers[hash_val % len(self.servers)]
+
+    def handle_operation(self, doc_id, operation):
+        server = self.get_server(doc_id)
+        server.apply_operation(doc_id, operation)
+```
+
+### Read Replicas for Viewers
+
+Many users on a document are viewers, not editors. Viewers only need to receive updates, not send them. The server can use a **fan-out tree** to broadcast updates efficiently:
+
+- The document service sends one update to a **broadcast relay**.
+- The relay fans out to multiple WebSocket server instances.
+- Each WebSocket server instance fans out to its connected clients.
+
+This hierarchy reduces the load on the document service from O(N) to O(1) (one broadcast per update regardless of viewer count).
+
+### Memory Management
+
+A document with 100 editors and months of history can have millions of operations. The server cannot keep the full history in memory for every active document. Strategies:
+
+- **Age out operations:** Keep only the last M operations in memory for active documents. Older operations are loaded from the persistence layer on demand.
+- **Compress positions:** In CRDT systems, the character ID metadata can dominate memory. Use compact binary representations for positions (e.g., 64-bit integers instead of strings).
+- **Evict inactive documents:** Unload documents that have no connected editors. On the next connection, restore from the latest snapshot.
+
+### Connection Management
+
+A single WebSocket server can handle 10,000-50,000 concurrent connections. To scale beyond that:
+
+- Use **connection coalescing** (multiple browser tabs to the same document share a single WebSocket).
+- Use **WebSocket compression** (permessage-deflate extension reduces bandwidth by 60-80%).
+- Use **server-sent events** as a fallback for restrictive networks that block WebSockets.
+
+## Putting It All Together
+
+Designing a collaborative editor is a journey through distributed systems fundamentals. The core insight is deceptively simple: **concurrent operations must be mathematically guaranteed to converge**. Whether you choose OT (transform operations) or CRDTs (commutative data structures), the result is the same -- a system where multiple users can edit simultaneously without data loss.
+
+The full architecture chain is:
+
+```
+Client App (React/ProseMirror)
+  -> WebSocket (persistent, bidirectional)
+    -> Document Service (OT/CRDT engine)
+      -> Operation Log (append-only, immutable)
+        -> Snapshots (periodic, for fast recovery)
+          -> Version History (reconstructed from snapshots + deltas)
+    -> Broadcast (fan-out to other clients)
+  -> Cursor Sync (ephemeral, no transform, throttled)
+```
+
+When you use Google Docs, Notion, or Figma, this entire pipeline fires for every keystroke -- often in under 50ms. The user sees characters appear instantly on their screen and milliseconds later on everyone else's screen. The complexity is invisible.
+
+### Self-Check Questions
+
+1. What is the difference between OT and CRDT convergence guarantees? Why does OT need a server while CRDTs do not?
+2. How would you design the undo system for a document where user A and user B have interleaved operations?
+3. Explain why cursor sync does not need OT/CRDT. What are the failure modes if a cursor update is lost?
+4. How does the snapshot + delta strategy improve initial load time? What is the tradeoff between snapshot frequency and storage cost?
+5. If two users edit the same character at the same position using a CRDT with fractional indexing, how is the final order determined?
+6. How would you handle real-time formatting (bold, italic, font size) in a collaborative editor? Does OT or CRDT handle this more naturally?
+7. Describe the scalability bottlenecks at 1,000 simultaneous editors on one document. Where would sharding vs. batching help?
