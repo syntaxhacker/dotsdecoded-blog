@@ -1,0 +1,484 @@
+---
+title: "Web Performance & Core Web Vitals: LCP, CLS, INP, and How to Optimize"
+description: "A deep dive into web performance — Core Web Vitals (LCP, CLS, INP), the rendering pipeline impact, measuring performance, diagnosing bottlenecks, and optimization strategies for faster websites."
+date: 2026-05-21T01:00:00
+tags: ["web-performance", "core-web-vitals", "frontend", "optimization", "lcp", "cls", "inp"]
+---
+
+import PerfLcpDemo from '../../components/demos/PerfLcpDemo'
+import PerfClsDemo from '../../components/demos/PerfClsDemo'
+import PerfInpDemo from '../../components/demos/PerfInpDemo'
+import PerfMetricsDemo from '../../components/demos/PerfMetricsDemo'
+import PerfAuditDemo from '../../components/demos/PerfAuditDemo'
+
+## Why Web Performance Matters
+
+Imagine walking into a store where the door takes 5 seconds to open. You would probably leave before it finished. Websites are no different. A 1-second delay in page load time reduces customer satisfaction by 16%, and 53% of mobile users abandon a site that takes longer than 3 seconds to load.
+
+Performance is not just about speed. It is about user experience, conversion rates, accessibility, and search engine ranking. Google announced in 2021 that page experience signals -- including Core Web Vitals -- are ranking factors. Fast sites rank higher, convert better, and retain users longer.
+
+The browser rendering pipeline is the engine behind every page you visit. Understanding how it works -- and where it breaks down -- is the foundation of web performance optimization. Let us walk through the three Core Web Vitals, their mechanics, and how to fix them.
+
+## Largest Contentful Paint (LCP)
+
+LCP measures how long it takes for the largest visible content element to appear in the viewport. This is typically a hero image, a large heading, or a video poster. Google says LCP should occur within 2.5 seconds of the page starting to load.
+
+The clock starts when the browser receives the first byte of the response (TTFB). Every time the browser renders a new frame, it checks the size of the largest element. The LCP candidate changes over time -- a text block might be largest at 1 second, then a hero image loads and takes over at 2 seconds. The final LCP is the timestamp of the last time the largest element changed.
+
+Four factors determine your LCP:
+
+1. **TTFB** -- how fast the server responds
+2. **Resource load time** -- how fast the LCP resource (usually an image) downloads
+3. **Render delay** -- how long the browser waits before rendering the element
+4. **Element discovery** -- when the browser first discovers the LCP element in the HTML
+
+<PerfLcpDemo client:visible />
+
+### Optimizing LCP
+
+**Preload the hero image.** Add a `<link rel="preload">` tag in the `<head>` so the browser discovers the image before the HTML parser reaches the `<img>` tag. This can cut LCP by hundreds of milliseconds.
+
+```html
+<link rel="preload" href="hero.webp" as="image" fetchpriority="high">
+```
+
+**Use responsive images with modern formats.** Serve WebP or AVIF instead of JPEG. Use `srcset` to serve the right size for each viewport.
+
+```html
+<img
+  src="hero.webp"
+  srcset="hero-400.webp 400w, hero-800.webp 800w, hero-1200.webp 1200w"
+  sizes="(max-width: 600px) 400px, (max-width: 1024px) 800px, 1200px"
+  width="1200" height="600"
+  alt="Hero image"
+  fetchpriority="high"
+>
+```
+
+**Optimize TTFB.** Use a CDN to serve content from edge locations close to the user. Enable HTTP/2 or HTTP/3 multiplexing. Move dynamic computation to background jobs so the initial response is cached.
+
+```bash
+# Check TTFB with curl
+curl -o /dev/null -s -w "TTFB: %{time_starttransfer}ms\n" https://example.com
+
+# With HTTP/3
+curl --http3 -o /dev/null -s -w "TTFB: %{time_starttransfer}ms\n" https://example.com
+```
+
+**Remove render-blocking resources.** If CSS or JavaScript blocks the main thread during initial render, the LCP element cannot be painted. Inline critical CSS and defer non-critical scripts.
+
+```html
+<!-- Defer non-critical JavaScript -->
+<script src="analytics.js" defer></script>
+
+<!-- Inline critical CSS, load the rest asynchronously -->
+<style>
+  /* Critical above-the-fold styles inline here */
+  header { display: flex; ... }
+  .hero { max-width: 100%; ... }
+</style>
+<link rel="preload" href="styles.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+```
+
+## Cumulative Layout Shift (CLS)
+
+CLS measures visual stability. A layout shift happens when a visible element changes position between two frames. Every shift has a score: **impact fraction** (how much of the viewport is affected) times **distance fraction** (how far the unstable element moved).
+
+A CLS score below 0.1 is good. Above 0.25 is poor. The score is the sum of all shift scores throughout the page lifetime.
+
+The most common causes of layout shift:
+
+- Images without explicit dimensions
+- Ads, embeds, or iframes that load after content
+- Web fonts causing invisible text (FOIT) that suddenly renders
+- Dynamic content injected above existing content
+
+<PerfClsDemo client:visible />
+
+### Fixing CLS
+
+**Always set width and height on images.** The browser reserves the correct space before the image loads, preventing the content below from jumping.
+
+```html
+<!-- Without dimensions: shift when image loads -->
+<img src="photo.jpg" alt="Photo">
+
+<!-- With dimensions: space reserved ahead of time -->
+<img src="photo.jpg" width="800" height="600" alt="Photo">
+```
+
+If you use responsive images and do not know the exact rendered dimensions, use CSS `aspect-ratio` combined with a placeholder:
+
+```css
+img {
+  aspect-ratio: 4 / 3;
+  width: 100%;
+  height: auto;
+}
+```
+
+**Reserve space for ads and embeds.** Use a placeholder container with explicit dimensions. If the ad fails to load, the placeholder keeps the layout stable.
+
+```html
+<div class="ad-container" style="min-height: 250px; min-width: 300px;">
+  <!-- Ad script fills this container -->
+</div>
+```
+
+**Use font-display: swap.** Without it, the browser hides text while the web font loads (FOIT -- Flash of Invisible Text). When the font finally loads, the text appears in a different size, shifting everything below it.
+
+```css
+@font-face {
+  font-family: 'CustomFont';
+  src: url('/fonts/custom.woff2') format('woff2');
+  font-display: swap;
+}
+```
+
+With `font-display: swap`, the browser renders text immediately with a fallback font. The swap to the custom font is nearly invisible because the metrics are similar. Pair this with a `font-style: optional` fallback for the best user experience.
+
+## Interaction to Next Paint (INP)
+
+INP measures responsiveness. It captures the time from when a user interacts with the page (click, tap, keypress) to when the browser paints the next frame showing the result. INP is the longest interaction observed, ignoring outliers.
+
+INP replaces First Input Delay (FID) because FID only measured the first interaction. INP measures all interactions throughout the page lifetime, giving a more complete picture of responsiveness.
+
+INP breaks down into three phases:
+
+1. **Input delay** -- the time between the user interaction and the start of event handler processing. This increases when the main thread is busy with long tasks.
+2. **Processing time** -- the time spent running event handlers (JavaScript callbacks, layout computation). Long-running handlers block the next paint.
+3. **Presentation delay** -- the time between the handler finishing and the browser painting the next frame. This includes style recalc and layout.
+
+<PerfInpDemo client:visible />
+
+### Improving INP
+
+**Avoid long tasks.** A long task is any JavaScript task that runs for more than 50 milliseconds. Break up heavy computations into smaller chunks using `requestAnimationFrame`, `setTimeout`, or `scheduler.yield()`.
+
+```javascript
+// Bad: 200ms task blocks the main thread
+function processBigArray(items) {
+  items.forEach(item => {
+    heavyComputation(item)
+  })
+}
+
+// Good: yield to the browser every 50ms
+async function processBigArray(items) {
+  const chunkSize = 10
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize)
+    chunk.forEach(item => heavyComputation(item))
+    // Yield to the browser so it can handle interactions
+    await new Promise(r => setTimeout(r, 0))
+  }
+}
+```
+
+With the scheduler API (Chrome 87+):
+
+```javascript
+// Using scheduler.yield for cooperative scheduling
+async function processBigArray(items) {
+  const chunkSize = 10
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize)
+    chunk.forEach(item => heavyComputation(item))
+    await scheduler.yield()
+  }
+}
+```
+
+**Reduce event handler complexity.** Debounce scroll and resize handlers. Use passive event listeners for touch and wheel events so the browser can scroll without waiting for JavaScript.
+
+```javascript
+// Use passive listeners to avoid blocking scroll
+document.addEventListener('touchstart', handler, { passive: true })
+document.addEventListener('wheel', handler, { passive: true })
+
+// Debounce expensive handlers
+let rafId = null
+element.addEventListener('scroll', () => {
+  if (rafId) return
+  rafId = requestAnimationFrame(() => {
+    handleScroll()
+    rafId = null
+  })
+})
+```
+
+**Minify and code-split JavaScript.** Less JavaScript means fewer bytes to parse, compile, and execute. Use dynamic `import()` to load code only when needed.
+
+```javascript
+// Code-split heavy libraries
+button.addEventListener('click', async () => {
+  const { renderChart } = await import('./heavy-chart-library.js')
+  renderChart(data)
+})
+```
+
+## First Contentful Paint (FCP)
+
+FCP measures when the browser renders the first piece of content -- text, image, or SVG. It is not the same as LCP. FCP happens early (something appeared), while LCP waits for the largest element.
+
+FCP is a leading indicator. If FCP is slow, LCP will almost certainly be slow too. FCP and LCP together tell the story: FCP says "when did something appear" and LCP says "when did the page look complete."
+
+Optimize FCP the same way you optimize LCP: inline critical CSS, preload content, eliminate render-blocking resources, and minimize server response time.
+
+## Time to First Byte (TTFB)
+
+TTFB measures the time between the browser requesting a page and receiving the first byte of the response. It is not a Core Web Vital, but it affects every other metric.
+
+A slow TTFB means the server took too long to respond. Common causes:
+
+- Slow database queries
+- Server-side rendering taking too long
+- No caching layer
+- Geographic distance from the server
+
+```bash
+# Measure TTFB from different regions
+curl -o /dev/null -s -w "TTFB: %{time_starttransfer}ms\n" https://your-site.com
+
+# With request timing breakdown
+curl -o /dev/null -s -w "\
+  DNS: %{time_namelookup}ms\n\
+  TCP: %{time_connect}ms\n\
+  TLS: %{time_appconnect}ms\n\
+  TTFB: %{time_starttransfer}ms\n\
+  Total: %{time_total}ms\n" https://your-site.com
+```
+
+Fix TTFB by implementing CDN caching, optimizing database queries, using edge computing for dynamic content, and enabling keep-alive connections.
+
+## Field Data vs Lab Data
+
+Performance measurements fall into two categories: **lab data** and **field data**.
+
+**Lab data** is collected in a controlled environment with consistent network conditions and device specs. Lighthouse, PageSpeed Insights (lab), and WebPageTest produce lab data. The advantage: reproducible, debuggable, you can trace exactly what caused a regression. The disadvantage: it does not reflect real user conditions.
+
+**Field data** comes from real users visiting your site. Chrome User Experience Report (CrUX), the web-vitals library, and RUM (Real User Monitoring) tools collect field data. The advantage: it reflects actual network conditions, device capabilities, and user behavior. The disadvantage: noisy, harder to debug, requires sufficient traffic.
+
+```javascript
+// Collect Core Web Vitals from real users using the web-vitals library
+import { onLCP, onCLS, onINP, onFCP, onTTFB } from 'web-vitals'
+
+function sendToAnalytics(metric) {
+  const body = {
+    name: metric.name,
+    value: metric.value,
+    rating: metric.rating,
+    delta: metric.delta,
+    id: metric.id,
+    navigationType: metric.navigationType,
+  }
+  navigator.sendBeacon('/analytics', JSON.stringify(body))
+}
+
+onLCP(sendToAnalytics)
+onCLS(sendToAnalytics)
+onINP(sendToAnalytics)
+onFCP(sendToAnalytics)
+onTTFB(sendToAnalytics)
+```
+
+Both data types are essential. Use lab data during development to catch regressions before they reach production. Use field data to understand how real users experience your site.
+
+<PerfMetricsDemo client:visible />
+
+## CrUX Report
+
+The Chrome User Experience Report (CrUX) is Google's public dataset of real user performance data. It covers millions of origins and is updated monthly. You can query CrUX through:
+
+- **PageSpeed Insights API** -- `https://pagespeed.web.dev/`
+- **CrUX API** -- programmatic access
+- **BigQuery** -- full dataset for advanced analysis
+- **CrUX Dashboard** -- Data Studio template
+
+```bash
+# Query the CrUX API for your origin
+curl 'https://chromeuxreport.googleapis.com/v1/records:queryRecord?key=YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"origin": "https://example.com"}'
+```
+
+```json
+{
+  "record": {
+    "key": { "origin": "https://example.com" },
+    "metrics": {
+      "largest_contentful_paint": {
+        "histogram": [
+          { "start": 0, "end": 2500, "density": 0.75 },
+          { "start": 2500, "end": 4000, "density": 0.15 },
+          { "start": 4000, "density": 0.10 }
+        ],
+        "percentiles": { "p75": 2100 }
+      }
+    }
+  }
+}
+```
+
+The p75 percentile is the standard threshold. If your LCP p75 is under 2500ms, CLS p75 is under 0.1, and INP p75 is under 200ms, your origin passes Core Web Vitals assessment.
+
+## Performance Budgets
+
+A performance budget is a set of agreed-upon limits that your team does not exceed. Think of it as a financial budget for bytes and time.
+
+Good performance budgets to start with:
+
+| Metric | Budget |
+|--------|--------|
+| LCP | Under 2.5s |
+| CLS | Under 0.1 |
+| INP | Under 200ms |
+| FCP | Under 1.8s |
+| TTFB | Under 800ms |
+| JavaScript bundle | Under 300KB (gzipped) |
+| Total page weight | Under 1MB |
+| Number of requests | Under 50 |
+| Time to interactive | Under 5s (3G) |
+
+Enforce budgets in CI/CD:
+
+```javascript
+// lighthouse-ci.config.js
+module.exports = {
+  ci: {
+    collect: { url: ['https://staging.example.com'] },
+    assert: {
+      assertions: {
+        'largest-contentful-paint': ['warn', { maxNumericValue: 2500 }],
+        'cumulative-layout-shift': ['error', { maxNumericValue: 0.1 }],
+        'interaction-to-next-paint': ['error', { maxNumericValue: 200 }],
+        'total-byte-weight': ['warn', { maxNumericValue: 1000000 }],
+        'unused-javascript': ['warn', { maxNumericValue: 100000 }],
+      },
+    },
+    upload: { target: 'temporary-public-storage' },
+  },
+}
+```
+
+```bash
+# Run Lighthouse CI
+npx lhci autorun --config=lighthouse-ci.config.js
+```
+
+When a pull request introduces a performance regression, Lighthouse CI fails the check. The team discusses and optimizes before merging.
+
+## Diagnosing Performance Issues
+
+When performance degrades, you need tools to find the root cause.
+
+**Lighthouse** (built into Chrome DevTools) runs a comprehensive audit covering performance, accessibility, best practices, and SEO. The performance section scores 0-100 and lists specific optimizations with estimated impact.
+
+**Chrome DevTools Performance panel** records a flame chart of main thread activity. Look for long tasks (red triangles in the top bar), forced reflow (red striped bars), and rendering bottlenecks.
+
+**WebPageTest** runs your site from multiple geographic locations with real browser instances. It provides filmstrip view, waterfall charts, and detailed breakdowns of every request.
+
+<PerfAuditDemo client:visible />
+
+### Common Issues and Fixes
+
+**Unoptimized images** are the most common performance issue. Images account for over 50% of page weight on most sites. Fix: serve modern formats (WebP, AVIF), use responsive sizes, lazy-load below-the-fold images, and compress aggressively.
+
+```html
+<!-- Lazy load images below the fold -->
+<img loading="lazy" src="photo.jpg" width="800" height="600" alt="Photo">
+
+<!-- Use picture element for format selection -->
+<picture>
+  <source srcset="photo.avif" type="image/avif">
+  <source srcset="photo.webp" type="image/webp">
+  <img src="photo.jpg" width="800" height="600" alt="Photo">
+</picture>
+```
+
+**Render-blocking resources** delay the first paint. CSS files and synchronously loaded JavaScript in the `<head>` prevent rendering. Fix: inline critical CSS, add `defer` or `async` to scripts, and use `preload` for critical resources.
+
+**Missing image dimensions** cause layout shifts. Every `<img>` tag needs explicit `width` and `height` attributes, even when using responsive images.
+
+**No font-display strategy** causes invisible text and layout shifts. Add `font-display: swap` to every `@font-face` declaration. Consider `font-display: optional` for non-critical fonts.
+
+**No preconnect for third-party origins** adds DNS, TCP, and TLS handshake latency for every third-party resource. Use `<link rel="preconnect">` to warm up connections early.
+
+```html
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://analytics.example.com">
+<link rel="dns-prefetch" href="https://cdn.example.com">
+```
+
+## Building a Performance Culture
+
+Performance is not a one-time fix. It is a discipline that requires ongoing attention across the entire organization.
+
+**Set performance budgets** in your CI pipeline. Enforce them the same way you enforce test coverage or lint rules. When a PR introduces a regressive change, the build fails.
+
+**Monitor field data** with a RUM solution. Services like SpeedCurve, Datadog RUM, or a custom web-vitals setup give you real-user visibility. Set up alerts for when metrics cross thresholds.
+
+**Establish performance review** as part of the development workflow. Every significant feature should include a before-and-after performance measurement. Track LCP, CLS, and INP the same way you track memory usage or API latency.
+
+```javascript
+// Simple RUM collector
+const vitals = {
+  lcp: null,
+  cls: null,
+  inp: null,
+}
+
+new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    if (entry.entryType === 'largest-contentful-paint') {
+      vitals.lcp = entry.startTime
+    }
+  }
+}).observe({ type: 'largest-contentful-paint', buffered: true })
+
+new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    if (!entry.hadRecentInput) {
+      vitals.cls = (vitals.cls || 0) + entry.value
+    }
+  }
+}).observe({ type: 'layout-shift', buffered: true })
+
+new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    vitals.inp = Math.max(vitals.inp || 0, entry.duration)
+  }
+}).observe({ type: 'first-input', buffered: true })
+
+// Report to analytics on page unload
+window.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    navigator.sendBeacon('/rum', JSON.stringify(vitals))
+  }
+})
+```
+
+**Educate the team.** Share performance wins and regressions. Write performance cases in sprint reviews. Make performance visible and measurable so it becomes part of how the team thinks, not an afterthought.
+
+## Performance Checklist
+
+Before shipping any page, run through this checklist:
+
+- LCP under 2.5s (optimize TTFB, preload hero, responsive images)
+- CLS under 0.1 (image dimensions, ad space reservation, font-display)
+- INP under 200ms (no long tasks, passive listeners, code splitting)
+- Images in WebP/AVIF with srcset
+- Critical CSS inlined, non-critical CSS deferred
+- JavaScript deferred or async
+- Font-display: swap on all @font-face declarations
+- Preconnect to third-party origins
+- Lazy load below-the-fold images, iframes, embeds
+- Performance budget enforced in CI
+
+## What We Learned
+
+Core Web Vitals are not abstract metrics. They map directly to the browser rendering pipeline: LCP measures when the biggest piece of content appears, CLS measures how stable the layout is while it renders, and INP measures how responsive the page is to user input.
+
+Each vital has clear optimization strategies: preload and compress for LCP, reserve space for CLS, and avoid long tasks for INP. Lab data helps you catch issues before they ship. Field data (CrUX + RUM) tells you how real users experience your site.
+
+Performance is a competitive advantage. Sites that score well on Core Web Vitals rank higher in search, convert more visitors, and retain users longer. The tools and techniques in this post give you everything you need to build fast, stable, responsive web experiences.
