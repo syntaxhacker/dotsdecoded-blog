@@ -1,0 +1,452 @@
+---
+title: "Elasticsearch Internals: Inverted Index, Scoring, and Search at Scale"
+description: "A deep dive into Elasticsearch and search engine internals — inverted index construction, tokenization/analysis, relevance scoring (BM25, TF-IDF), clustering, sharding, and query execution."
+date: 2026-05-21T01:00:00
+tags: ["elasticsearch", "search", "internals", "database", "distributed"]
+---
+
+import EsInvertedIndexDemo from '../../components/demos/EsInvertedIndexDemo'
+import EsAnalysisDemo from '../../components/demos/EsAnalysisDemo'
+import EsScoringDemo from '../../components/demos/EsScoringDemo'
+import EsQueryDemo from '../../components/demos/EsQueryDemo'
+import EsArchitectureDemo from '../../components/demos/EsArchitectureDemo'
+
+Every developer has run `SELECT * FROM articles WHERE title LIKE '%search%'` at least once. It works on a small database. On a million rows, it grinds to a halt. Elasticsearch was built to solve this problem — and it does so with an elegant combination of data structures, information retrieval math, and distributed systems.
+
+This post walks through Elasticsearch internals from the ground up. We start with the core data structure that makes full-text search possible, then climb through analysis, relevance scoring, query execution, and finally the distributed architecture that lets it scale to billions of documents.
+
+## Why Dedicated Search?
+
+Relational databases store data in rows and scan them with B-trees. A `LIKE '%term%'` query cannot use an index — it must scan every row, check every character. On a table with 10 million articles each averaging 500 words, that is 5 billion word comparisons per query.
+
+Dedicated search engines solve this by pre-building a lookup structure: for every unique word in every document, store a list of document IDs and positions where that word appears. This is the **inverted index**, and it turns search from a scan into a series of O(1) dictionary lookups.
+
+A search engine also does things a relational database was not designed for:
+
+- **Relevance scoring** — rank results by how well they match, not just whether they match
+- **Fuzzy matching** — find "color" when you type "colour"
+- **Stemming** — match "running", "runs", "ran" together
+- **Typo tolerance** — "elastisearch" still finds what you meant
+
+These features come from the **analysis pipeline** and the **scoring formula**, which we cover in later sections.
+
+## The Inverted Index
+
+Imagine three documents:
+
+```
+Doc 1: "brown fox runs fast"
+Doc 2: "quick brown fox jumps"
+Doc 3: "lazy dog sleeps"
+```
+
+An inverted index maps each unique term to the documents that contain it:
+
+```
+brown  → [Doc1(pos:0), Doc2(pos:1)]
+fox    → [Doc1(pos:1), Doc2(pos:2)]
+quick  → [Doc2(pos:0)]
+runs   → [Doc1(pos:2)]
+fast   → [Doc1(pos:3)]
+jumps  → [Doc2(pos:3)]
+lazy   → [Doc3(pos:0)]
+dog    → [Doc3(pos:1)]
+sleeps → [Doc3(pos:2)]
+```
+
+Each entry in the index is called a **posting**. The full list for a term is the **posting list**. Postings usually store not just the document ID but also:
+
+- **Term frequency (TF)** — how many times the term appears in that document
+- **Position** — the offset of each occurrence (for phrase queries)
+- **Payload** — optional metadata like term weight
+
+The type the query `"fox"` only needs one dictionary lookup (`fox → [Doc1, Doc2]`) and both documents are found instantly. No full scan needed.
+
+<EsInvertedIndexDemo client:visible />
+
+## Tokenization
+
+Before text can be indexed, it must be split into individual terms. This process is **tokenization**, and the component that does it is the **tokenizer**.
+
+The **standard tokenizer** (Elasticsearch's default) splits text on word boundaries defined by Unicode text segmentation rules. It handles:
+
+- Whitespace and punctuation as delimiters
+- Hyphenated words as separate tokens in most cases (`state-of-the-art` → `state`, `of`, `the`, `art`)
+- URLs and email addresses as single tokens
+- Unicode characters across scripts (Cyrillic, CJK, Arabic)
+
+Compare this with the **whitespace tokenizer**, which splits only on whitespace:
+
+```
+Input: "Hello, World! 42."
+Standard:  ["Hello", "World", "42"]
+Whitespace: ["Hello,", "World!", "42."]
+```
+
+The **letter tokenizer** splits on any non-letter character, which is useful for languages where punctuation carries meaning.
+
+Tokenization is the first real transformation in the analysis pipeline, and it has a direct impact on what queries can find. A tokenizer that splits too aggressively loses information (you cannot search for `state-of-the-art` as a phrase). One that is too conservative misses matches.
+
+## The Analysis Chain
+
+Tokenization is one step in a larger pipeline called the **analysis chain**. Every text field in Elasticsearch goes through this chain before indexing and again at query time (unless `search_analyzer` is overridden).
+
+```
+Raw text → Character Filters → Tokenizer → Token Filters → Output tokens
+```
+
+**Character filters** transform the raw character stream before tokenization. Elasticsearch ships with three:
+
+- `html_strip` — removes HTML tags and decodes entities like `&amp;`
+- `mapping` — replaces arbitrary strings with others (e.g., `&` → `and`)
+- `pattern_replace` — replaces regex matches
+
+After character filters, the **tokenizer** splits the cleaned text into tokens. Then **token filters** transform, remove, or add tokens:
+
+- `lowercase` — converts all tokens to lowercase
+- `stop` — removes common words (the, a, an, is)
+- `stemmer` — reduces words to their root form (running → run, foxes → fox)
+- `synonym` — adds equivalent terms from a synonym list
+- `asciifolding` — converts non-ASCII to ASCII (cafe → cafe with cedilla removed)
+
+The full pipeline for the standard analyzer:
+
+```
+"The foxes are running fast"
+    ↓ html_strip (no HTML, unchanged)
+    ↓ standard tokenizer
+["The", "foxes", "are", "running", "fast"]
+    ↓ lowercase
+["the", "foxes", "are", "running", "fast"]
+    ↓ (no stop filter in standard analyzer)
+```
+
+The English analyzer adds stop removal and stemming:
+
+```
+"The foxes are running fast"
+    ↓ html_strip → ↓ standard tokenizer → ↓ lowercase
+["the", "foxes", "are", "running", "fast"]
+    ↓ stop (removes "the", "are")
+["foxes", "running", "fast"]
+    ↓ stemmer
+["fox", "run", "fast"]
+```
+
+<EsAnalysisDemo client:visible />
+
+## Mapping Types
+
+Every field in an Elasticsearch index has a **mapping** that defines its type and the analysis applied to it. The two most important text-oriented types are:
+
+- **`text`** — analyzed, inverted-indexed, supports full-text search. The value goes through the analysis chain before indexing.
+- **`keyword`** — not analyzed, stored as-is, supports exact-match queries, aggregations, and sorting.
+
+A field can have both via **multi-fields**:
+
+```json
+PUT /articles
+{
+  "mappings": {
+    "properties": {
+      "title": {
+        "type": "text",
+        "analyzer": "english",
+        "fields": {
+          "raw": {
+            "type": "keyword"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Here `title` uses the English analyzer for search, while `title.raw` is available for sorting and exact filters.
+
+Elasticsearch also supports **dynamic mapping** — it infers field types from the first document indexed. You can control this with `"dynamic": "strict"` to reject unmapped fields, or `"dynamic": "runtime"` to defer type decisions to query time.
+
+Choosing the right mapping is the single most important performance decision: a `text` field with a heavy analyzer (stemming, synonyms, n-grams) increases index size and slows indexing. A `keyword` field with `"index": false` does not index at all and cannot be searched.
+
+## Indexing Pipeline
+
+When you index a document, Elasticsearch runs it through several stages before it becomes searchable:
+
+```json
+POST /articles/_doc
+{
+  "title": "The Quick Brown Fox",
+  "body": "A quick brown fox jumps over the lazy dog."
+}
+```
+
+**Stage 1: Routing.** The coordinating node hashes the document's `_id` (or custom routing value) using `routing_num_shards` to determine which shard owns it:
+
+```
+shard = hash(_routing) % num_primary_shards
+```
+
+**Stage 2: Analysis.** The document is sent to the primary shard, which runs the analysis chain on each `text` field. The `title` field becomes tokens `["the", "quick", "brown", "fox"]` (or stemmed, depending on the analyzer). These tokens are written into the shard's **segment** — an immutable Lucene data structure.
+
+**Stage 3: Replication.** After the primary shard writes the document, it forwards the operation to all replica shards. By default, the indexing request returns only after the primary shard and all replicas have confirmed (`wait_for_active_shards=all`).
+
+**Stage 4: Translog.** Before acknowledging, the operation is written to the **transaction log** (translog) — a write-ahead log on disk. If the node crashes, the translog is replayed on recovery. This prevents data loss between Lucene commits.
+
+**Stage 5: Refresh.** Every second (by default), Elasticsearch refreshes the shard, making the new segment visible to search. The document is now searchable.
+
+The full flow:
+
+```
+Client → Coordinating Node → Primary Shard → Replica Shards
+                                   ↓
+                          Analyze → Lucene Segment
+                                   ↓
+                          Translog (write-ahead)
+                                   ↓
+                          Refresh (1s) → Searchable
+```
+
+## Query Execution
+
+A search query in Elasticsearch is a JSON object in the **Query DSL**. Every query type eventually resolves to a Lucene query that runs against the inverted index.
+
+Consider a match query:
+
+```json
+GET /articles/_search
+{
+  "query": {
+    "match": {
+      "body": "quick fox"
+    }
+  }
+}
+```
+
+**Step 1: Parse.** The coordinating node parses the JSON, creates a Lucene `Query` object.
+
+**Step 2: Analyze.** The query text goes through the same analyzer as the field. `"quick fox"` becomes `["quick", "fox"]`. Each token becomes a Lucene `TermQuery`.
+
+**Step 3: Rewrite.** Lucene may rewrite the query. For example, a `TermQuery` for a numeric term might be rewritten to a `PointRangeQuery`. Query rewriting can also expand terms (e.g., a prefix query rewrites to a `BooleanQuery` of all matching terms).
+
+**Step 4: Search segments.** The shard iterates over its segments. For each segment, Lucene looks up each term in the segment's **term dictionary** (a sorted map from term to block of postings), then reads the **posting list** from disk. Matching documents are collected and scored.
+
+**Step 5: Merge.** Each segment returns its top N results. The shard merges them into a global top N.
+
+**Step 6: Gather.** All shards return their top N to the coordinating node, which merges and sorts the final result set.
+
+Lucene segments are searched in order from newest to oldest. Deleted documents are marked with a **bitset** (live docs), and any document marked as deleted is skipped during collection.
+
+<EsQueryDemo client:visible />
+
+## Scoring with BM25
+
+Elasticsearch uses **BM25** (Best Matching 25) as its default similarity algorithm. BM25 replaced TF-IDF in Elasticsearch 5.0 because it handles field length better and produces more relevant results.
+
+The BM25 score for a document D and query Q is:
+
+$$ \text{score}(D, Q) = \sum_{t \in Q} \text{IDF}(t) \times \frac{\text{TF}(t, D) \times (k_1 + 1)}{\text{TF}(t, D) + k_1 \times \left(1 - b + b \times \frac{|D|}{\text{avgdl}}\right)} $$
+
+Where:
+
+- **TF(t, D)** — term frequency: how many times term t appears in document D
+- **IDF(t)** — inverse document frequency: how rare the term is across all documents. Formula: $\text{IDF}(t) = \ln\left(1 + \frac{N - n_t + 0.5}{n_t + 0.5}\right)$ where N is total documents and $n_t$ is documents containing t
+- **|D|** — length of document D (in words)
+- **avgdl** — average document length across the index
+- **k1** — saturation parameter (default 1.2). Higher values let TF grow more before saturating
+- **b** — length normalization parameter (default 0.75). b=0 disables length normalization, b=1 applies full normalization
+
+Let us score query `"brown fox"` against three documents:
+
+```
+Doc 1: "brown fox runs fast" (len=4)
+Doc 2: "quick brown fox jumps" (len=4)
+Doc 3: "lazy dog sleeps" (len=3, contains neither term)
+```
+
+Assume avgdl = 3.7, N = 3.
+
+For term `brown`: appears in Doc1, Doc2. n = 2.
+
+$$ \text{IDF}(\text{brown}) = \ln\left(1 + \frac{3 - 2 + 0.5}{2 + 0.5}\right) = \ln(1 + 0.6) = 0.470 $$
+
+For Doc1, TF = 1, |D| = 4:
+
+$$ \text{TF component} = \frac{1 \times (1.2 + 1)}{1 + 1.2 \times (1 - 0.75 + 0.75 \times \frac{4}{3.7})} = \frac{2.2}{1 + 1.2 \times 1.06} = \frac{2.2}{2.27} = 0.969 $$
+
+$$ \text{score contribution} = 0.470 \times 0.969 = 0.455 $$
+
+Repeat for `fox` (same IDF, same documents) and sum. Doc3 scores 0.
+
+The key insight: BM25's **term saturation** means that the 10th occurrence of `fox` adds much less score than the 1st. The **length normalization** means a 1000-word document that mentions `fox` once gets a lower score than a 10-word document that mentions `fox` once — because the shorter document is more specifically about foxes.
+
+<EsScoringDemo client:visible />
+
+## Search DSL
+
+Elasticsearch provides several query types for different search patterns. These are the most important:
+
+**Term query** — searches the inverted index for an exact term (not analyzed at query time):
+
+```json
+{
+  "term": { "status": "published" }
+}
+```
+
+**Match query** — analyzes the query text, then generates a boolean query of term queries:
+
+```json
+{
+  "match": { "title": "quick fox" }
+}
+```
+
+Internally resolves to: `title:quick OR title:fox` (or `AND` with `operator: "and"`).
+
+**Bool query** — combines multiple clauses with boolean logic:
+
+```json
+{
+  "bool": {
+    "must":     { "match": { "title": "fox" } },
+    "filter":   { "term": { "status": "published" } },
+    "should":   { "match": { "body": "quick" } },
+    "must_not": { "term": { "draft": true } }
+  }
+}
+```
+
+Clauses in `must` and `should` contribute to the relevance score. Clauses in `filter` and `must_not` only filter — they do not score and their results are cached automatically.
+
+**Query context vs. filter context** is one of the most important performance concepts in Elasticsearch. Filter context queries are cached in the **filter cache** (a bitset per segment per filter) and reused across queries. Always use filter context for binary yes/no conditions like status, date ranges, or user IDs.
+
+## Cluster Coordination
+
+An Elasticsearch cluster is a group of nodes that share the same `cluster.name`. Each node has a role:
+
+- **Master-eligible node** — participates in cluster-wide operations (creating/deleting indices, tracking nodes). One is elected as the active master.
+- **Data node** — holds shards and executes data operations (indexing, search, aggregation).
+- **Ingest node** — pre-processes documents before indexing.
+- **Coordinating node** — routes requests, merges results. Every node is a coordinating node by default.
+
+Node discovery uses the **Zen Discovery** module (or the modern **Seeds-based discovery** in Elasticsearch 8+). Nodes discover each other by contacting a list of seed hosts, then exchange cluster state via **publish-subscribe**:
+
+1. A newly discovered cluster state is checked for version stamps
+2. If the joining node has an older version, the master publishes the latest cluster state
+3. The joining node applies the cluster state to its local state machine
+
+The **cluster state** includes:
+
+- The list of nodes and their roles
+- Index settings and mappings
+- Shard allocation (which shard lives on which node)
+- Per-shard routing tables
+
+Cluster state updates are serialized through the master. The master does not handle data operations — it only coordinates metadata changes. This means a busy cluster does not bottleneck on the master node.
+
+## Shard Routing and Distributed Search
+
+An Elasticsearch index is split into **shards**. When you create an index, you specify the number of primary shards (default 1 in 7.x+, 5 in earlier versions) and replica shards:
+
+```json
+PUT /articles
+{
+  "settings": {
+    "index": {
+      "number_of_shards": 3,
+      "number_of_replicas": 1
+    }
+  }
+}
+```
+
+This creates 3 primary shards and 3 replica shards (one copy of each primary), for 6 shards total.
+
+**Document routing** determines which shard a document belongs to:
+
+$$ \text{shard} = \text{hash}(\text{routing}) \bmod \text{total\_primary\_shards} $$
+
+The default routing value is the document `_id`. You can override it with a custom routing value for faster queries (all documents with the same routing value land on the same shard):
+
+```json
+GET /articles/_search?routing=user_42
+{
+  "query": { "match": { "title": "fox" } }
+}
+```
+
+**Distributed search execution** follows a scatter-gather pattern:
+
+1. **Scatter**: The coordinating node sends the query to every shard in the index (both primaries and replicas are eligible)
+2. **Query phase**: Each shard runs the query against its local segments, collects the top N results (sorted by score), and returns them to the coordinating node. This phase only transfers doc IDs and scores — not the full documents
+3. **Gather**: The coordinating node merges the top N results from all shards, then issues a second request (the **fetch phase**) to retrieve the full documents
+4. **Return**: The combined result set is returned to the client
+
+The **search with dfs** mode (`dfs_query_then_fetch`) runs an additional pre-query to compute global term statistics (IDF, avgdl) across all shards, producing more accurate scores for terms that are unevenly distributed.
+
+<EsArchitectureDemo client:visible />
+
+## Near-Real-Time and Segment Merging
+
+Elasticsearch calls itself **near-real-time** because indexed documents become visible within ~1 second. This is achieved through a combination of the **translog**, **refresh**, and **flush** operations.
+
+**Lucene segments** are immutable. Once written, a segment is never modified. Updates are handled by writing a new segment and marking the old document as deleted. Deletions accumulate as **deletion bitsets** until a merge removes them.
+
+The lifecycle of an indexed document:
+
+1. **Index buffer**: When a document arrives, it goes into an in-memory buffer and the translog. The document is NOT searchable yet.
+2. **Refresh** (every 1 second by default): The buffer is emptied into a new Lucene segment. The segment is opened for search. The document is now visible. The translog is NOT truncated.
+3. **Flush** (when translog is full, or manually): A Lucene commit is performed — the current segments are fsynced to disk. The translog is truncated up to the commit point.
+4. **Segment merge**: As more segments accumulate, Lucene merges small segments into larger ones in the background. Merging improves search performance (fewer segments to check) and reclaims space from deleted documents.
+
+You can see segment stats with the `_cat/segments` API:
+
+```bash
+GET /articles/_cat/segments?v
+```
+
+```
+index     shard prirep segment  generation  docs.count  size
+articles  0     p      _9f      15          1242        2.1mb
+articles  0     p      _ag      16          893         1.4mb
+articles  0     p      _bh      17          3421        5.8mb
+```
+
+Force merge reduces the segment count to a target number. Use it on read-heavy indices after indexing is complete:
+
+```bash
+POST /articles/_forcemerge?max_num_segments=1
+```
+
+**Recovery** happens when a node joins the cluster or a shard relocates. The recovering node pulls the latest Lucene commit point from the target node, then replays any translog operations that occurred after that commit. This ensures no data loss even if the node was offline for a few seconds.
+
+The full durability model:
+
+```
+Index request arrives
+  ↓
+Written to translog (disk, fsynced)
+  ↓
+In-memory buffer
+  ↓
+Refresh (1s) → new segment (not fsynced, but searchable)
+  ↓
+Flush (30 min or 512MB translog) → commit → fsync → truncate translog
+  ↓
+Segment merge (background) → consolidate → reclaim deletes
+```
+
+If a node crashes before a flush, the translog replays the operations. If a node crashes after a flush, the committed segments on disk are complete. The translog is the bridge between performance (in-memory buffering) and durability (fsynced writes).
+
+## Self-Check
+
+Before deploying Elasticsearch to production, verify:
+
+- Mappings are explicit (not dynamic) for all critical fields
+- Filter context is used for all non-scoring conditions (`bool.filter` over `bool.must`)
+- Shard count accounts for your data volume (keep shards between 10-50GB each)
+- Refresh interval is tuned (increase to 30s for bulk indexing, decrease for near-real-time needs)
+- Replicas are appropriately configured (at least 1 for HA, more for read-heavy workloads)
+- Translog durability is set to `request` for critical data, `async` for write-heavy bulk loads
