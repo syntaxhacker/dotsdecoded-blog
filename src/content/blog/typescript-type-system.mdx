@@ -1,0 +1,817 @@
+---
+title: "TypeScript Type System Deep Dive: Conditional Types, Generics, and Beyond"
+description: "A deep dive into TypeScript's type system — generics, conditional types, mapped types, template literal types, infer, distributive conditionals, and how TypeScript evaluates complex types."
+date: 2026-05-19T01:00:00
+tags: ["typescript", "types", "javascript", "frontend", "compiler"]
+---
+
+import TsGenericsDemo from '../../components/demos/TsGenericsDemo'
+import TsConditionalDemo from '../../components/demos/TsConditionalDemo'
+import TsMappedDemo from '../../components/demos/TsMappedDemo'
+import TsTemplateLiteralDemo from '../../components/demos/TsTemplateLiteralDemo'
+import TsInferDemo from '../../components/demos/TsInferDemo'
+import TsCompilerDemo from '../../components/demos/TsCompilerDemo'
+
+Imagine two people who look identical — same height, same hair color, same glasses. In JavaScript, they are the same person as long as they have the same properties. In Java or C#, they are only the same person if they share a family name (a class or interface declaration). This is the difference between **structural typing** and **nominal typing**.
+
+TypeScript uses structural typing. If two types have the same shape, they are interchangeable. This is not a quirk — it is the foundation upon which every other feature in the type system is built.
+
+Understanding the type system deeply is what separates a developer who "gets" TypeScript from one who fights it. By the end of this post, you will understand how TypeScript evaluates types the way a compiler engineer understands a programming language — from the ground up.
+
+## Structural vs Nominal Typing
+
+In a nominal type system (Java, C#, Rust), two types are equal only if they share the same declaration:
+
+```java
+class User { String name; }
+class Account { String name; }
+
+// Error: Account cannot be assigned to User
+User u = new Account();
+```
+
+In TypeScript's structural system, only the shape matters:
+
+```typescript
+interface User { name: string }
+interface Account { name: string }
+
+const u: User = { name: 'alice' }
+const a: Account = u // OK — same shape
+```
+
+This is called **duck typing** at the type level: if it walks like a duck and quacks like a duck, it is a duck. TypeScript checks structure at compile time, making it more strict than JavaScript's runtime duck typing while keeping the flexibility JavaScript developers love.
+
+Structural typing means that a type is defined by its members, not its name. This has deep implications:
+
+- You do not need to pre-declare interfaces to pass them around
+- Mock objects in tests are naturally type-safe without explicit interfaces
+- Third-party types that happen to match your interface are compatible without imports
+- Refactoring is easier — renaming an interface does not break unrelated code
+
+The trade-off: error messages reference shapes rather than names, which can make them harder to read. A type named `User` and a type named `Account` that share the same shape will both appear as `{ name: string }` in a tooltip.
+
+## The Type Hierarchy
+
+TypeScript's type system forms a hierarchy with **top types** (every value belongs to them) and a **bottom type** (no value belongs to it). Understanding this hierarchy is essential for understanding how type narrowing, conditional types, and generic constraints work.
+
+```
+          any
+        /     \
+    unknown    |
+      |        |
+    {}         |
+      |        |
+    object     |
+      |        |
+    specific types (string, number, etc.)
+      |
+    never
+```
+
+### `any` — The Escape Hatch
+
+`any` is the top type. Every value is assignable to `any`, and `any` is assignable to every type. It disables type checking entirely:
+
+```typescript
+let x: any = 42
+x = 'hello'
+x.toUpperCase() // OK at compile time, may crash at runtime
+```
+
+Use `any` sparingly. It is useful for gradual migration from JavaScript or for truly dynamic data, but every `any` weakens the type system's guarantees.
+
+### `unknown` — The Safe Top Type
+
+`unknown` is also a top type — every value is assignable to it. But unlike `any`, `unknown` is **not** assignable to anything else without a check:
+
+```typescript
+let x: unknown = JSON.parse(someJson)
+x.toUpperCase() // Error: Object is of type 'unknown'
+
+if (typeof x === 'string') {
+  x.toUpperCase() // OK — narrowed to string
+}
+```
+
+`unknown` forces you to validate before using. This is the correct choice for API responses, deserialized data, and any value whose shape you do not control at compile time.
+
+### `never` — The Bottom Type
+
+`never` is the bottom type. No value belongs to `never`. It is the return type of functions that never return (throw or infinite loop), and it is the result of exhaustively narrowing a union:
+
+```typescript
+function fail(): never {
+  throw new Error('unreachable')
+}
+
+type Result = string & number // never
+```
+
+`never` is critical for conditional types and exhaustive checks:
+
+```typescript
+type TodoAction =
+  | { type: 'add'; text: string }
+  | { type: 'delete'; id: number }
+  | { type: 'toggle'; id: number }
+
+function reducer(state: Todo[], action: TodoAction) {
+  switch (action.type) {
+    case 'add': return [...state, { text: action.text, done: false }]
+    case 'delete': return state.filter(t => t.id !== action.id)
+    case 'toggle': return state.map(t =>
+      t.id === action.id ? { ...t, done: !t.done } : t
+    )
+    default: {
+      const _exhaustive: never = action
+      return state
+    }
+  }
+}
+```
+
+If a new action type is added to `TodoAction`, the `default` branch will produce a type error because `action` will no longer be `never` — catching the missed case at compile time.
+
+### `void` vs `undefined`
+
+`void` is the return type of functions that do not return a meaningful value. `undefined` is a concrete value. In JavaScript, a function that does not explicitly return anything returns `undefined`. But TypeScript uses `void` to mean "this return value should not be used":
+
+```typescript
+function log(msg: string): void {
+  console.log(msg)
+}
+
+const x = log('hello') // x is void, cannot be used
+```
+
+`void` is assignable from `undefined`, but not the reverse in all contexts.
+
+## Generics
+
+Generics are **type parameters** — variables that stand in for types until they are filled in at the call site. They let you write functions, classes, and types that work with any type while preserving type information.
+
+### The Identity Function
+
+The simplest generic is identity:
+
+```typescript
+function identity<T>(arg: T): T {
+  return arg
+}
+
+const a = identity(42)    // type: 42 (literal)
+const b = identity('hi')  // type: 'hi' (literal)
+const c = identity<string>('hi') // type: string
+```
+
+TypeScript infers `T` from the argument. The return type is `T`, so the caller gets back the exact type they passed in — including literal types.
+
+### Generic Constraints with `extends`
+
+You can constrain a type parameter to only accept types that have certain properties:
+
+```typescript
+function getLength<T extends { length: number }>(arg: T): number {
+  return arg.length
+}
+
+getLength('hello') // OK — string has length
+getLength([1, 2])  // OK — array has length
+getLength(42)      // Error — number has no length
+```
+
+The `extends` clause does two things: it restricts what types can be passed, and it gives the function body access to the constrained properties. Without `extends`, the body would error on `arg.length` because `T` could be anything.
+
+### Generic Interfaces
+
+Interfaces can accept type parameters to describe generic data structures:
+
+```typescript
+interface Response<T> {
+  data: T
+  status: number
+  error: string | null
+}
+
+const userResponse: Response<User> = {
+  data: { name: 'alice' },
+  status: 200,
+  error: null,
+}
+```
+
+This is how most real-world TypeScript code uses generics — React's `useState<T>()`, Axios's `get<T>()`, and every ORM's query builder.
+
+<TsGenericsDemo client:visible />
+
+The demo shows identity function inference, constrained generics with `extends`, and generic interface usage side by side. Toggle between constrained and unconstrained versions to see how `extends` affects what is allowed.
+
+## Conditional Types
+
+Conditional types select between two types based on a condition:
+
+```typescript
+type IsString<T> = T extends string ? true : false
+
+type A = IsString<'hello'> // true
+type B = IsString<42>       // false
+```
+
+This is the type-level equivalent of a ternary expression. The condition is `T extends U` — if `T` is assignable to `U`, pick the true branch; otherwise, pick the false branch.
+
+### Practical Conditional Types
+
+Extracting element types from arrays:
+
+```typescript
+type ElementType<T> = T extends unknown[] ? T[number] : T
+
+type A = ElementType<string[]> // string
+type B = ElementType<number>   // number
+```
+
+Checking for nullable types:
+
+```typescript
+type NonNullable<T> = T extends null | undefined ? never : T
+
+type A = NonNullable<string | null> // string
+type B = NonNullable<number | undefined | null> // number
+```
+
+### Conditional Type Evaluation
+
+TypeScript evaluates conditional types lazily — it does not resolve them until the type parameter is known. This means you can write generic conditional types that are resolved differently for different instantiations:
+
+```typescript
+type ExtractPromise<T> = T extends Promise<infer U> ? U : T
+
+async function process<T>(value: T): Promise<ExtractPromise<T>> {
+  if (value instanceof Promise) {
+    return await value
+  }
+  return value as ExtractPromise<T>
+}
+
+type R = ExtractPromise<Promise<string>> // string
+type S = ExtractPromise<number>          // number
+```
+
+The condition `T extends Promise<infer U>` matches if `T` is a `Promise`, extracts its inner type `U`, and returns it. If `T` is not a `Promise`, it returns `T` unchanged.
+
+## Distributive Conditional Types
+
+Here is where conditional types become genuinely powerful. When a conditional type acts on a **naked type parameter** (a bare `T`, not `T[]` or `SomeType<T>`), TypeScript **distributes** over unions:
+
+```typescript
+type ToArray<T> = T extends unknown ? T[] : never
+
+type Result = ToArray<string | number>
+// Evaluates as:
+//   (string extends unknown ? string[] : never)
+//   | (number extends unknown ? number[] : never)
+// = string[] | number[]
+
+// Without distribution (wrapped in tuple):
+type ToArrayNonDist<T> = [T] extends [unknown] ? T[] : never
+type Result2 = ToArrayNonDist<string | number>
+// Evaluates as: (string | number)[] — a single array type
+```
+
+Distribution happens **before** the condition is evaluated. TypeScript splits the union, evaluates each member independently, and unions the results. This is the mechanism behind built-in utility types like `Exclude`, `Extract`, and `NonNullable`.
+
+### Exclude: Filtering a Union
+
+```typescript
+type Exclude<T, U> = T extends U ? never : T
+
+type Fruit = 'apple' | 'banana' | 'cherry' | 'date'
+type NoBanana = Exclude<Fruit, 'banana'>
+// 'apple' | 'cherry' | 'date'
+```
+
+`Exclude` works because of distribution. Each member of `Fruit` is tested independently:
+- `'apple' extends 'banana'` → false → keep `'apple'`
+- `'banana' extends 'banana'` → true → drop (never)
+- `'cherry' extends 'banana'` → false → keep `'cherry'`
+- `'date' extends 'banana'` → false → keep `'date'`
+
+Result: `'apple' | 'cherry' | 'date'`.
+
+### Never Filtering in Practice
+
+The `never` type is automatically removed from unions, which is why returning `never` from the true branch effectively filters out matching types. This pattern appears everywhere:
+
+```typescript
+type FilterString<T> = T extends string ? T : never
+type OnlyStrings = FilterString<'a' | 1 | 'b' | 2>
+// 'a' | 'b'
+
+type Falsy<T> = T extends false | 0 | '' | null | undefined | void ? T : never
+type Truthy<T> = Exclude<T, Falsy<T>>
+```
+
+<TsConditionalDemo client:visible />
+
+The demo steps through each branch of a distributive conditional type evaluation. Click through individual members of a union to see how `Exclude` filters them, and toggle between distributive and non-distributive forms to see the difference.
+
+## Mapped Types
+
+Mapped types let you transform every property of an existing type:
+
+```typescript
+type Readonly<T> = {
+  readonly [K in keyof T]: T[K]
+}
+
+type Partial<T> = {
+  [K in keyof T]?: T[K]
+}
+
+type User = { name: string; age: number; email: string }
+type ReadonlyUser = Readonly<User>
+// { readonly name: string; readonly age: number; readonly email: string }
+```
+
+The syntax `[K in keyof T]` iterates over each key in `T`, and `T[K]` gets the value type for that key. The `?` makes the property optional, and `readonly` makes it read-only.
+
+### Built-in Mapped Types
+
+TypeScript ships several mapped types in the standard library:
+
+| Type | Description |
+|------|-------------|
+| `Partial<T>` | All properties become optional |
+| `Required<T>` | All properties become required |
+| `Readonly<T>` | All properties become read-only |
+| `Pick<T, K>` | Select only keys `K` from `T` |
+| `Record<K, V>` | Create type with keys `K` and values `V` |
+
+```typescript
+interface Config {
+  host: string
+  port: number
+  debug: boolean
+}
+
+// Partial for gradual configuration
+function createServer(config: Partial<Config>) {}
+createServer({ host: 'localhost' }) // OK — port and debug are optional
+
+// Pick for subsets
+type ServerAddress = Pick<Config, 'host' | 'port'>
+// { host: string; port: number }
+
+// Record for dictionaries
+type PageMap = Record<string, Config>
+// { [key: string]: Config }
+```
+
+### Key Remapping with `as`
+
+TypeScript 4.1 added the `as` clause to mapped types, letting you transform keys:
+
+```typescript
+type Getters<T> = {
+  [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K]
+}
+
+interface Person {
+  name: string
+  age: number
+}
+
+type PersonGetters = Getters<Person>
+// { getName: () => string; getAge: () => number }
+```
+
+This is a mapped type combined with template literal types. Each key `K` is transformed by prepending `get` and capitalizing the first letter. The original value type `T[K]` is wrapped in a function type.
+
+Key remapping with `as` can also filter keys:
+
+```typescript
+type OnlyStringKeys<T> = {
+  [K in keyof T as T[K] extends string ? K : never]: T[K]
+}
+
+interface Mixed {
+  name: string
+  age: number
+  email: string
+}
+
+type Strings = OnlyStringKeys<Mixed>
+// { name: string; email: string }
+```
+
+If `T[K] extends string` is false, the key maps to `never`, which removes it from the result.
+
+<TsMappedDemo client:visible />
+
+The demo shows step-by-step evaluation of mapped types. Select a source type, choose a transformation (Partial, Required, Readonly, Pick, key remapping), and watch each property transform with animated highlighting.
+
+## Template Literal Types
+
+Template literal types manipulate strings at the type level:
+
+```typescript
+type EventName = `on${Capitalize<string>}`
+// Matches: "onClick", "onChange", "onSubmit", etc.
+```
+
+Every string manipulation method in JavaScript's string prototype has a type-level equivalent:
+
+| Type | Example |
+|------|---------|
+| `Uppercase<S>` | `Uppercase<'hello'>` → `'HELLO'` |
+| `Lowercase<S>` | `Lowercase<'HELLO'>` → `'hello'` |
+| `Capitalize<S>` | `Capitalize<'hello'>` → `'Hello'` |
+| `Uncapitalize<S>` | `Uncapitalize<'Hello'>` → `'hello'` |
+
+### Building Event Handlers
+
+A common pattern: derive event handler types from event names:
+
+```typescript
+type Events = 'click' | 'focus' | 'blur' | 'submit'
+
+type EventHandlers = {
+  [E in Events as `on${Capitalize<E>}`]: (event: any) => void
+}
+// {
+//   onClick: (event: any) => void
+//   onFocus: (event: any) => void
+//   onBlur: (event: any) => void
+//   onSubmit: (event: any) => void
+// }
+```
+
+### Parsing URL Paths
+
+Template literal types can parse structured strings:
+
+```typescript
+type ParseRoute<T extends string> =
+  T extends `${infer Base}/:${infer Param}`
+    ? { base: Base; param: Param }
+    : { base: T; param: never }
+
+type Route1 = ParseRoute<'users/:id'>
+// { base: "users"; param: "id" }
+
+type Route2 = ParseRoute<'posts/:slug/comments'>
+// { base: "posts/:slug/comments"; param: never }
+```
+
+Note that this does not recursively parse — `posts/:slug/comments` does not match the pattern because the pattern expects the string to end with `/:param`. For full path parsing, you need recursive template literal types:
+
+```typescript
+type PathParams<T extends string> =
+  T extends `${string}:${infer Param}/${infer Rest}`
+    ? Param | PathParams<Rest>
+    : T extends `${string}:${infer Param}`
+      ? Param
+      : never
+
+type Params = PathParams<'/users/:userId/posts/:postId'>
+// "userId" | "postId"
+```
+
+This recursive type extracts all `:param` segments from a path pattern, no matter how many there are.
+
+<TsTemplateLiteralDemo client:visible />
+
+The demo shows template literal type evaluation interactively. Enter a string pattern and see how `Uppercase`, `Lowercase`, `Capitalize`, and custom template literal transforms affect the type. The URL path parser demo highlights each param extraction step.
+
+## The `infer` Keyword
+
+`infer` is the pattern matching mechanism of TypeScript's type system. It appears inside conditional types and declares a type variable that TypeScript fills in based on the structure being matched:
+
+```typescript
+type ReturnType<T> = T extends (...args: any[]) => infer R ? R : never
+```
+
+When `T` matches a function signature, `R` is inferred to be the function's return type. If there is no match, the result is `never`.
+
+### Built-in Inference Types
+
+```typescript
+type Parameters<T> = T extends (...args: infer P) => any ? P : never
+type ConstructorParameters<T> = T extends abstract new (...args: infer P) => any ? P : never
+type InstanceType<T> = T extends abstract new (...args: any[]) => infer R ? R : never
+
+function greet(name: string, age: number): string {
+  return `${name} is ${age}`
+}
+
+type GreetParams = Parameters<typeof greet>
+// [name: string, age: number]
+
+type GreetReturn = ReturnType<typeof greet>
+// string
+```
+
+These are used pervasively in real code. React's `ComponentProps` type uses `infer` to extract prop types from components. Libraries like Zod use `infer` to derive static types from runtime schemas.
+
+### Inferring from Complex Types
+
+`infer` can match nested structures:
+
+```typescript
+type Unwrap<T> = T extends Promise<infer U> ? U
+  : T extends Array<infer V> ? V
+  : T
+
+type A = Unwrap<Promise<string>>   // string
+type B = Unwrap<number[]>          // number
+type C = Unwrap<boolean>           // boolean
+```
+
+Each `extends` clause tries to match the structure. TypeScript evaluates them in order and picks the first match.
+
+### Recursive Inference
+
+`infer` combined with recursion can unwrap deeply nested types:
+
+```typescript
+type DeepUnwrap<T> = T extends Promise<infer U> ? DeepUnwrap<U> : T
+
+type Deep = DeepUnwrap<Promise<Promise<Promise<string>>>>
+// string
+```
+
+Each recursion peels off one layer of `Promise` until the base type is reached. TypeScript's recursion limit (typically 50 levels) prevents infinite loops.
+
+<TsInferDemo client:visible />
+
+The demo shows `infer` in action with `ReturnType`, `Parameters`, `InstanceType`, and custom inference patterns. Step through each inference to see how TypeScript matches the structure and fills in the inferred type variable.
+
+## Recursive Types
+
+Types can reference themselves, enabling type-safe tree and linked-list structures:
+
+```typescript
+type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JSONValue[]
+  | { [key: string]: JSONValue }
+
+type TreeNode<T> = {
+  value: T
+  children: TreeNode<T>[]
+}
+
+type LinkedList<T> = {
+  value: T
+  next: LinkedList<T> | null
+}
+```
+
+Recursive types have a constraint: the recursion must involve an object or array type at each step. A simple type alias cannot reference itself directly:
+
+```typescript
+type Infinite = Infinite // Error: Type alias 'Infinite' circularly references itself
+```
+
+But it can reference itself through an object property:
+
+```typescript
+type Infinite = { next: Infinite } // OK
+```
+
+### Recursive Conditional Types
+
+Conditional types can also be recursive:
+
+```typescript
+type DeepReadonly<T> = {
+  readonly [K in keyof T]: T[K] extends object
+    ? DeepReadonly<T[K]>
+    : T[K]
+}
+
+interface Config {
+  host: string
+  port: number
+  nested: {
+    key: string
+    deeper: {
+      value: number
+    }
+  }
+}
+
+type Frozen = DeepReadonly<Config>
+// All properties at all levels are readonly
+```
+
+TypeScript applies a depth limit (50 levels by default) to recursive type evaluations. This prevents the compiler from hanging on pathological types.
+
+### Tuple Manipulation with Recursion
+
+Recursive conditional types can manipulate tuples:
+
+```typescript
+type Reverse<T extends unknown[], Acc extends unknown[] = []> =
+  T extends [infer First, ...infer Rest]
+    ? Reverse<Rest, [First, ...Acc]>
+    : Acc
+
+type R = Reverse<[1, 2, 3, 4]>
+// [4, 3, 2, 1]
+
+type Flatten<T> = T extends [infer First, ...infer Rest]
+  ? First extends unknown[]
+    ? [...Flatten<First>, ...Flatten<Rest>]
+    : [First, ...Flatten<Rest>]
+  : []
+
+type F = Flatten<[1, [2, 3], [4, [5]]]>
+// [1, 2, 3, 4, 5]
+```
+
+Each call peels off the first element, processes it, and recurses on the rest. The accumulator (`Acc` in `Reverse`) builds up the result.
+
+## Type-Level Programming
+
+With conditional types, mapped types, template literals, and recursion, you can compute at the type level. This is called **type-level programming** — writing programs that run entirely in the type checker.
+
+### FizzBuzz in the Type System
+
+```typescript
+type BuildTuple<N extends number, Acc extends unknown[] = []> =
+  Acc['length'] extends N
+    ? Acc
+    : BuildTuple<N, [...Acc, unknown]>
+
+type Add<A extends number, B extends number> =
+  [...BuildTuple<A>, ...BuildTuple<B>]['length']
+
+type Divide<A extends number, B extends number> =
+  BuildTuple<A> extends [...BuildTuple<B>, ...infer Rest]
+    ? Rest['length'] extends number
+      ? [unknown, ...Divide<Rest['length'] & number, B>]
+      : []
+    : []
+
+type Modulo<A extends number, B extends number> =
+  BuildTuple<A> extends [...BuildTuple<B>, ...infer Rest]
+    ? Rest['length'] extends number
+      ? Modulo<Rest['length'] & number, B>
+      : A
+    : A
+
+type FizzBuzzResult<N extends number> =
+  Modulo<N, 15> extends 0 ? 'FizzBuzz'
+    : Modulo<N, 3> extends 0 ? 'Fizz'
+      : Modulo<N, 5> extends 0 ? 'Buzz'
+        : N
+
+type N = FizzBuzzResult<15> // 'FizzBuzz'
+type M = FizzBuzzResult<7>  // 7
+```
+
+This uses tuple-length arithmetic — building tuples of a given length and using `length` to perform arithmetic. The types compute modulo 3, 5, and 15, then map to the appropriate string.
+
+### Arithmetic with Tuple Lengths
+
+The foundation of type-level arithmetic is `BuildTuple<N>`:
+
+```typescript
+type BuildTuple<N extends number, Acc extends unknown[] = []> =
+  Acc['length'] extends N
+    ? Acc
+    : BuildTuple<N, [...Acc, unknown]>
+
+type TupleLength<T extends unknown[]> = T['length']
+
+type Three = BuildTuple<3>
+// [unknown, unknown, unknown]
+
+type ThreeLength = TupleLength<Three>
+// 3
+```
+
+This is the type-level equivalent of using Peano arithmetic (successor-based counting). Each `unknown` in the tuple represents one unit. Addition becomes concatenation, subtraction becomes pattern matching.
+
+### Why Type-Level Programming Matters
+
+Type-level programming is not a parlor trick. These techniques have practical applications:
+
+- **Validation libraries** like Zod and valibot derive types from runtime schemas using recursive conditional types
+- **State management** libraries use mapped types to derive action types from reducer shapes
+- **API clients** generate fully typed query builders using template literal parsing
+- **Database ORMs** infer SQL result types from query builders using complex generic chains
+
+Understanding type-level programming helps you debug the types in these libraries when they misbehave — and write your own utility types when the built-ins fall short.
+
+## Performance Considerations
+
+Complex types do not come for free. Every type evaluation consumes compiler resources. Here are the performance characteristics to know:
+
+### Type Instantiation Depth
+
+TypeScript has a default recursion limit of 50 levels for type instantiation:
+
+```typescript
+type Recursive<T> = T extends { next: infer U } ? Recursive<U> : T
+```
+
+If the depth exceeds 50, TypeScript reports `Type instantiation is excessively deep and possibly infinite`. You can adjust this with `--maxNodeModuleJsDepth` but the fix is usually to restructure the types, not raise the limit.
+
+### Eager vs Lazy Evaluation
+
+Simple type aliases are **eagerly evaluated** — TypeScript resolves them as soon as they are defined:
+
+```typescript
+type Foo = Bar<string> // resolved immediately
+```
+
+Conditional types with unresolved type parameters are **lazily evaluated**:
+
+```typescript
+type Cond<T> = T extends string ? 'yes' : 'no'
+// Not resolved until T is known
+```
+
+Lazy evaluation means nested conditionals can create deep evaluation chains that the compiler must walk when the type parameter is finally supplied.
+
+### Mapped Type Performance
+
+Mapped types over large unions (hundreds or thousands of members) can slow down compilation. Each property transformation, key remapping, and conditional check is an operation. For hot paths in library code, consider simplifying the mapped type or splitting it into smaller pieces.
+
+### Checklist for Performant Types
+
+- Avoid deeply nested conditional types (more than 3-4 levels)
+- Prefer simple mapped types over complex key remapping with conditionals
+- Break large generic types into smaller, focused utility types
+- Use `interface` merging instead of complex type intersections where possible
+- Avoid recursive types that iterate over large tuples (use array methods in the value space instead)
+
+## The `--strict` Flags
+
+TypeScript's `--strict` flag enables a suite of stricter checking modes:
+
+| Flag | What It Does |
+|------|-------------|
+| `--strictNullChecks` | `null` and `undefined` are not assignable to other types |
+| `--noImplicitAny` | Error when a type cannot be inferred and defaults to `any` |
+| `--strictFunctionTypes` | Enforce function parameter bivariance correctly |
+| `--strictBindCallApply` | Type-check `bind`, `call`, `apply` signatures |
+| `--strictPropertyInitialization` | Require class properties to be initialized |
+| `--noImplicitThis` | Error when `this` has an implicit `any` type |
+| `--alwaysStrict` | Emit `"use strict"` in output JavaScript |
+| `--useUnknownInCatchVariables` | Catch variables default to `unknown` instead of `any` |
+
+### Why `--strict` Matters
+
+Without `--strictNullChecks`, this compiles:
+
+```typescript
+const name: string = null // OK without strictNullChecks
+```
+
+With it:
+
+```typescript
+const name: string = null // Error: Type 'null' is not assignable to type 'string'
+```
+
+Null reference errors are the most common runtime errors in JavaScript. `--strictNullChecks` eliminates an entire category of bugs at compile time.
+
+### Additional Strict Families
+
+Beyond `--strict`, TypeScript has two more families:
+
+- **`--noUncheckedIndexedAccess`**: Adds `undefined` to every indexed access, preventing out-of-bounds reads
+- **`--noPropertyAccessFromIndexSignature`**: Requires bracket notation for index signatures, making property access more explicit
+
+Real-world projects should enable `--strict` from the start. Adding it to an existing codebase requires fixing each violation, which can be significant work but pays off in fewer runtime errors.
+
+<TsCompilerDemo client:visible />
+
+The demo walks through the TypeScript compiler pipeline: source code is scanned into tokens, parsed into an AST, bound into a symbol table, type-checked, and emitted as JavaScript. Step through each phase for a simple program to see how the compiler evaluates types internally.
+
+## Putting It All Together
+
+The TypeScript type system is a full programming language embedded inside a type checker. It has:
+
+- **Variables** (type parameters)
+- **Control flow** (conditional types)
+- **Iteration** (mapped types over unions)
+- **Pattern matching** (infer in conditional types)
+- **Recursion** (self-referential types)
+- **String manipulation** (template literal types)
+- **Arithmetic** (tuple length operations)
+
+Every feature builds on structural typing. Because TypeScript only cares about shapes, it can distribute conditionals over unions, remap keys in mapped types, and infer types from nested structures.
+
+The deeper your understanding of the type system, the more you can express in types rather than tests. A well-typed function needs fewer unit tests because the compiler proves properties about it at compile time. Type-level validation of API responses, form data, and state machines catches errors that would otherwise require runtime integration tests.
+
+Start with solid fundamentals — structural typing and the type hierarchy. Add generics and constraints. Layer on conditional types for logic. Use mapped types for transformations. Reach for template literals and `infer` when you need pattern matching. And when the built-in types are not enough, you have the full power of type-level programming at your fingertips.
+
+Each concept reinforces the others. By mastering the type system, you do not just write better TypeScript — you write TypeScript that proves your programs are correct before they ever run.
