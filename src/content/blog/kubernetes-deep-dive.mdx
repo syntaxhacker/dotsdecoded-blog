@@ -1,0 +1,978 @@
+---
+title: "Kubernetes Deep Dive: Pods, Scheduling, and Cluster Architecture"
+description: "A deep dive into Kubernetes — pods and containers, the scheduler algorithm, service networking (kube-proxy, iptables), deployments and rolling updates, and the control plane architecture."
+date: 2026-05-20T01:00:00
+tags: ["kubernetes", "containers", "orchestration", "devops", "infrastructure"]
+---
+
+import K8sPodDemo from '../../components/demos/K8sPodDemo'
+import K8sSchedulerDemo from '../../components/demos/K8sSchedulerDemo'
+import K8sServiceDemo from '../../components/demos/K8sServiceDemo'
+import K8sDeploymentDemo from '../../components/demos/K8sDeploymentDemo'
+import K8sConfigDemo from '../../components/demos/K8sConfigDemo'
+import K8sArchitectureDemo from '../../components/demos/K8sArchitectureDemo'
+
+Imagine you manage a fleet of delivery trucks. Each truck carries packages (containers) that need to reach specific destinations. A single truck can carry multiple packages, but the packages are stacked together -- they share the same route, the same fuel, and the same driver.
+
+Now imagine you have hundreds of trucks and thousands of packages. You need a dispatcher who decides which truck gets which package, a routing system that tells each truck where to go, and a tracking system that monitors every delivery.
+
+Kubernetes is that dispatcher, router, and tracking system for containerized applications. It takes your containers, groups them into pods (trucks), schedules them onto machines (nodes), and keeps everything running according to your specifications.
+
+## What is Kubernetes?
+
+Kubernetes is a container orchestration platform. It automates deployment, scaling, and management of containerized applications across a cluster of machines.
+
+The name comes from the Greek word for helmsman or pilot -- someone who steers a ship. And that is exactly what Kubernetes does: it steers your containers through the waters of production infrastructure.
+
+A Kubernetes cluster has two parts:
+
+- **Control plane** -- the brain. Makes global decisions about the cluster (scheduling, responding to events).
+- **Worker nodes** -- the muscle. Run your actual applications.
+
+The control plane runs services like the API server (the front door), the scheduler (determines where pods run), and the controller manager (watches desired state vs actual state and reconciles them). Worker nodes run the kubelet (the node agent), kube-proxy (networking rules), and a container runtime like containerd.
+
+When you tell Kubernetes "I want 3 copies of my web server running", the control plane decides which nodes should run them, the kubelet on those nodes starts the containers, and Kubernetes continuously monitors to make sure 3 copies are always running -- replacing any that crash.
+
+## Pods: The Atomic Unit
+
+A **pod** is the smallest deployable unit in Kubernetes. It is one or more containers that share the same network namespace, storage volumes, and lifecycle.
+
+Think of a pod as a delivery truck. The truck can carry one package (a single container) or multiple packages that need to travel together (sidecar containers). All containers in the pod share:
+
+- The same IP address (they communicate via localhost)
+- The same port space (no two containers can use the same port)
+- The same volumes (they can share filesystems)
+- The same lifecycle (they are scheduled and terminated together)
+
+Why would you put multiple containers in one pod? Consider a web server that needs a log processor. The web server writes access logs to a shared volume, and a sidecar container reads those logs, processes them, and forwards them to a central logging system. They share the volume and the network, so the sidecar can access localhost to check the server health endpoint.
+
+Here is a basic pod spec:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-server
+  labels:
+    app: web
+    tier: frontend
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.25
+    ports:
+    - containerPort: 80
+    resources:
+      requests:
+        cpu: 250m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  restartPolicy: Always
+```
+
+Each pod gets a unique IP address within the cluster network. Containers inside the pod reach each other on localhost. This IP address is ephemeral -- when the pod is deleted and recreated, it gets a new IP.
+
+<K8sPodDemo client:visible />
+
+The demo above shows the pod spec on the left and a visual diagram on the right. Click each field -- name, labels, containers, volumes, restartPolicy -- to see what it controls and how it maps to the running pod.
+
+## Container Lifecycle
+
+Kubernetes actively manages the lifecycle of each container within a pod. Containers go through several states:
+
+- **Pending** -- the container image is being pulled from the registry. The pod spec is accepted but containers are not yet running.
+- **Running** -- the container is executing. A process is active inside it.
+- **Succeeded** -- the container completed successfully and exited with code 0 (for batch jobs).
+- **Failed** -- the container exited with a non-zero code.
+- **CrashLoopBackOff** -- the container keeps crashing. Kubernetes waits with increasing backoff before restarting it.
+- **Unknown** -- the node is unreachable. The state cannot be determined.
+
+The kubelet on each node runs health checks:
+
+```yaml
+spec:
+  containers:
+  - name: app
+    image: my-app:latest
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+      initialDelaySeconds: 3
+      periodSeconds: 5
+    readinessProbe:
+      httpGet:
+        path: /ready
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 10
+```
+
+A **liveness probe** tells Kubernetes whether the container is alive. If it fails, Kubernetes restarts the container. A **readiness probe** tells Kubernetes whether the container is ready to serve traffic. If it fails, the pod is removed from service endpoints but is not restarted. A **startup probe** protects slow-starting containers from being killed by liveness checks before they finish initializing.
+
+## Init Containers
+
+Some applications need setup before the main containers run -- database migrations, permission changes, config file generation, or waiting for a dependency to be ready.
+
+**Init containers** run in order, one at a time, before the main application containers start. Each init container must complete successfully before the next one begins. If an init container fails, Kubernetes restarts it (or the entire pod, depending on the restart policy).
+
+```yaml
+spec:
+  initContainers:
+  - name: migrate
+    image: my-app-migrate:latest
+    command: ['node', 'migrations/run.js']
+  - name: wait-for-db
+    image: busybox:1.36
+    command: ['sh', '-c', 'until nc -z db-service 5432; do sleep 1; done']
+  containers:
+  - name: app
+    image: my-app:latest
+```
+
+Init containers use the same volume mounts as the main containers, so they can write shared data. They can also have different resource limits, security contexts, and image pull policies. They share the pod's network namespace, so they can reach the same services.
+
+Key rules:
+
+- Init containers run before any main container starts.
+- They run sequentially in the order defined.
+- If any init container fails, the whole pod restarts.
+- Changing the init container spec triggers a pod restart.
+
+## The Scheduler Algorithm
+
+When you create a pod, it enters the **Pending** state. The kube-scheduler watches for unscheduled pods and assigns them to a node.
+
+The scheduler algorithm has three phases:
+
+### Filtering (Predicates)
+
+The scheduler evaluates each node against the pod's requirements. A node that fails any predicate is eliminated:
+
+- **PodFitsResources** -- does the node have enough free CPU and memory?
+- **PodMatchNodeSelector** -- do the pod's nodeSelector and node affinity match the node's labels?
+- **PodToleratesNodeTaints** -- does the pod tolerate the node's taints?
+- **CheckNodeDiskPressure** -- is the node's disk usage below the threshold?
+- **CheckNodePIDPressure** -- is the node's PID count below the threshold?
+- **PodFitsHostPorts** -- is the requested host port available?
+
+### Scoring (Priorities)
+
+Remaining nodes are scored. The scheduler ranks nodes by how well they fit the pod. Common priority functions:
+
+- **LeastRequestedPriority** -- favors nodes with more available resources (spreads pods across the cluster).
+- **MostRequestedPriority** -- favors nodes with less available resources (bin-packing).
+- **BalancedResourceAllocation** -- favors nodes with balanced CPU/memory usage.
+- **NodeAffinityPriority** -- weights nodes by affinity rule matching.
+- **TaintTolerationPriority** -- weights nodes by taint toleration.
+
+Each priority function returns a score (0-100). The scores are multiplied by weights and summed. The node with the highest total score wins.
+
+### Binding
+
+The scheduler creates a **Binding** object in the API server, associating the pod with the chosen node. The kubelet on that node detects the binding, pulls the container image, and starts the pod.
+
+If a node fails predicates, the pod stays pending. You can see why with:
+
+```bash
+kubectl describe pod my-pod
+```
+
+The output shows events like "0/3 nodes are available: 1 Insufficient cpu, 2 Insufficient memory."
+
+<K8sSchedulerDemo client:visible />
+
+The demo walks through filtering, scoring, and binding. Adjust the pod's resource requirements and see which nodes pass each phase.
+
+## DaemonSets and StatefulSets
+
+Pods alone are not enough for production applications. You need controllers that manage pod lifecycle, replication, and identity.
+
+### DaemonSet
+
+A DaemonSet ensures that **every node** (or a subset of nodes matching a selector) runs exactly one copy of a pod. When a new node joins the cluster, the DaemonSet automatically creates a pod on it. When a node leaves, the pod is garbage collected.
+
+Use cases:
+
+- **Log collection** -- run Fluentd or Filebeat on every node to collect container logs.
+- **Monitoring** -- run a node exporter (Prometheus) on every node for hardware metrics.
+- **Networking** -- run a CNI plugin agent (Calico, Cilium) on every node.
+- **kube-proxy** -- itself runs as a DaemonSet on every node.
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd
+spec:
+  selector:
+    matchLabels:
+      name: fluentd
+  template:
+    metadata:
+      labels:
+        name: fluentd
+    spec:
+      containers:
+      - name: fluentd
+        image: fluent/fluentd:v1.16
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+```
+
+### StatefulSet
+
+A StatefulSet manages pods that need stable, persistent identity. Unlike Deployments (where pods are interchangeable), StatefulSet pods have:
+
+- **Stable hostname** -- each pod gets a predictable name based on an ordinal index: `web-0`, `web-1`, `web-2`.
+- **Stable storage** -- each pod gets its own PersistentVolumeClaim that persists across rescheduling.
+- **Ordered deployment and scaling** -- pods are created one at a time, in order (0, 1, 2...), and deleted in reverse order.
+
+StatefulSets are used for:
+
+- Databases (PostgreSQL, MySQL, Cassandra)
+- Message queues (Kafka, RabbitMQ)
+- Distributed systems (ZooKeeper, etcd, Consul)
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 3
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+```
+
+Each pod in the StatefulSet gets its own PVC (`data-postgres-0`, `data-postgres-1`, etc.). If `postgres-2` is rescheduled to a different node, it reattaches to its original PVC.
+
+## Service Networking
+
+Pods are ephemeral. They crash, get rescheduled, scale up, and scale down. Their IP addresses change with every restart. Other components cannot hardcode pod IPs.
+
+A **Service** provides a stable network endpoint that decouples clients from individual pods. When you create a Service, it gets a stable ClusterIP (virtual IP) and a DNS name. Traffic to the ClusterIP is load-balanced across the selected pods.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-service
+spec:
+  selector:
+    app: web
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: ClusterIP
+```
+
+The selector (`app: web`) matches pod labels. The Service automatically tracks which pods match the selector and updates its endpoint list as pods come and go.
+
+### How kube-proxy Implements Services
+
+The `kube-proxy` daemon on every node watches the API server for Services and Endpoints. It creates iptables rules on the node to redirect traffic from the Service IP to a real pod IP.
+
+The iptables rules work like this:
+
+- A **DNAT rule** matches traffic destined for the Service ClusterIP:port.
+- A **statistic module** distributes traffic across endpoints with random probability (round-robin).
+- The packet's destination IP is rewritten to a pod IP and forwarded.
+
+```bash
+# Simplified iptables rules for a Service with 3 pods
+-A PREROUTING -p tcp --dport 80 -j KUBE-SVC-XXXXX
+-A KUBE-SVC-XXXXX -m statistic --mode random --probability 0.333 -j KUBE-SEP-A
+-A KUBE-SVC-XXXXX -m statistic --mode random --probability 0.500 -j KUBE-SEP-B
+-A KUBE-SVC-XXXXX -j KUBE-SEP-C
+-A KUBE-SEP-A -j DNAT --to-destination 10.1.0.2:8080
+-A KUBE-SEP-B -j DNAT --to-destination 10.1.0.3:8080
+-A KUBE-SEP-C -j DNAT --to-destination 10.1.0.4:8080
+```
+
+The first rule matches traffic to the Service IP. The three statistic rules distribute traffic with a chain of probabilities (1/3, 1/2, 1/1) to achieve even distribution. Each SEP chain performs DNAT to a specific pod.
+
+<K8sServiceDemo client:visible />
+
+The demo visualizes the request flow. Click "Send Request" to watch traffic travel from a client through the Service IP to one of three pods via iptables DNAT rules. The rules panel shows the full iptables chain.
+
+### Service Types
+
+- **ClusterIP** -- the default. Exposes the Service on an internal IP within the cluster. Only reachable from inside the cluster.
+- **NodePort** -- exposes the Service on each node's IP at a static port (30000-32767). Traffic to `<nodeIP>:<NodePort>` is forwarded to the Service.
+- **LoadBalancer** -- creates an external load balancer (cloud provider) that points to the NodePort/ClusterIP. The standard way to expose services to the internet on AWS, GCP, or Azure.
+- **ExternalName** -- returns a CNAME record with the external DNS name. No proxying.
+
+```bash
+# Create a NodePort service
+kubectl expose deployment web --type=NodePort --port=80
+
+# Get the NodePort
+kubectl get svc web
+# web        NodePort    10.96.1.1    <none>   80:31234/TCP
+
+# Access via any node's IP
+curl http://<node-ip>:31234
+```
+
+## Service DNS and CoreDNS
+
+Kubernetes runs a DNS service (CoreDNS by default) that provides name resolution for Services. CoreDNS runs as a Deployment in the `kube-system` namespace.
+
+Every Service gets a DNS record in the format:
+
+```
+<service-name>.<namespace>.svc.cluster.local
+```
+
+A pod in the same namespace can reach the Service by just its name:
+
+```bash
+# From any pod in the same namespace
+curl http://web-service:80
+
+# Cross-namespace
+curl http://web-service.default.svc.cluster.local:80
+```
+
+CoreDNS watches the API server for Services and Endpoints, updating DNS records automatically. The cluster's pod DNS configuration (in `/etc/resolv.conf`) points to the CoreDNS Service IP (typically 10.96.0.10).
+
+You can test DNS resolution from any pod:
+
+```bash
+kubectl run debug --image=busybox --rm -it --restart=Never -- nslookup web-service
+
+# Output:
+# Server:    10.96.0.10
+# Address 1: 10.96.0.10 kube-dns.kube-system.svc.cluster.local
+# Name:      web-service
+# Address 1: 10.96.1.1 web-service.default.svc.cluster.local
+```
+
+### DNS for Pods (Optional)
+
+By default, pods get DNS records too. The format is:
+
+```
+<pod-ip-with-dashes>.<namespace>.pod.cluster.local
+```
+
+This is useful for StatefulSets where each pod needs a stable DNS name:
+
+```bash
+# StatefulSet pod DNS
+curl http://postgres-0.postgres.default.svc.cluster.local:5432
+```
+
+## Ingress Controllers
+
+Services handle L4 (TCP/UDP) load balancing. But real-world applications need L7 routing -- path-based routing, host-based routing, TLS termination, and virtual hosting.
+
+**Ingress** provides L7 routing rules. An **Ingress Controller** (like NGINX Ingress, Traefik, or HAProxy) implements those rules.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-v1-service
+            port:
+              number: 80
+      - path: /v2
+        pathType: Prefix
+        backend:
+          service:
+            name: api-v2-service
+            port:
+              number: 80
+  - host: admin.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: admin-service
+            port:
+              number: 80
+```
+
+The Ingress resource defines routing rules. The Ingress Controller (running as a Deployment behind a LoadBalancer Service) watches the API server for Ingress resources and configures its reverse proxy accordingly.
+
+```bash
+# Install NGINX Ingress Controller
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml
+
+# Check the controller
+kubectl get pods -n ingress-nginx
+```
+
+The Ingress Controller creates an external LoadBalancer Service. DNS points your domain to the load balancer IP. The controller terminates TLS, inspects the HTTP Host header and path, and routes traffic to the correct backend Service.
+
+### TLS Termination
+
+```yaml
+spec:
+  tls:
+  - hosts:
+    - api.example.com
+    secretName: api-tls-secret
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 80
+```
+
+The TLS secret must contain `tls.crt` and `tls.key`. The Ingress Controller terminates TLS and forwards plain HTTP to the backend.
+
+## Network Policies
+
+By default, all pods in a Kubernetes cluster can communicate with each other. Network Policies restrict that communication using label selectors and CIDR rules.
+
+A Network Policy defines ingress and egress rules:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: database
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+```
+
+This policy:
+
+- Allows only pods with `app: frontend` to reach pods with `app: api` on port 8080.
+- Allows pods with `app: api` to reach pods with `app: database` on port 5432.
+- Allows pods with `app: api` to reach CoreDNS (any namespace, label `k8s-app: kube-dns`) on UDP 53.
+
+Network Policies require a **CNI plugin** that supports them -- Calico, Cilium, Weave, or Antrea. The default flannel CNI does not enforce policies.
+
+```bash
+# List network policies
+kubectl get networkpolicies
+
+# Describe a policy
+kubectl describe networkpolicy api-policy
+```
+
+Common patterns:
+
+- **Deny all ingress** -- default-deny ingress for a namespace.
+- **Allow only from monitoring** -- Prometheus can scrape all pods, but nothing else.
+- **Isolate tiers** -- frontend pods can reach API pods, API pods can reach database pods, but frontend cannot reach database directly.
+
+## Deployments and Rolling Updates
+
+A **Deployment** manages a set of identical pods (a ReplicaSet) with rolling update capabilities. It declares the desired state, and the Deployment Controller reconciles the actual state toward it.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.25
+        ports:
+        - containerPort: 80
+```
+
+When you update the image, Kubernetes performs a **rolling update**:
+
+```bash
+kubectl set image deployment/web nginx=nginx:1.26
+```
+
+The rolling update strategy is controlled by two parameters:
+
+- **maxSurge** (default 25%) -- how many extra pods can be created above the desired count.
+- **maxUnavailable** (default 25%) -- how many pods can be unavailable during the update.
+
+If `replicas=5`, `maxSurge=1`, and `maxUnavailable=1`, the update proceeds like this:
+
+1. Create 1 new pod (v2) -- 6 total pods (5 v1 + 1 v2).
+2. Wait for the new pod to be Ready.
+3. Delete 1 old pod (v1) -- 5 total pods (4 v1 + 1 v2).
+4. Create another new pod -- 6 total pods (4 v1 + 2 v2).
+5. Wait.
+6. Delete another old pod -- 5 total pods (3 v1 + 2 v2).
+
+This continues until all pods are v2. At any point, there are at least 4 running pods (replicas - maxUnavailable) and at most 6 (replicas + maxSurge).
+
+<K8sDeploymentDemo client:visible />
+
+The demo shows each wave of the rolling update: create a new v2 pod, wait for readiness, delete an old v1 pod, repeat. The counters track desired, current, updated, and v1 remaining counts.
+
+### Rollback
+
+If the new version has issues, roll back:
+
+```bash
+kubectl rollout undo deployment/web
+
+# Roll back to a specific revision
+kubectl rollout undo deployment/web --to-revision=2
+
+# View rollout history
+kubectl rollout history deployment/web
+```
+
+Deployments store revision history (controlled by `revisionHistoryLimit`, default 10). Each change to the pod template creates a new revision.
+
+## ConfigMaps and Secrets
+
+Configuration should be separated from application code. Kubernetes provides two resources for this.
+
+### ConfigMap
+
+A ConfigMap stores non-sensitive configuration data as key-value pairs:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  APP_COLOR: blue
+  APP_MODE: production
+  log_level: info
+  nginx.conf: |
+    server {
+      listen 80;
+      server_name example.com;
+    }
+```
+
+### Secret
+
+A Secret stores sensitive data -- passwords, API keys, certificates. Values must be base64-encoded in YAML:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secret
+type: Opaque
+data:
+  DB_PASSWORD: czNjcmV0IQ==
+  API_KEY: c2stYWJjMTIzeHl6
+  DB_USERNAME: YWRtaW4=
+```
+
+Create secrets imperatively to avoid manual encoding:
+
+```bash
+kubectl create secret generic app-secret \
+  --from-literal=DB_PASSWORD='s3cret!' \
+  --from-literal=API_KEY='sk-abc123xyz'
+```
+
+### Consuming ConfigMap and Secret
+
+**As environment variables:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: config-pod
+spec:
+  containers:
+  - name: app
+    image: my-app:latest
+    envFrom:
+    - configMapRef:
+        name: app-config
+    - secretRef:
+        name: app-secret
+```
+
+**As mounted files:**
+
+```yaml
+spec:
+  containers:
+  - name: app
+    image: my-app:latest
+    volumeMounts:
+    - name: config-volume
+      mountPath: /etc/config
+    - name: secret-volume
+      mountPath: /etc/secret
+      readOnly: true
+  volumes:
+  - name: config-volume
+    configMap:
+      name: app-config
+  - name: secret-volume
+    secret:
+      secretName: app-secret
+```
+
+When mounted as files, each key becomes a file. For Secrets, the file content is the decoded value (not base64). Updating a ConfigMap or Secret automatically updates the mounted files (with a propagation delay of minutes). Environment variables are not updated -- the pod must be restarted.
+
+<K8sConfigDemo client:visible />
+
+The demo shows ConfigMap and Secret data side by side. Toggle between environment variables and file mount modes to see how a pod consumes configuration. Secret values are displayed base64-encoded in the definition but decoded when consumed.
+
+## Control Plane Architecture
+
+The control plane is the brain of the cluster. It runs on dedicated control plane nodes (or as a managed service in EKS, GKE, AKS).
+
+### kube-apiserver
+
+The API server is the front door to the cluster. It exposes the Kubernetes API (RESTful over HTTPS). Every operation -- listing pods, creating deployments, watching for changes -- goes through the API server.
+
+It is the only component that talks to etcd. All other components (scheduler, controller manager, kubelet) communicate with the API server, never with etcd directly. This serializes access and ensures consistency.
+
+The API server:
+
+- Authenticates requests (TLS client certs, bearer tokens, OIDC).
+- Authorizes requests (RBAC, ABAC, webhook).
+- Validates and mutates resources (admission controllers).
+- Persists resource state to etcd.
+- Serves watch endpoints that let other components detect changes.
+
+### etcd
+
+etcd is a distributed, consistent key-value store. It is the single source of truth for cluster state. Kubernetes stores everything here: pod specs, deployments, secrets, configmaps, service definitions, node status.
+
+etcd uses the Raft consensus protocol to maintain consistency across replicas (typically 3 or 5). Writes require a majority (quorum) to commit. If quorum is lost, the cluster cannot accept writes.
+
+```bash
+# Backup etcd (control plane node)
+ETCDCTL_API=3 etcdctl snapshot save /backup/etcd-snapshot.db \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key
+```
+
+### kube-scheduler
+
+The scheduler watches the API server for newly created pods with no node assignment. It selects a node using the filtering and scoring algorithm described in section 5. The scheduling decision considers resource requirements, affinity/anti-affinity rules, taints and tolerations, and node health.
+
+### kube-controller-manager
+
+The controller manager runs a set of controllers in a single binary. Each controller watches the API server for changes to a specific resource type and reconciles actual state with desired state:
+
+- **Node Controller** -- monitors node health (node-monitor-period, node-monitor-grace-period). Marks nodes as NotReady, evicts pods.
+- **Replication Controller** -- ensures the correct number of pod replicas are running.
+- **Endpoints Controller** -- populates Endpoint objects for Services by matching pods to label selectors.
+- **ServiceAccount Controller** -- creates default service accounts and tokens for namespaces.
+- **Namespace Controller** -- handles namespace lifecycle.
+- **Deployment Controller** -- manages Deployment rollout.
+- **DaemonSet Controller** -- ensures each node runs a pod.
+
+### kubelet
+
+The kubelet is the node agent that runs on every worker node. It is not a container -- it runs as a systemd service directly on the node OS.
+
+The kubelet:
+
+- Registers the node with the API server.
+- Watches for pods assigned to its node.
+- Pulls container images.
+- Starts and stops containers via the container runtime (containerd, CRI-O).
+- Runs liveness, readiness, and startup probes.
+- Reports node and pod status back to the API server.
+- Mounts volumes and configures CNI networking.
+
+### kube-proxy
+
+kube-proxy runs on every node (as a DaemonSet). It implements the Service abstraction by maintaining network rules (iptables or IPVS) that forward traffic from Service IPs to pod IPs.
+
+### Container Runtime
+
+The container runtime is the software that actually runs containers. Kubernetes uses the Container Runtime Interface (CRI) to support multiple runtimes:
+
+- **containerd** -- the default, used by Docker and most managed Kubernetes offerings. Lightweight, stable.
+- **CRI-O** -- designed specifically for Kubernetes. Supports OCI-compatible images.
+- **Docker** -- supported via cri-dockerd adapter. Deprecated in Kubernetes 1.24+.
+
+<K8sArchitectureDemo client:visible />
+
+The demo visualizes the full cluster architecture. Click through each step to trace a pod creation request from kubectl through the API server, etcd, scheduler, and kubelet to the container runtime.
+
+## Custom Schedulers and Extensibility
+
+Kubernetes lets you run multiple schedulers in the same cluster. Each pod selects which scheduler to use via the `schedulerName` field:
+
+```yaml
+spec:
+  schedulerName: my-custom-scheduler
+  containers:
+  - name: app
+    image: nginx
+```
+
+### Custom Scheduler Example
+
+Run a custom scheduler as a Deployment:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custom-scheduler
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: custom-scheduler
+  template:
+    metadata:
+      labels:
+        component: custom-scheduler
+    spec:
+      serviceAccountName: custom-scheduler-sa
+      containers:
+      - name: scheduler
+        image: my-custom-scheduler:latest
+        command:
+        - /scheduler
+        - --scheduler-name=my-custom-scheduler
+```
+
+The custom scheduler watches pods with `schedulerName: my-custom-scheduler` and binds them to nodes. The default scheduler ignores those pods entirely.
+
+This is useful when you have specialized hardware (GPUs, TPUs, FPGA) that requires domain-specific scheduling logic, or when you need custom bin-packing algorithms.
+
+### Scheduler Extender
+
+For smaller changes, you can extend the default scheduler with a **scheduler extender** -- an HTTP webhook that the scheduler calls during filtering and scoring. The extender can filter nodes or adjust scores based on external data.
+
+## Pod Priority and Preemption
+
+Not all pods are equally important. A user-facing web server should take priority over a batch data processing job. Kubernetes uses **PriorityClasses** to express importance:
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000000
+globalDefault: false
+description: "High priority for user-facing services"
+```
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: low-priority
+value: 10
+globalDefault: false
+description: "Low priority for batch jobs"
+```
+
+Pods reference a PriorityClass by name:
+
+```yaml
+spec:
+  priorityClassName: high-priority
+  containers:
+  - name: app
+    image: my-app:latest
+```
+
+When the scheduler cannot fit a high-priority pod, it can **preempt** (evict) lower-priority pods to free resources. The preempted pods are gracefully terminated (SIGTERM, then SIGKILL after grace period).
+
+Preemption is not available on best-effort basis. It is a hard eviction. Use `PodDisruptionBudgets` to protect critical services:
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-pdb
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app: web
+```
+
+A PDB ensures that at least 3 pods are always available during voluntary disruptions (preemption, draining nodes).
+
+## Cluster Autoscaler
+
+The Cluster Autoscaler automatically adjusts the number of nodes in the cluster based on pod resource requests. When pods cannot be scheduled due to insufficient resources, it adds nodes. When nodes are underutilized for an extended period, it removes them.
+
+The autoscaler integrates with cloud providers (AWS, GCP, Azure) to create and terminate VM instances. It does not work with on-premise bare metal unless you have an equivalent provisioning mechanism.
+
+```bash
+# Install Cluster Autoscaler on EKS
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/autoscaler/master/cluster-autoscaler/cloudprovider/aws/examples/cluster-autoscaler-autodiscover.yaml
+
+# Check autoscaler logs
+kubectl logs -n kube-system deployment/cluster-autoscaler
+```
+
+### How It Scales Up
+
+1. A pod stays Pending because no node has enough resources.
+2. The Cluster Autoscaler detects pending pods every 10 seconds (scan interval).
+3. It calculates the required node resources to fit the pending pods.
+4. It calls the cloud provider's API to create a new node.
+5. The new node joins the cluster.
+6. The scheduler assigns the pending pods to the new node.
+
+### How It Scales Down
+
+1. A node has been underutilized (less than 50% requested CPU/memory) for 10+ minutes.
+2. The autoscaler checks that all pods on the node can be rescheduled to other nodes.
+3. Pods protected by PodDisruptionBudgets are respected.
+4. The node is cordoned (marked unschedulable) and drained.
+5. The cloud provider terminates the VM.
+
+Scale-down can be disabled entirely:
+
+```yaml
+# Cluster Autoscaler deployment flag
+--scale-down-enabled=false
+```
+
+### Horizontal Pod Autoscaler (HPA)
+
+The HPA scales the number of pod replicas based on CPU, memory, or custom metrics:
+
+```bash
+kubectl autoscale deployment web --cpu-percent=70 --min=3 --max=10
+```
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+```
+
+The HPA controller queries the metrics server every 15 seconds and adjusts the replica count. Scaling is proportional to the current utilization vs target utilization. A cooldown period (default 5 minutes up, 3 minutes down) prevents thrashing.
+
+## Self-Check
+
+Make sure you can answer these questions before closing this page:
+
+- [ ] Can you explain the difference between a pod and a container using the delivery truck analogy?
+- [ ] What is the difference between a liveness probe and a readiness probe?
+- [ ] Why do init containers run sequentially and before main containers?
+- [ ] What happens during the filtering phase of the scheduler? What predicates are evaluated?
+- [ ] How does kube-proxy implement Service networking with iptables?
+- [ ] What is the difference between a DaemonSet and a Deployment?
+- [ ] Why do StatefulSet pods have stable hostnames and storage?
+- [ ] How does a rolling update work with maxSurge=1 and maxUnavailable=1?
+- [ ] What is the difference between a ConfigMap and a Secret? How are they consumed differently?
+- [ ] Which component in the control plane is the only one that communicates directly with etcd?
+- [ ] How does the Cluster Autoscaler decide when to add or remove nodes?
+- [ ] **Challenge**: A user reports that their pod stays in Pending state with the event "0/5 nodes are available: 3 Insufficient cpu, 2 node(s) didn't match pod anti-affinity." What is happening, and what commands would you run to debug this?
+
+If you got them all, you understand the core of Kubernetes orchestration. If not, revisit the demos above -- each one illustrates a specific concept that builds on the previous ones.
