@@ -1,202 +1,211 @@
-import { useState, useMemo } from 'react'
-import Prism from 'prismjs'
-import 'prismjs/components/prism-ruby'
+import { useState } from 'react'
 import DemoBoundary from './DemoBoundary'
 
 const s = {
-  bg: '#0a0c0f',
-  bg2: '#15191e',
-  bg3: '#29313d',
-  text: '#f1f2f3',
-  text2: '#acb0b9',
-  text3: '#747c8b',
-  border: '#3e4a5b',
-  border2: '#536279',
-  accent: '#5b8def',
-  green: '#3dd68c',
-  red: '#e85d5d',
-  yellow: '#e0b040',
-  purple: '#9b7bea',
-  orange: '#e8945a',
+  bg: '#0a0c0f', bg2: '#15191e', bg3: '#29313d',
+  text: '#f1f2f3', text2: '#acb0b9', text3: '#747c8b',
+  border: '#3e4a5b', border2: '#536279',
+  accent: '#5b8def', green: '#3dd68c', red: '#e85d5d',
+  yellow: '#e0b040', purple: '#9b7bea', orange: '#e8945a',
   mono: "'SF Mono', 'Cascadia Code', Consolas, monospace",
 }
 
-const layers = [
-  {
-    id: 'system',
-    label: 'System Tests',
-    color: s.purple,
-    width: 240,
-    count: 'Few',
-    speed: 'Slowest (seconds)',
-    scope: 'Full stack',
-    description: 'System tests exercise your entire application through a real browser. They simulate real user behavior: clicking buttons, filling forms, navigating pages. They catch integration bugs that unit tests miss but are expensive to run.',
-    example: `# system/tests/users_test.rb
-require "application_system_test_case"
+type View = 'pyramid' | 'trophy'
 
-class UsersTest < ApplicationSystemTestCase
-  test "user signs up successfully" do
-    visit new_user_registration_path
-    fill_in "Email", with: "user@example.com"
-    fill_in "Password", with: "secure123"
-    click_button "Sign Up"
-    assert_text "Welcome! You have signed up."
-  end
-end`,
-    when: 'Use when you need to verify end-to-end flows: sign-up, checkout, multi-step wizards. Keep the count low because they are slow and brittle.',
+interface LayerInfo {
+  id: string
+  label: string
+  color: string
+  pct: string
+  desc: string
+  examples: string[]
+  tools: string[]
+  when: string
+}
+
+const pyramidLayers: LayerInfo[] = [
+  {
+    id: 'e2e', label: 'E2E Tests', color: s.purple, pct: '10%',
+    desc: 'Tests that simulate real user behavior through a browser. They click buttons, fill forms, navigate pages, and verify the full stack works end-to-end. These are the slowest and most expensive tests, so keep the count low.',
+    examples: ['User sign-up flow', 'Checkout and payment', 'Multi-step wizard'],
+    tools: ['Playwright', 'Cypress', 'Selenium'],
+    when: 'Use for critical business flows where the full stack must work together. Keep to 10% of your suite.',
   },
   {
-    id: 'integration',
-    label: 'Integration Tests',
-    color: s.accent,
-    width: 340,
-    count: 'Moderate',
-    speed: 'Moderate (milliseconds)',
-    scope: 'Request/Response',
-    description: 'Integration tests verify that multiple parts of your application work together correctly. They exercise controllers, models, and the routing layer as a unit, but skip the browser. They are faster than system tests and catch cross-component bugs.',
-    example: `# test/integration/user_flows_test.rb
-require "test_helper"
-
-class UserFlowsTest < ActionDispatch::IntegrationTest
-  test "create user and receive confirmation" do
-    post "/users", params: {
-      user: { email: "new@example.com", password: "secret" }
-    }
-    assert_response :created
-    json = JSON.parse(response.body)
-    assert_equal "new@example.com", json["email"]
-    assert json["confirmation_url"].present?
-  end
-end`,
-    when: 'Use when you need to test how controllers, models, and routes interact. API endpoints, authentication flows, and multi-model operations are good candidates.',
+    id: 'integration', label: 'Integration Tests', color: s.accent, pct: '20%',
+    desc: 'Tests that verify multiple components work together correctly. They test API endpoints, database interactions, and service-to-service communication without the browser. Faster than E2E but still exercise real dependencies.',
+    examples: ['REST API response format', 'Database query correctness', 'External service integration'],
+    tools: ['RSpec', 'pytest', 'Jest + supertest'],
+    when: 'Use for API endpoints, database layer testing, and service integration. Aim for 20% of your suite.',
   },
   {
-    id: 'unit',
-    label: 'Unit Tests',
-    color: s.green,
-    width: 460,
-    count: 'Many',
-    speed: 'Fast (microseconds)',
-    scope: 'Single class/method',
-    description: 'Unit tests verify individual pieces of your code in isolation. They test one method, one class, or one small behavior at a time. Because they are fast and focused, you can run thousands of them in seconds. They form the foundation of your test suite.',
-    example: `# test/models/user_test.rb
-require "test_helper"
-
-class UserTest < ActiveSupport::TestCase
-  test "valid user with email and password" do
-    user = User.new(email: "test@example.com", password: "secret")
-    assert user.valid?
-  end
-
-  test "invalid without email" do
-    user = User.new(password: "secret")
-    assert_not user.valid?
-    assert_includes user.errors[:email], "can't be blank"
-  end
-
-  test "email normalization" do
-    user = User.new(email: "  TEST@Example.COM  ")
-    user.valid?
-    assert_equal "test@example.com", user.email
-  end
-end`,
-    when: 'Use for every model method, validation, callback, service class, and utility function. If it has logic, it deserves a unit test. Aim for high coverage here.',
+    id: 'unit', label: 'Unit Tests', color: s.green, pct: '70%',
+    desc: 'Tests that verify individual functions, methods, or classes in isolation. They are fast (microseconds), focused (one behavior per test), and form the foundation of your test suite. You should have many of them.',
+    examples: ['Validation logic', 'Price calculation', 'Input sanitization'],
+    tools: ['Jest', 'Vitest', 'pytest', 'JUnit'],
+    when: 'Use for every piece of business logic, utility function, and model validation. This is the bulk of your suite.',
   },
 ]
 
+const trophyLayers: LayerInfo[] = [
+  {
+    id: 'e2e', label: 'E2E Tests', color: s.purple, pct: '5%',
+    desc: 'Critical path tests that verify the most important user journeys. Minimal count due to brittleness and maintenance cost.',
+    examples: ['Payment flow', 'User onboarding', 'Core feature walkthrough'],
+    tools: ['Playwright', 'Cypress', 'Selenium'],
+    when: 'Only the most critical user journeys. Keep to 5% or less.',
+  },
+  {
+    id: 'integration', label: 'Integration Tests', color: s.accent, pct: '20%',
+    desc: 'Tests that verify components work together through their public interfaces. Unlike the pyramid, these focus on contract testing and API boundary verification rather than exhaustive scenarios.',
+    examples: ['API contract tests', 'Database migration tests', 'Service boundary tests'],
+    tools: ['supertest', 'RSpec request tests', 'pytest + Testcontainers'],
+    when: 'Use for API contracts, database migrations, and service boundaries. About 20% of your suite.',
+  },
+  {
+    id: 'unit', label: 'Unit Tests', color: s.green, pct: '40%',
+    desc: 'Fast, focused tests for business logic. The trophy reduces the emphasis on unit tests compared to the pyramid and redirects effort toward static analysis and type checking.',
+    examples: ['Business rule validation', 'Data transformation', 'Edge case handling'],
+    tools: ['Jest', 'Vitest', 'pytest', 'JUnit'],
+    when: 'Use for business logic and complex algorithms. About 40% of your suite.',
+  },
+  {
+    id: 'static', label: 'Static Analysis', color: s.orange, pct: '35%',
+    desc: 'Static analysis catches entire categories of bugs before any test runs. Type checking (TypeScript, mypy), linting (ESLint, ruff), and formal verification catch null references, type mismatches, and style issues automatically.',
+    examples: ['Type checking catches null access', 'Linting prevents common bugs', 'Formatter enforces consistency'],
+    tools: ['TypeScript', 'mypy', 'ESLint', 'ruff', 'prettier'],
+    when: 'Always. Static analysis is the cheapest way to prevent bugs. Every project should have linting and type checking from day one.',
+  },
+]
+
+const H: React.CSSProperties = { fontSize: 20, fontWeight: 700, color: s.text, marginBottom: 16, letterSpacing: -0.3 }
+const SEC: React.CSSProperties = { background: s.bg2, borderRadius: 12, padding: '24px 28px', marginBottom: 24 }
+
 export default function TestPyramidDemo() {
+  const [view, setView] = useState<View>('pyramid')
   const [selected, setSelected] = useState<string | null>(null)
 
-  const selectedLayer = layers.find((l) => l.id === selected)
-
-  const exampleHtml = useMemo(() => {
-    if (!selectedLayer) return ''
-    return Prism.highlight(selectedLayer.example, Prism.languages.ruby, 'ruby')
-  }, [selectedLayer])
+  const layers = view === 'pyramid' ? pyramidLayers : trophyLayers
+  const selectedLayer = layers.find(l => l.id === selected)
 
   return (
-    <DemoBoundary name="Test Pyramid">
-      <div style={{ maxWidth: 820, margin: '0 auto', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
-        <div style={{ textAlign: 'center', marginBottom: 8 }}>
-          <span style={{ color: s.text3, fontSize: 13, fontFamily: s.mono }}>Click a layer to explore</span>
+    <DemoBoundary name="Testing Pyramid vs Trophy">
+    <div style={{ background: s.bg, padding: '32px 24px', borderRadius: 16, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", maxWidth: 820, margin: '0 auto' }}>
+      <div style={SEC}>
+        <div style={H}>Testing Pyramid vs Testing Trophy</div>
+        <p style={{ color: s.text2, fontSize: 14, margin: '0 0 16px 0', lineHeight: 1.6 }}>
+          The classic pyramid recommends many unit tests, fewer integration tests, and few E2E tests.
+          The modern trophy adds static analysis and shifts proportions.
+        </p>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+          <button onClick={() => { setView('pyramid'); setSelected(null) }} style={{
+            flex: 1, padding: '10px 16px', cursor: 'pointer', borderRadius: 8,
+            background: view === 'pyramid' ? s.accent + '20' : s.bg3,
+            border: `1px solid ${view === 'pyramid' ? s.accent : s.border}`,
+            color: view === 'pyramid' ? s.accent : s.text2,
+            fontWeight: 600, fontSize: 13, fontFamily: s.mono,
+            transition: 'all 0.15s',
+          }}>Classic Pyramid</button>
+          <button onClick={() => { setView('trophy'); setSelected(null) }} style={{
+            flex: 1, padding: '10px 16px', cursor: 'pointer', borderRadius: 8,
+            background: view === 'trophy' ? s.accent + '20' : s.bg3,
+            border: `1px solid ${view === 'trophy' ? s.accent : s.border}`,
+            color: view === 'trophy' ? s.accent : s.text2,
+            fontWeight: 600, fontSize: 13, fontFamily: s.mono,
+            transition: 'all 0.15s',
+          }}>Testing Trophy</button>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0 }}>
-          {layers.map((layer) => {
+
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0, marginBottom: 20 }}>
+          {(view === 'pyramid' ? [...pyramidLayers].reverse() : [...trophyLayers].reverse()).map(layer => {
             const isActive = selected === layer.id
+            const isTop = layer.id === (view === 'pyramid' ? 'unit' : 'static')
+            const isBottom = layer.id === (view === 'pyramid' ? 'e2e' : 'e2e')
             return (
               <button
                 key={layer.id}
                 onClick={() => setSelected(isActive ? null : layer.id)}
                 style={{
-                  width: layer.width,
-                  height: 72,
-                  background: isActive ? layer.color : 'transparent',
-                  border: `2px solid ${layer.color}`,
-                  borderBottom: layer.id === 'unit' ? `2px solid ${layer.color}` : 'none',
-                  borderRadius: layer.id === 'system' ? '10px 10px 0 0' : layer.id === 'unit' ? '0 0 10px 10px' : 0,
-                  color: isActive ? s.bg : layer.color,
+                  width: view === 'pyramid'
+                    ? layer.id === 'e2e' ? 260 : layer.id === 'integration' ? 380 : 500
+                    : layer.id === 'static' ? 500 : layer.id === 'unit' ? 420 : layer.id === 'integration' ? 320 : 240,
+                  height: 56,
+                  background: isActive ? layer.color + '25' : s.bg3,
+                  border: `2px solid ${isActive ? layer.color : layer.color + '60'}`,
+                  borderBottom: isTop ? 'none' : `1px solid ${isActive ? layer.color : layer.color + '60'}`,
+                  borderRadius: isBottom ? '10px 10px 0 0' : isTop ? '0 0 10px 10px' : 0,
+                  color: isActive ? layer.color : s.text,
                   cursor: 'pointer',
                   transition: 'all 0.2s ease',
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 16,
+                  justifyContent: 'space-between',
+                  padding: '0 20px',
                   fontFamily: s.mono,
-                  fontSize: 14,
+                  fontSize: 13,
                   fontWeight: 600,
                   position: 'relative',
                 }}
               >
                 <span>{layer.label}</span>
-                <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.7 }}>{layer.count} | {layer.speed}</span>
+                <span style={{ fontSize: 11, fontWeight: 400, color: isActive ? layer.color : s.text3 }}>
+                  {layer.pct}
+                </span>
               </button>
             )
           })}
         </div>
 
+        <div style={{ display: 'flex', gap: 2, marginBottom: 20 }}>
+          {(view === 'pyramid' ? pyramidLayers : trophyLayers).map(layer => {
+            const pctNum = parseInt(layer.pct)
+            return (
+              <div
+                key={layer.id}
+                style={{
+                  flex: pctNum, height: 8, borderRadius: 4,
+                  background: layer.color,
+                  opacity: selected === null || selected === layer.id ? 1 : 0.3,
+                  transition: 'opacity 0.2s',
+                }}
+              />
+            )
+          })}
+        </div>
+
         {selectedLayer && (
-          <div style={{ marginTop: 20, background: s.bg2, border: `1px solid ${selectedLayer.color}`, borderRadius: 10, overflow: 'hidden' }}>
-            <div style={{ padding: '16px 20px', borderBottom: `1px solid ${s.border}` }}>
-              <div style={{ color: selectedLayer.color, fontWeight: 600, fontSize: 15, marginBottom: 6 }}>{selectedLayer.label}</div>
-              <div style={{ color: s.text2, fontSize: 13, lineHeight: 1.6 }}>{selectedLayer.description}</div>
-              <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                <div style={{ background: s.bg, padding: '4px 10px', borderRadius: 6, fontSize: 12, fontFamily: s.mono, color: s.text2 }}>
-                  Count: {selectedLayer.count}
+          <div style={{ background: s.bg, border: `1px solid ${selectedLayer.color}`, borderRadius: 10, overflow: 'hidden' }}>
+            <div style={{ padding: '14px 18px', borderBottom: `1px solid ${s.border}` }}>
+              <div style={{ color: selectedLayer.color, fontWeight: 600, fontSize: 15, marginBottom: 6, fontFamily: s.mono }}>
+                {selectedLayer.label} ({selectedLayer.pct})
+              </div>
+              <div style={{ color: s.text2, fontSize: 13, lineHeight: 1.6, marginBottom: 10 }}>
+                {selectedLayer.desc}
+              </div>
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                <div style={{ flex: 1, minWidth: 140 }}>
+                  <div style={{ color: s.text3, fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Examples</div>
+                  {selectedLayer.examples.map(ex => (
+                    <div key={ex} style={{ color: s.text, fontSize: 12, fontFamily: s.mono, padding: '2px 0' }}>{ex}</div>
+                  ))}
                 </div>
-                <div style={{ background: s.bg, padding: '4px 10px', borderRadius: 6, fontSize: 12, fontFamily: s.mono, color: s.text2 }}>
-                  Speed: {selectedLayer.speed}
-                </div>
-                <div style={{ background: s.bg, padding: '4px 10px', borderRadius: 6, fontSize: 12, fontFamily: s.mono, color: s.text2 }}>
-                  Scope: {selectedLayer.scope}
+                <div style={{ flex: 1, minWidth: 140 }}>
+                  <div style={{ color: s.text3, fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Tools</div>
+                  {selectedLayer.tools.map(t => (
+                    <div key={t} style={{ color: s.text, fontSize: 12, fontFamily: s.mono, padding: '2px 0' }}>{t}</div>
+                  ))}
                 </div>
               </div>
             </div>
-            <div style={{ padding: '12px 20px', borderBottom: `1px solid ${s.border}` }}>
-              <div style={{ color: s.text3, fontSize: 11, fontFamily: s.mono, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>Example</div>
-              <div className="tpc" style={{ background: s.bg, borderRadius: 8, padding: 14, border: `1px solid ${s.border}`, overflowX: 'auto' }}>
-                <div style={{ whiteSpace: 'pre', fontFamily: s.mono, fontSize: 12, lineHeight: 1.6 }}>
-                  <style>{`
-.tpc code .token.keyword { color: #f92672; }
-.tpc code .token.string, .tpc code .token.char, .tpc code .token.builtin, .tpc code .token.inserted { color: #e6db74; }
-.tpc code .token.number, .tpc code .token.constant, .tpc code .token.symbol, .tpc code .token.property, .tpc code .token.tag, .tpc code .token.boolean, .tpc code .token.deleted { color: #ae81ff; }
-.tpc code .token.selector, .tpc code .token.attr-name { color: #f92672; }
-.tpc code .token.attr-value, .tpc code .token.atrule { color: #e6db74; }
-.tpc code .token.function, .tpc code .token.class-name { color: #a6e22e; }
-.tpc code .token.operator, .tpc code .token.entity, .tpc code .token.url, .tpc code .token.punctuation { color: #f8f8f2; }
-.tpc code .token.comment, .tpc code .token.prolog, .tpc code .token.doctype, .tpc code .token.cdata { color: #75715e; font-style: italic; }
-.tpc code .token.parameter, .tpc code .token.variable, .tpc code .token.regex, .tpc code .token.important { color: #fd971f; }
-`}</style>
-                  <code dangerouslySetInnerHTML={{ __html: exampleHtml }} />
-                </div>
-              </div>
-            </div>
-            <div style={{ padding: '12px 20px' }}>
-              <div style={{ color: s.text3, fontSize: 11, fontFamily: s.mono, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>When to use</div>
-              <div style={{ color: s.text2, fontSize: 13, lineHeight: 1.5 }}>{selectedLayer.when}</div>
+            <div style={{ padding: '10px 18px' }}>
+              <div style={{ color: s.text3, fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>When to use</div>
+              <div style={{ color: s.text2, fontSize: 12, lineHeight: 1.5 }}>{selectedLayer.when}</div>
             </div>
           </div>
         )}
       </div>
+    </div>
     </DemoBoundary>
   )
 }
