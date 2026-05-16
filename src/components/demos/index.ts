@@ -438,10 +438,18 @@ export { default as WsPingPongDemo } from './WsPingPongDemo'
 export { default as WillChangeDemo } from './WillChangeDemo'
 export { default as WindowLimitDemo } from './WindowLimitDemo'
 export { default as WorktreeDemo } from './WorktreeDemo'
+<<<<<<< HEAD
 export { default as PythonArchitectureDemo } from './PythonArchitectureDemo'
 export { default as PythonAsyncioDemo } from './PythonAsyncioDemo'
 export { default as PythonBytecodeDemo } from './PythonBytecodeDemo'
 export { default as PythonDescriptorDemo } from './PythonDescriptorDemo'
 export { default as PythonGilDemo } from './PythonGilDemo'
 export { default as PythonMemoryDemo } from './PythonMemoryDemo'
+=======
+export { default as WasmModuleDemo } from './WasmModuleDemo'
+export { default as WasmStackMachineDemo } from './WasmStackMachineDemo'
+export { default as WasmLinearMemoryDemo } from './WasmLinearMemoryDemo'
+export { default as WasmImportExportDemo } from './WasmImportExportDemo'
+export { default as WasmCompilerDemo } from './WasmCompilerDemo'
+>>>>>>> feat/wasm-webassembly
 export { getStepDelay } from './SpeedController'

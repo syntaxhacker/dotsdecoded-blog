@@ -1,0 +1,572 @@
+---
+title: "WebAssembly: Module Structure, Linear Memory, and How WASM Works Under the Hood"
+description: "A deep dive into WebAssembly — the binary format, module structure (types, imports, exports, functions), linear memory, the stack machine, WASI, and compiling languages to WASM."
+date: 2026-05-20T01:00:00
+tags: ["webassembly", "wasm", "internals", "compiler", "browser"]
+---
+
+import WasmModuleDemo from '../../components/demos/WasmModuleDemo'
+import WasmStackMachineDemo from '../../components/demos/WasmStackMachineDemo'
+import WasmLinearMemoryDemo from '../../components/demos/WasmLinearMemoryDemo'
+import WasmImportExportDemo from '../../components/demos/WasmImportExportDemo'
+import WasmCompilerDemo from '../../components/demos/WasmCompilerDemo'
+
+## What is WebAssembly?
+
+Imagine you are a shipping company. Your trucks can carry any cargo -- furniture, electronics, food -- as long as it fits inside standardized shipping containers. The container is a universal box that every truck, train, and ship knows how to handle. You do not need to know what is inside; you just need to move the container from point A to point B efficiently.
+
+WebAssembly (WASM) is that shipping container for code. It is a low-level binary instruction format that runs in a virtual machine at near-native speed. Any language that compiles to WASM (C, C++, Rust, Go, Zig, and more) can run in any WASM runtime -- the browser, a server, an edge function, or a microcontroller.
+
+WASM was standardized by the W3C in 2019, built by engineers from Google, Mozilla, Microsoft, and Apple. It is designed to be fast to parse, fast to execute, safe (sandboxed memory), and portable across platforms.
+
+The core idea is simple: instead of shipping JavaScript to the browser, you ship pre-compiled WASM binaries that the browser's engine can validate, compile to native code, and execute with minimal overhead.
+
+## WebAssembly vs JavaScript
+
+WASM is not a replacement for JavaScript. It is a complement. Each has strengths:
+
+| Aspect | JavaScript | WebAssembly |
+|--------|-----------|-------------|
+| Type system | Dynamic | Static (i32, i64, f32, f64) |
+| Memory model | Garbage-collected heap | Linear memory (manual) |
+| Parse time | Slow (parse AST) | Fast (validate binary) |
+| Execution speed | JIT-compiled | Pre-compiled near-native |
+| DOM access | Direct | Via JS bridge |
+| Use case | UI, logic, async | CPU-heavy computation |
+
+Think of it this way: JavaScript is great at orchestrating -- managing UI state, handling async events, making network requests. WASM is great at computing -- image processing, physics simulations, video encoding, cryptographic operations.
+
+A common pattern is to write your performance-critical code in Rust or C, compile it to WASM, and call it from JavaScript. The JS code handles the UI and event loop; the WASM code handles the heavy lifting.
+
+## Real-World Use Cases
+
+WASM is already running in production at massive scale:
+
+- **Figma** -- the design tool runs its rendering engine (C++ compiled to WASM) in the browser. This is what made Figma possible in the browser at native-app speeds.
+- **Google Earth** -- the 3D rendering pipeline compiles to WASM for in-browser planet exploration.
+- **Unity and Unreal Engine** -- game engines compile C++ to WASM to run AAA-quality games in the browser.
+- **Image and video processing** -- libraries like libvips, FFmpeg, and OpenCV compile to WASM for client-side image manipulation.
+- **Scientific computing** -- NumPy-style operations, linear algebra, and signal processing run at near-native speed.
+- **Blockchain** -- Ethereum uses WASM (ewasm) for smart contract execution. Solana uses WASM for on-chain programs.
+- **Plugin systems** -- Envoy proxy, Istio, and other infrastructure tools use WASM for extensible plugin sandboxes.
+- **Edge computing** -- Cloudflare Workers, Fastly Compute, and Deno Deploy run WASM at the edge.
+
+The common thread: wherever you need sandboxed, portable, high-performance code execution, WASM is the answer.
+
+## Binary Format and Magic Number
+
+Every WASM binary starts with the same 8 bytes:
+
+```
+00 61 73 6D 01 00 00 00
+```
+
+The first 4 bytes spell `\0asm` in ASCII -- the magic number. The next 4 bytes are the version in little-endian: version 1. If you ever need to detect whether a file is WASM, check for this header.
+
+After the header comes a sequence of **sections**. Each section has a one-byte ID followed by a length (encoded as LEB128, a variable-length integer encoding), then the section content.
+
+LEB128 (Little-Endian Base-128) is a way to encode integers using fewer bytes for small values. A value under 128 fits in one byte. Larger values use the high bit as a continuation flag. WASM uses unsigned LEB128 for section sizes and signed LEB128 for i32 immediates.
+
+<WasmModuleDemo client:visible />
+
+The demo above breaks down a real WASM module byte by byte. Click each section header to see the binary representation and its WAT equivalent.
+
+## Module Sections
+
+A WASM module can contain up to 12 section types, each identified by a numeric ID:
+
+| ID | Section | Purpose |
+|----|---------|---------|
+| 0 | Custom | Debug info, names (ignored by engines) |
+| 1 | Type | Function signatures (param and return types) |
+| 2 | Import | External functions, memories, globals |
+| 3 | Function | Declares functions by type index |
+| 4 | Table | Indirect function call tables |
+| 5 | Memory | Linear memory declarations |
+| 6 | Global | Global variables |
+| 7 | Export | Exports functions, memories, tables, globals |
+| 8 | Start | Optional start function (runs on instantiation) |
+| 9 | Element | Table initialization data |
+| 10 | Code | Function bodies (bytecode) |
+| 11 | Data | Memory initialization data |
+
+Not all sections are required. A minimal module needs Type, Function, Export, and Code sections.
+
+The **Import** section deserves special attention. It allows a WASM module to declare functions, memories, tables, and globals that the host environment must provide. The Two-level namespace convention (`module_name.field_name`) avoids naming conflicts. For example, an import of `"console" "log"` means the host must provide a function under the `console` module named `log`.
+
+The **Table** section enables indirect function calls -- the WASM equivalent of function pointers. Tables store function references by index, and `call_indirect` invokes them with runtime type checking.
+
+## Compilation Pipeline
+
+Writing raw WASM by hand is impractical for real projects. Instead, developers write in high-level languages and compile through a toolchain.
+
+The most common pipeline: C/Rust -> Clang/rustc -> LLVM IR -> LLVM WebAssembly backend -> .wasm file.
+
+<WasmCompilerDemo client:visible />
+
+The pipeline starts with your source code. The compiler generates LLVM IR (Intermediate Representation), a target-independent assembly-like language. LLVM runs optimization passes on the IR. The WebAssembly backend then emits a .wasm binary.
+
+For Rust specifically, the `wasm-pack` tool handles the entire workflow: compiling to WASM, generating JavaScript bindings, and publishing to npm. It uses `wasm-bindgen` to create idiomatic JS bindings that handle type conversions between JS and WASM.
+
+The resulting WASM binary is remarkably small -- a simple `add` function compiles to about 38 bytes of WASM. Native x86-64 machine code would be 100+ bytes with ELF headers. WASM's compact binary format and lack of platform-specific overhead make it ideal for network delivery.
+
+Tools in the ecosystem:
+- **wasm-opt** (Binaryen) -- post-compilation optimizer that shrinks and speeds up WASM
+- **wasm-decompile** -- converts WASM back to a C-like pseudocode
+- **wasm2wat / wat2wasm** (wabt) -- convert between binary and text formats
+- **wasmtime** -- standalone WASM runtime with WASI support
+- **wasmer** -- another standalone runtime with multiple backend engines
+
+## WAT Text Format
+
+WASM binaries are hard to read. The WebAssembly Text Format (WAT) is the human-readable representation. It uses S-expressions (like Lisp) with parentheses to define structure.
+
+Here is our simple `add` module in WAT:
+
+```wat
+(module
+  (type (func (param i32 i32) (result i32)))
+  (func $add (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    local.get $b
+    i32.add)
+  (export "add" (func $add)))
+```
+
+Every section has a WAT counterpart. The `type` keyword declares a function signature. The `func` keyword defines a function body. The `export` keyword makes a function visible to the host.
+
+WAT also supports a folded form where instructions nest:
+
+```wat
+(i32.add (local.get $a) (local.get $b))
+```
+
+This is equivalent but avoids thinking about the stack. Most WAT output tools default to the unfolded form to match the stack machine semantics.
+
+To convert between binary and text:
+```bash
+wat2wasm add.wat -o add.wasm   # text to binary
+wasm2wat add.wasm -o add.wat   # binary to text
+```
+
+## The Stack Machine
+
+WASM is a **stack machine**. There are no hardware registers in the traditional sense. Instead, instructions push values onto an implicit stack and pop values off.
+
+Consider the instruction sequence for `add(1, 2)`:
+
+```
+i32.const 1    ; push 1 onto stack  -> stack: [1]
+i32.const 2    ; push 2 onto stack  -> stack: [1, 2]
+i32.add        ; pop 2, pop 1, push 3 -> stack: [3]
+```
+
+The `i32.add` instruction pops the top two values, adds them, and pushes the result. This is fundamentally different from x86 assembly where `add eax, ebx` operates on named registers.
+
+<WasmStackMachineDemo client:visible />
+
+Step through the demo to watch the stack grow and shrink with each instruction. The stack-based design makes WASM simple to validate and JIT-compile -- every instruction has a predictable effect on the stack.
+
+### Locals
+
+Functions can declare local variables. Locals are indexed numerically and accessed with `local.get` and `local.set`. Unlike the value stack, locals persist across instructions within a function.
+
+```wat
+(func $double (param $x i32) (result i32)
+  local.get $x
+  i32.const 2
+  i32.mul)
+```
+
+Parameters are local variables 0, 1, ... N. Additional locals declared after parameters use indices N+1, N+2, etc.
+
+### Control Flow
+
+WASM's control flow is structured -- no arbitrary `goto` or `jmp`. Three block types provide structured branching:
+
+- **block** -- sequential execution with an optional label. `br` exits the block.
+- **loop** -- repeats execution. `br` goes back to the start of the loop.
+- **if/else/end** -- conditional with optional else branch.
+
+```wat
+(func $max (param $a i32) (param $b i32) (result i32)
+  local.get $a
+  local.get $b
+  i32.gt_s
+  if (result i32)
+    local.get $a
+  else
+    local.get $b
+  end)
+```
+
+Control flow instructions use **branching with labels**. `br $label` breaks to the beginning of a loop or the end of a block. `br_if` does the same conditionally.
+
+Blocks and loops are matched structurally in the binary format, making WASM verifiable in a single pass. The validator checks that:
+- Stack height matches at block boundaries
+- Types are consistent
+- All branches target valid labels
+- Function ends with the correct return type on the stack
+
+## Linear Memory
+
+WASM's memory is a flat, contiguous array of bytes. There is no heap, no stack frames, no virtual memory -- just one big array. This is called **linear memory**.
+
+Each WASM instance has its own memory. Memory is divided into **pages** of 64 KB each. Memory starts at a fixed size (declared in the Memory section) and can grow but never shrink.
+
+```
+Memory: [0, 1, 2, 3, ..., 65535, 65536, ..., N*65536 - 1]
+         \___________ 64 KB page 0 ___________/
+         \___________ 64 KB page 1 ___________/
+         ...
+```
+
+<WasmLinearMemoryDemo client:visible />
+
+Memory instructions operate at byte granularity:
+
+```wat
+i32.const 0       ; address
+i32.load          ; load i32 from address 0
+
+i32.const 100     ; address
+i32.const 42      ; value
+i32.store         ; store i32 at address 100
+```
+
+Load and store operations have alignment hints and can specify the number of bytes to access:
+
+| Instruction | Bytes | Action |
+|-------------|-------|--------|
+| i32.load8_s | 1 | Load signed byte, extend to i32 |
+| i32.load8_u | 1 | Load unsigned byte, zero-extend |
+| i32.store8 | 1 | Store lowest byte of i32 |
+| i32.load16_s | 2 | Load signed 16-bit |
+| i32.load | 4 | Load full i32 |
+
+### Memory Between JS and WASM
+
+The killer feature of linear memory is that JavaScript and WASM share it. When you create a WASM instance, its memory is exposed as an `ArrayBuffer` in JavaScript:
+
+```javascript
+const memory = wasm.instance.exports.memory;
+const view = new Uint8Array(memory.buffer);
+
+// Write from JS side
+view[0] = 42;
+
+// WASM reads the same byte via i32.load
+// Both sides see the same memory
+```
+
+Passing pointers between JS and WASM is just passing integer offsets:
+
+```javascript
+const ptr = wasm.instance.exports.allocate(100);
+const view = new Uint8Array(wasm.instance.exports.memory.buffer);
+// Read 100 bytes starting at ptr
+const data = view.slice(ptr, ptr + 100);
+```
+
+This shared memory model is what makes WASM efficient for data-heavy operations. You do not serialize or copy data across a boundary. Both sides read from the same byte array.
+
+### Memory Growth
+
+Memory starts at a fixed initial size and can grow via `memory.grow`. Each grow adds one page (64 KB). This is the only way WASM can expand its memory -- no mmap, no sbrk, just grow or shrink the linear array.
+
+```wat
+i32.const 1       ; number of pages to add
+memory.grow       ; returns previous size in pages, or -1 on failure
+```
+
+In practice, WASM programs use a custom allocator (like `dlmalloc` or `wee_alloc`) on top of linear memory, typically implemented in C/C++ and compiled alongside the application code.
+
+## Imports and Exports
+
+A WASM module communicates with the outside world through imports and exports. This is the bridge between the sandboxed WASM code and the host environment.
+
+### Exports
+
+Exports are items the module makes available to the host. Functions, memories, tables, and globals can all be exported.
+
+```wat
+(module
+  (func $add (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.add)
+  (export "add" (func $add)))
+```
+
+On the JavaScript side:
+
+```javascript
+const wasm = await WebAssembly.instantiate(bytes);
+const { add } = wasm.instance.exports;
+console.log(add(3, 4)); // 7
+```
+
+### Imports
+
+Imports are items the module requires from the host. The host must provide them at instantiation time.
+
+```wat
+(module
+  (import "console" "log" (func $log (param i32)))
+  (func (export "run")
+    i32.const 42
+    call $log))
+```
+
+JavaScript provides imports as an object:
+
+```javascript
+const importObject = {
+  console: {
+    log: (x) => console.log("WASM says:", x),
+  },
+};
+const wasm = await WebAssembly.instantiate(bytes, importObject);
+wasm.instance.exports.run();
+```
+
+<WasmImportExportDemo client:visible />
+
+The Two-level namespace (`"console" "log"`) is a convention, not a requirement. You can organize imports however you like.
+
+### Tables and call_indirect
+
+WASM supports indirect function calls through tables. A table is an array of function references indexed by integer. The `call_indirect` instruction invokes a function from a table.
+
+```wat
+(module
+  (type $void (func))
+  (table 2 funcref)
+  (elem (i32.const 0) $foo $bar)
+  (func $foo ...)
+  (func $bar ...)
+  (func (export "callByIndex") (param i32)
+    local.get 0
+    call_indirect (type $void)))
+```
+
+Tables enable dynamic dispatch, callbacks, and plugin architectures in WASM.
+
+## WASI -- WebAssembly System Interface
+
+WASM in the browser has access to JS and Web APIs. But WASM outside the browser (server, CLI, edge) needs operating system services -- files, sockets, clocks, random numbers.
+
+WASI (WebAssembly System Interface) provides a POSIX-like system interface for WASM. It defines a set of imports that a WASI-compliant runtime must provide:
+
+- **fd_read/fd_write** -- file descriptor I/O
+- **path_open** -- open files by path
+- **clock_time_get** -- read the system clock
+- **random_get** -- cryptographically secure randomness
+- **args_get** -- read command-line arguments
+- **environ_get** -- read environment variables
+
+A WASI program looks like this:
+
+```rust
+use std::io::{self, Write};
+
+fn main() {
+    let mut buffer = String::new();
+    io::stdin().read_line(&mut buffer).unwrap();
+    println!("Hello, {}!", buffer.trim());
+}
+```
+
+Compiled with `rustc --target wasm32-wasi`, this produces a .wasm file that runs anywhere WASI is supported:
+
+```bash
+$ wasmtime hello.wasm
+# prompts for input, prints greeting
+```
+
+WASI's modular design means runtimes can grant capabilities selectively. A WASM module can request only the capabilities it needs (file access, networking, randomness), and the runtime decides whether to grant them. This makes WASM an excellent sandbox for untrusted code.
+
+Major WASI implementations:
+- **wasmtime** (Bytecode Alliance) -- the reference implementation
+- **wasmer** -- supports WASI with multiple backends (Cranelift, LLVM)
+- **Node.js** -- experimental WASI support via `node:wasi`
+- **Cloudflare Workers** -- WASI-like sandbox for edge functions
+
+## Threads and SIMD
+
+Two advanced features extend WASM beyond single-threaded scalar computation.
+
+### Threads
+
+WASM threads use **SharedArrayBuffer** -- a shared memory that multiple WASM instances (or Web Workers) can access concurrently. Thread operations include:
+
+- **memory.atomic.load/store** -- atomic loads and stores
+- **memory.atomic.rmw** -- atomic read-modify-write (add, sub, and, or, xor, xchg)
+- **memory.atomic.cmpxchg** -- compare-and-exchange
+
+```wat
+;; Atomic increment of a counter at address 0
+i32.const 0
+i32.const 1
+i32.atomic.rmw.add
+```
+
+Threads add significant complexity. The host must set cross-origin isolation headers (`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`) to use SharedArrayBuffer in browsers.
+
+### SIMD
+
+The SIMD (Single Instruction, Multiple Data) proposal adds 128-bit vector operations. An instruction processes 4 i32 values or 8 i16 values in parallel:
+
+```wat
+;; Pack four i32 values into a v128
+v128.const i32x4 1 2 3 4
+v128.const i32x4 5 6 7 8
+i32x4.add          ;; result: [6, 8, 10, 12]
+```
+
+SIMD in WASM mirrors the SIMD capabilities of modern CPUs. Common operations:
+- **Arithmetic**: add, sub, mul, div (per-lane)
+- **Comparison**: eq, ne, lt, gt, le, ge (per-lane)
+- **Shuffle**: swizzle, shuffle (rearrange lanes)
+- **Conversion**: between integer and floating-point widths
+
+Using SIMD can give 2-4x speedups for image processing, audio, physics, and linear algebra. Rust's `core::simd` and C's SIMD intrinsics both compile to WASM SIMD.
+
+### Multi-Value Returns
+
+WASM functions traditionally return a single value. The multi-value proposal allows multiple return values:
+
+```wat
+(func $divmod (param $a i32) (param $b i32) (result i32 i32)
+  local.get $a
+  local.get $b
+  i32.div_s
+  local.get $a
+  local.get $b
+  i32.rem_s)
+```
+
+This is compiled from C's `_divmod` intrinsic and is the foundation for returning structs without boxing.
+
+### Reference Types
+
+The reference types proposal adds `externref` (opaque host references) and `funcref` (function references). These allow WASM to hold references to JavaScript objects (DOM nodes, promises) and pass them back to JS without serialization.
+
+## wasm-gc and the Future
+
+The most transformative upcoming feature is **WASM GC** (Garbage Collection).
+
+Currently, languages with garbage collectors (Java, Kotlin, Dart, Python) cannot compile to WASM because WASM has no GC. They would need to bundle their own collector, which defeats the purpose.
+
+WASM GC adds native support for:
+- **Struct types** -- heap-allocated, structured data
+- **Array types** -- variable-length, heap-allocated arrays  
+- **i31 references** -- unboxed 31-bit integers stored inline
+- **Type hierarchies** -- subtyping and casting between types
+
+This enables:
+- Java/JVM languages compiling directly to WASM (no embedded GC)
+- Kotlin/WASM with direct interop
+- Dart (Flutter) compiling to WASM for web
+- Python implementations with native GC support
+
+### Component Model
+
+The Component Model is a higher-level layer on top of WASM that standardizes:
+- **Interface types** -- rich data types (strings, records, variants) for cross-module calls
+- **Module linking** -- composing multiple WASM modules with dependency resolution
+- **Async support** -- non-blocking calls across module boundaries
+
+Instead of manually crafting import/export objects in JS, the Component Model lets you compose WASM modules declaratively:
+
+```wasm
+(component
+  (import "logger" (instance $logger
+    (export "log" (func (param string)))
+  ))
+  (core module $m1 ...)
+  (core instance $i1 (instantiate $m1))
+  ...
+)
+```
+
+### What This Means
+
+WASM is evolving from a CPU-focused compute target into a full application platform. The combination of GC, reference types, and the component model means any language will be able to compile to WASM with zero runtime overhead.
+
+The vision: write your application once, compile to WASM, run it anywhere -- browser, server, edge, mobile, desktop -- with native performance and full sandbox isolation. We are not there yet, but the pieces are falling into place.
+
+## Building Your First WASM Module
+
+Let's put everything together by building a real WASM module from C, using the toolchain we explored earlier.
+
+### Step 1: Write C code
+
+```c
+int add(int a, int b) {
+  return a + b;
+}
+
+int factorial(int n) {
+  if (n <= 1) return 1;
+  return n * factorial(n - 1);
+}
+```
+
+### Step 2: Compile to WASM
+
+```bash
+clang --target=wasm32 -O3 -nostdlib \
+  -Wl,--no-entry -Wl,--export-all \
+  -o math.wasm math.c
+```
+
+Flags explained:
+- `--target=wasm32` -- target WebAssembly
+- `-O3` -- full optimization
+- `-nostdlib` -- no C standard library (keeps binary small)
+- `-Wl,--no-entry` -- no `_start` function needed
+- `-Wl,--export-all` -- export all functions
+
+### Step 3: Use in JavaScript
+
+```javascript
+const fs = require('fs');
+const bytes = fs.readFileSync('math.wasm');
+const { instance } = await WebAssembly.instantiate(bytes);
+
+console.log(instance.exports.add(3, 4));      // 7
+console.log(instance.exports.factorial(5));     // 120
+```
+
+### Step 4: Optimize
+
+```bash
+wasm-opt -O3 math.wasm -o math-opt.wasm
+wasm-strip math-opt.wasm
+```
+
+Final binary size for `add` + `factorial`: approximately 80 bytes. Compare to the equivalent JavaScript code at ~150 bytes with the JIT compiler overhead. WASM wins on both size and speed.
+
+## Self-Check
+
+Before moving on, make sure you can answer these questions:
+
+1. What 8 bytes does every WASM binary start with, and what do they represent?
+2. How does a stack machine differ from a register machine?
+3. Why is linear memory called "linear"?
+4. How do imports and exports create a two-way bridge between JS and WASM?
+5. What problem does WASI solve that WASM alone does not?
+6. When would you use threads vs SIMD in WASM?
+7. What does wasm-gc enable that was not possible before?
+
+## Key Takeaways
+
+- WASM is a portable binary instruction format for a stack-based virtual machine.
+- The binary format uses sections (type, function, export, code) with LEB128-encoded lengths.
+- Linear memory is a flat byte array shared between WASM and the host.
+- Imports and exports define the boundary between the WASM sandbox and the host environment.
+- WASI extends WASM to the server with POSIX-like system interfaces.
+- Threads, SIMD, and multi-value returns bring modern CPU capabilities to WASM.
+- WASM GC and the Component Model will make WASM a universal application platform.
+- WASM complements JavaScript -- it handles computation, JS handles orchestration.
