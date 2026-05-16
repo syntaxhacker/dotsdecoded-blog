@@ -1,0 +1,274 @@
+---
+title: "WebAuthn & Passkeys: Passwordless Authentication and How It Works"
+description: "A deep dive into WebAuthn and passkeys — public key credentials, authenticator types (platform vs cross-platform), registration and assertion flows, attestation, and how passkeys sync across devices."
+date: 2026-05-22T01:00:00
+tags: ["webauthn", "passkeys", "authentication", "security", "fido2"]
+---
+
+import WebauthnRegisterDemo from '../../components/demos/WebauthnRegisterDemo'
+import WebauthnLoginDemo from '../../components/demos/WebauthnLoginDemo'
+import WebauthnTypesDemo from '../../components/demos/WebauthnTypesDemo'
+import WebauthnComparisonDemo from '../../components/demos/WebauthnComparisonDemo'
+
+## The Password Problem
+
+Every day, millions of passwords leak in data breaches. Users reuse the same password across twenty sites. Phishing pages trick people into typing credentials into fake login forms. Password managers help, but they still rely on a shared secret that can be stolen server-side.
+
+The core flaw is structural: a password is a shared secret. Both you and the server know it. If the server gets breached, your secret is exposed. If you type it into the wrong site, the attacker has it. The secret exists in two places, and either can be compromised.
+
+We need a model where the server never holds a secret that can authenticate you. A model where leaking the server database reveals nothing useful to an attacker. That model is public key cryptography applied to authentication, standardized by the FIDO2 alliance and exposed in browsers as the WebAuthn API.
+
+## The FIDO2 Alliance
+
+FIDO stands for Fast IDentity Online. It is an industry consortium formed in 2012 by companies including PayPal, Lenovo, Nok Nok Labs, and Validity Sensors, later joined by Google, Microsoft, Apple, and most major technology vendors. The goal: create open, interoperable standards for passwordless authentication.
+
+FIDO2, finalized in 2018, is the current generation of the standard. It comprises two sub-specifications:
+
+- **WebAuthn** (Web Authentication) — the W3C standard that defines a JavaScript API for browsers to create and use public key credentials
+- **CTAP** (Client to Authenticator Protocol) — the FIDO standard that defines how a browser or platform communicates with external authenticators over USB, NFC, or BLE
+
+Together they let any website request a cryptographic authentication from a user's device without ever asking for a password.
+
+## WebAuthn vs FIDO2 vs CTAP
+
+These terms are often used interchangeably but refer to different layers of the stack:
+
+| Component | Standard Body | Role |
+|-----------|--------------|------|
+| WebAuthn | W3C | Browser API: `navigator.credentials.create()` and `navigator.credentials.get()` |
+| CTAP | FIDO Alliance | Transport protocol: how browser talks to USB/NFC/BLE security keys |
+| FIDO2 | FIDO Alliance | Umbrella: WebAuthn + CTAP + authenticator requirements |
+
+A user visiting a WebAuthn-enabled site triggers the browser API, which may route the request to either a platform authenticator (built into the device) or a cross-platform authenticator (external security key via CTAP). The server never sees a password.
+
+## Public Key Cryptography for Authentication
+
+Imagine a wax seal. You press your unique ring into hot wax, creating an imprint that anyone can recognize as yours. The ring creates the seal, but the seal alone cannot create another ring. This asymmetric relationship is the heart of public key cryptography.
+
+In WebAuthn:
+
+- **Private key** — your ring. Stored in secure hardware (Secure Enclave, TPM, TEE). Never leaves the device. Used only to sign challenges.
+- **Public key** — the seal impression. Sent to the server during registration. Anyone can use it to verify a signature, but it cannot create one.
+
+This is the opposite of a password. With a password, the server stores a hash of a secret you both know. If the server is breached, the attacker can try to crack the hash. With WebAuthn, the server stores only the public key. A leaked database of public keys is worthless — public keys are designed to be public. The attacker learns nothing.
+
+The cryptographic scheme used by most authenticators is **ECDSA over the P-256 curve** (algorithm ID -7 in the WebAuthn spec). This gives 128-bit security with small key sizes, making it ideal for constrained authenticator hardware.
+
+## The Challenge-Response Protocol
+
+A public key alone does not authenticate you. You must prove possession of the corresponding private key. This happens through a challenge-response protocol:
+
+1. The server generates a random sequence of bytes called the **challenge**
+2. The client sends this challenge to the authenticator
+3. The authenticator signs the challenge with the private key
+4. The server verifies the signature using the stored public key
+
+The challenge ensures freshness. Even if an attacker records a signed response, they cannot replay it because the next challenge will be different. This is what makes WebAuthn **phishing-resistant**: a signed response for "example.com" is cryptographically bound to that origin and cannot be used against "attacker.com".
+
+We can represent the signature verification mathematically:
+
+$$
+\text{Verify}(PK, \text{challenge}, \text{signature}) \in \{\text{valid}, \text{invalid}\}
+$$
+
+The server computes this verification. If it returns valid, you are authenticated. No password was typed, no shared secret ever existed.
+
+## Authenticator Types
+
+Authenticators come in two broad categories: platform and cross-platform.
+
+**Platform authenticators** are built into the device. Examples include Touch ID on MacBooks, Windows Hello with IR cameras, Face ID on iPhones, and Android biometric authentication. The private key lives in the device's secure hardware. These are convenient but tied to a specific device — unless passkey sync is used.
+
+**Cross-platform authenticators** are external devices. Examples include YubiKeys, SoloKeys, and Google Titan Keys connected via USB, NFC, or BLE. A phone can also act as a cross-platform authenticator over BLE. These are portable across devices but require carrying an extra token.
+
+<WebauthnTypesDemo client:visible />
+
+The choice between platform and cross-platform depends on your threat model and convenience needs. For most users, platform authenticators with passkey sync provide the best balance.
+
+## The Registration Ceremony
+
+Registration — called the **creation ceremony** in WebAuthn — is the process of generating a new key pair and registering the public key with a server. The flow has three participants: the client (browser), the authenticator (the device creating the key), and the relying party (the server).
+
+```js
+const credential = await navigator.credentials.create({
+  publicKey: {
+    challenge: new Uint8Array(32),
+    rp: { name: "Example Corp", id: "example.com" },
+    user: {
+      id: new Uint8Array(16),
+      name: "user@example.com",
+      displayName: "User"
+    },
+    pubKeyCredParams: [
+      { type: "public-key", alg: -7 }
+    ],
+    authenticatorSelection: {
+      userVerification: "required"
+    },
+    attestation: "direct"
+  }
+});
+```
+
+Key parameters:
+
+- **challenge** — random bytes from the server, prevents replay attacks
+- **rp** — relying party identifier, must match the origin's domain
+- **user** — user identifier and display name (the server's user ID, not the authenticator's)
+- **pubKeyCredParams** — acceptable signature algorithms, -7 means ES256 (ECDSA P-256)
+- **authenticatorSelection** — policy for user verification and resident key storage
+- **attestation** — whether the authenticator should prove its identity
+
+On success, the browser returns a `PublicKeyCredential` object containing the credential ID and an attestation response. The client sends this to the server, which stores the credential ID and public key for future authentication.
+
+On the server side, validation involves checking the challenge, origin, relying party ID, and the attestation signature:
+
+```bash
+# Server-side: validate challenge matches one we generated
+# Verify origin matches our site
+# Verify rpId matches our domain
+# Store credentialId + publicKey for this user
+```
+
+<WebauthnRegisterDemo client:visible />
+
+A common mistake is reusing the same challenge for registration and authentication. Challenges must be single-use and tied to a specific ceremony. The server should track pending challenges and expire them after a short window (typically 5 minutes).
+
+## The Authentication Ceremony
+
+Authentication — called the **assertion ceremony** — proves possession of the private key by signing a fresh challenge.
+
+```js
+const assertion = await navigator.credentials.get({
+  publicKey: {
+    challenge: new Uint8Array(32),
+    allowCredentials: [{
+      type: "public-key",
+      id: credentialId
+    }],
+    userVerification: "required"
+  }
+});
+```
+
+The authenticator looks up the credential by ID, prompts the user for verification (biometric or PIN), and signs the challenge with the stored private key. The resulting assertion contains:
+
+- **authenticatorData** — includes the relying party ID hash, flags (user present, user verified), and a signature counter
+- **clientDataJSON** — includes the challenge, origin, and ceremony type
+- **signature** — the actual cryptographic signature over `authenticatorData || SHA256(clientDataJSON)`
+
+The server verifies the signature against the stored public key:
+
+```bash
+# Server-side verification:
+# 1. Look up credentialId in database
+# 2. Retrieve stored public key
+# 3. Hash clientDataJSON and concatenate with authenticatorData
+# 4. Verify signature using stored public key
+# 5. Check that challenge matches an active, unused challenge
+# 6. Check that origin matches our site
+# 7. Check that rpIdHash matches our domain hash
+# 8. (optional) Check that counter > last known counter
+```
+
+<WebauthnLoginDemo client:visible />
+
+The signature counter is an optional feature that detects cloned authenticators. If the counter does not increase monotonically, the authenticator may have been cloned. In practice, passkeys on synced platforms do not support counters because multiple devices may hold copies.
+
+## Attestation
+
+When an authenticator creates a new key pair, it can optionally sign the credential with a manufacturer key to prove it is a genuine device. This is called **attestation**.
+
+Attestation formats include:
+
+- **packed** — TPM-style, used by Android and SoloKeys
+- **tpm** — Trusted Platform Module
+- **android-key** — Android Keystore
+- **android-safetynet** — SafetyNet attestation (deprecated in favor of Play Integrity)
+- **apple** — Apple Anonymous attestation (used by Touch ID, Face ID on Apple devices)
+- **none** — no attestation, just the credential
+
+Attestation is valuable for enterprise deployments where policy dictates that only specific hardware models are allowed. For most consumer websites, attestation is set to `none` or `indirect` to avoid privacy concerns. The attestation certificate can identify the model of authenticator, which some users may consider fingerprinting.
+
+## Passkeys: Synced WebAuthn Credentials
+
+The biggest friction point for WebAuthn adoption was device lock-in. If you registered a credential on your iPhone, you could not use it on your MacBook — unless the website re-enrolled you. Passkeys solve this by syncing the credential across devices through the platform vendor's cloud.
+
+For Apple devices, passkeys sync via **iCloud Keychain**, backed by end-to-end encryption. A passkey created on an iPhone appears on all the user's Apple devices signed into the same iCloud account.
+
+For Google, passkeys sync via **Google Password Manager**, available on Android and Chrome on any operating system.
+
+The sync mechanism works by wrapping the private key in an encrypted blob that is stored in the cloud and decrypted only on the user's trusted devices. The encryption key is derived from the user's cloud account password and device-specific keys. The cloud provider never has access to the raw private key.
+
+This means passkeys are both more secure and more convenient than passwords:
+
+- They are phishing-resistant (cryptographically bound to origin)
+- They sync across devices without user effort
+- They require biometric or PIN verification to use
+- The server does not need to implement any special sync logic — the credential ID and public key remain the same across all synced devices
+
+## User Verification vs User Presence
+
+WebAuthn distinguishes between two concepts:
+
+- **User Presence (UP)** — the user merely touched or interacted with the authenticator. The flag is set to indicate "a human was involved."
+- **User Verification (UV)** — the user was biometrically verified or entered a PIN. The flag indicates "a specific authorized user was verified."
+
+The `userVerification` parameter in the API accepts three values:
+
+- `"required"` — the ceremony fails if the authenticator cannot verify the user
+- `"preferred"` — UV if available, otherwise fall back to UP
+- `"discouraged"` — do not prompt for UV, use UP only
+
+For most applications, `"preferred"` is the right choice. It provides biometric verification on devices that support it while gracefully degrading on older hardware.
+
+Authenticators that store credentials internally (not in cloud sync) are called **resident keys** or **discoverable credentials**. These store the credential ID and private key on the authenticator itself, allowing the browser to discover available credentials without the server specifying which one to use. Non-resident credentials require the server to provide the credential ID in `allowCredentials`.
+
+## Conditional UI and Recovery
+
+**Conditional UI**, specified in the WebAuthn Level 3 draft, lets the browser show passkey autofill suggestions in the username field. When a user focuses the username input, the browser displays available passkeys for that domain, allowing one-tap login without visiting a separate login page.
+
+```js
+const assertion = await navigator.credentials.get({
+  publicKey: {
+    challenge: new Uint8Array(32),
+    allowCredentials: [],
+    userVerification: "preferred"
+  },
+  mediation: "conditional"
+});
+```
+
+The `mediation: "conditional"` parameter tells the browser to show a passive autofill suggestion rather than an immediate modal. The user can click the passkey to log in, or ignore it and type credentials manually.
+
+**Recovery** from authenticator loss depends on the method:
+
+- **Platform authenticators without sync** — the user must re-enroll on each device. The server should allow multiple credentials per account.
+- **Passkeys with iCloud/Google sync** — recovering an iCloud or Google account recovers the passkeys. This is the best user experience.
+- **Cross-platform security keys** — users should register at least two keys. The server should support multiple keys. If all keys are lost, the fallback is typically email-based recovery codes.
+- **Recovery codes** — many services issue one-time recovery codes during passkey setup that can be used to re-enroll if all authenticators are lost.
+
+Best practice: always allow multiple credentials per account. Let users register at least one backup method (a second passkey, a recovery code, or a fallback TOTP).
+
+## Choosing the Right Method
+
+No single authentication method fits every scenario. Passkeys excel for consumer web applications where the user has an ecosystem account (Apple, Google). TOTP remains useful for backup and enterprise scenarios. SMS OTP is better than nothing but should be phased out. Passwords are the baseline we are trying to replace.
+
+<WebauthnComparisonDemo client:visible />
+
+The industry trajectory is clear: passkeys are the endgame. Apple, Google, and Microsoft have all committed to the standard. The FIDO2 specification is a W3C recommendation. Browser support is universal across Chrome, Safari, Firefox, and Edge. The only remaining gap is backward compatibility — and that is closing fast.
+
+Every website should support WebAuthn today. Start with passwordless as an option alongside existing methods, measure adoption, and gradually make it the primary flow. The cryptographic foundation is sound, the UX is improving rapidly, and the security benefits over passwords are transformative.
+
+## Self-Check
+
+Before deploying WebAuthn:
+
+- Are you generating fresh challenges for every ceremony and expiring them after use?
+- Are you validating the origin and relying party ID on every assertion?
+- Do you allow users to register multiple credentials (including at least one backup)?
+- Have you tested with platform authenticators (Touch ID, Windows Hello, Face ID)?
+- Have you tested with cross-platform authenticators (YubiKey, phone)?
+- Do you support conditional UI for autofill-based login?
+- Do you have a recovery path for users who lose all authenticators?
+- Is attestation set appropriately for your threat model (usually `none`)?
