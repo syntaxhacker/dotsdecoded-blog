@@ -1,0 +1,235 @@
+---
+title: "Monorepo Tools: Turborepo, Nx, pnpm Workspaces, and How They Work"
+description: "A deep dive into monorepo tooling -- workspace management (npm/pnpm/yarn workspaces), task orchestration (Turborepo, Nx), caching strategies, dependency graph visualization, and choosing the right approach."
+date: 2026-05-22T01:00:00
+tags: ["monorepo", "turborepo", "nx", "build-tools", "workspace"]
+---
+
+import MonorepoDepGraphDemo from '../../components/demos/MonorepoDepGraphDemo'
+import MonorepoCacheDemo from '../../components/demos/MonorepoCacheDemo'
+import MonorepoTaskDemo from '../../components/demos/MonorepoTaskDemo'
+import MonorepoCompareDemo from '../../components/demos/MonorepoCompareDemo'
+
+## Introduction
+
+A monorepo is a single repository that contains multiple distinct projects or packages. Unlike a polyrepo setup where each project lives in its own repository, a monorepo gives teams a shared workspace where code, configuration, and tooling coexist. Over the past few years, monorepo tooling has matured dramatically, with tools like Turborepo, Nx, and built-in workspace managers (pnpm, Yarn, npm) providing sophisticated caching, parallel execution, and dependency graph management.
+
+In this post we will build up from the foundations -- what a monorepo actually is and why you might want one -- all the way through to advanced concepts like content-addressed caching, topological task execution, and choosing between Turborepo, Nx, pnpm workspaces, and Bazel for different scales of project.
+
+## Monorepo vs Polyrepo
+
+Imagine a company that builds a web app, a mobile API, and a shared UI component library. In a polyrepo setup, each of these lives in its own git repository with its own CI pipeline, issue tracker, and release process. In a monorepo, they all live under one roof.
+
+Polyrepo advantages include independent versioning, decoupled deployments, and smaller clone sizes. But polyrepo also introduces real friction: shared code must be published and versioned as packages, atomic cross-project changes require coordinated releases across multiple repos, and tooling consistency (linters, formatters, test runners) drifts over time.
+
+Monorepo advantages address these pain points directly. A single `git commit` can span changes across the UI library, API, and frontend simultaneously. Shared configuration lives in one place. Refactoring a shared utility is a single diff, not a multi-repo dance. The tradeoff is that repository size grows and CI must be smart enough to only build what changed.
+
+## Why Teams Choose Monorepos
+
+Three compelling reasons drive teams toward monorepos.
+
+**Shared code without package overhead.** When two projects share a utility function, a polyrepo forces you to extract it into a published package, bump versions, update consumers, and coordinate releases. In a monorepo, you just import it. The workspace protocol handles resolution transparently.
+
+**Atomic cross-project changes.** A refactor that touches the shared data layer, the API, and the frontend can land as a single commit. Code review shows the full picture. Rollback is a single revert. No "merge the API PR first, then the frontend PR" coordination.
+
+**Consistent tooling and configuration.** One `eslint.config.js`, one `tsconfig.json`, one CI pipeline. New projects inherit the existing setup. This eliminates the "every team has their own style" drift that polyrepos inevitably develop.
+
+The cost is that you need tooling to manage scale. That is where workspace managers and build orchestrators come in.
+
+## The Workspace Protocol
+
+npm, Yarn, and pnpm all support a "workspaces" feature. This is the foundation of any monorepo setup. At its core, the workspace protocol links local packages together so they can import each other without publishing to a registry.
+
+A `package.json` at the monorepo root declares the workspace paths:
+
+```json
+{
+  "workspaces": ["packages/*", "apps/*"]
+}
+```
+
+Each sub-package (say `packages/utils/package.json`) has its own name and version. When a sibling package depends on it, you use the workspace protocol:
+
+```json
+{
+  "name": "@myapp/web",
+  "dependencies": {
+    "@myapp/utils": "workspace:*"
+  }
+}
+```
+
+The `workspace:*` tells pnpm or Yarn to resolve `@myapp/utils` from the local workspace rather than from the npm registry. During publishing or CI, the protocol can be replaced with a real version range.
+
+pnpm goes a step further with strict dependency isolation. It uses symlinks inside a `node_modules/.pnpm` store and enforces that packages can only access explicitly listed dependencies. This catches missing dependency bugs at install time rather than at runtime.
+
+## Understanding the Dependency Graph
+
+When you have multiple packages that depend on each other, the relationships form a directed acyclic graph (DAG). Understanding this graph is essential for efficient build orchestration.
+
+Each package is a node. An edge from package A to package B means A depends on B. The graph must be acyclic -- circular dependencies cause unresolvable build orders.
+
+The DAG determines two critical things:
+
+1. **Build order.** If `app` depends on `ui` which depends on `utils`, then `utils` must build first, then `ui`, then `app`. This ordering is called a topological sort.
+
+2. **Change impact.** When `utils` changes, everything that depends on it (directly or transitively) must rebuild. When leaf packages like `app2` change, nothing else is affected.
+
+The demo below lets you click any package to see the full impact of a change propagate through the graph.
+
+<MonorepoDepGraphDemo client:visible />
+
+Turborepo and Nx both analyze this graph to determine what to rebuild. The key difference is granularity: Turborepo operates at the package level (a change to any file in a package invalidates its cache), while Nx can track the graph at the task level, understanding that a change to source files might only invalidate the build step but not lint.
+
+## Task Orchestration
+
+With a dependency graph understood, the next question is how to run tasks across packages efficiently. Each package typically supports multiple tasks: `lint`, `test`, `build`, `typecheck`. Some of these tasks are independent across packages, while others depend on upstream results.
+
+Consider three packages: `pkg-a` (no dependencies), `pkg-b` (depends on `pkg-a`), and `pkg-c` (no dependencies). Each has lint, test, and build tasks. Without orchestration, you might run them sequentially: lint all three, test all three, build all three -- or worse, run everything in sequence for each package.
+
+With proper task orchestration, the tool computes a task graph. Independent tasks (lint across all packages) run in parallel. Tasks with dependencies (building `pkg-b` requires `pkg-a` build) wait for upstream completion.
+
+<MonorepoTaskDemo client:visible />
+
+Turborepo and Nx handle this automatically. You define tasks in a configuration file and the tool schedules them against the dependency graph. Turborepo uses a `turbo.json` file where you declare task dependencies and outputs. Nx uses `project.json` files at each package level and a `nx.json` at the root.
+
+```json
+{
+  "$schema": "https://turbo.build/schema.json",
+  "pipeline": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "test": {
+      "dependsOn": ["build"]
+    },
+    "lint": {}
+  }
+}
+```
+
+In this configuration, `build` depends on the build of upstream dependencies (`^build` means "caret build" -- build of dependencies). `test` depends on `build` completing for the same package. `lint` has no dependencies, so it can run at any time.
+
+Nx uses a similar concept but with project-level configuration that allows more granular dependency specification:
+
+```json
+{
+  "targets": {
+    "build": {
+      "dependsOn": [
+        {
+          "projects": "dependencies",
+          "target": "build"
+        }
+      ],
+      "outputs": ["dist/"]
+    }
+  }
+}
+```
+
+## Caching Strategies
+
+Caching is what makes monorepo tooling fast at scale. Without caching, every CI run rebuilds every package from scratch, even if nothing changed. With caching, the tool remembers what happened last time and skips work that has already been done.
+
+The fundamental mechanism is content-addressable caching. Each task has a set of inputs: source files, dependencies' outputs, environment variables, and the task definition itself. The tool hashes all these inputs into a cache key. If the same key exists in the cache, the task output (build artifacts, test results) is restored without re-execution.
+
+A simple example: package `lib` has source files. On the first build, the tool computes `hash(lib/**/*.ts) = a3f2c1`, executes the build, and stores the output under key `a3f2c1`. On the second build, if the hash is still `a3f2c1`, the output is restored instantly. If `lib` changes, the hash becomes `f8e2d1`, which is a cache miss, and the build runs again.
+
+The real power comes from cache propagation. When `lib` changes, packages that depend on `lib` also get cache misses because their inputs include `lib`'s outputs. Packages that are independent (like `app-b` in the demo below) stay cached.
+
+<MonorepoCacheDemo client:visible />
+
+Turborepo and Nx implement caching differently:
+
+- **Turborepo** hashes all inputs to a task (source globs, environment variables, dependency outputs) into a single content hash. It stores cache artifacts locally in `node_modules/.cache/turbo` and optionally in a remote cache (Vercel Remote Caching).
+
+- **Nx** builds a computation graph that captures the same information but also tracks which files changed and how they affect the dependency graph. The `nx affected` command uses git diff to determine which projects are affected by a PR, then runs tasks only for those projects.
+
+Both support remote caching via their respective cloud services. Remote caching is critical for CI: a build on one branch populates the cache, and a build on another branch (or a PR) can reuse those artifacts without re-executing.
+
+## Remote Caching
+
+Remote caching extends local caching across environments. Without remote caching, every developer and every CI job starts with a cold cache. With remote caching, artifacts from one machine are available to all others.
+
+Turborepo's remote caching works with any S3-compatible store (or Vercel's built-in cache). When a task produces output, it's uploaded to the remote cache. When another machine runs the same task with the same inputs, it downloads the cached output instead of executing.
+
+Nx Cloud provides the same capability with additional features like distributed task execution (running tasks across multiple machines) and cache analytics.
+
+Configuration is minimal. For Turborepo:
+
+```bash
+npx turbo login
+npx turbo link
+```
+
+For Nx:
+
+```bash
+nx connect-to-nx-cloud
+```
+
+After setup, caching and remote sharing happen automatically. A PR branch that changes only `app1` will rebuild `app1` and download everything else from cache, reducing a 10-minute CI run to 30 seconds.
+
+## Comparing Tooling Approaches
+
+Each tool in the monorepo ecosystem occupies a different spot on the complexity-to-capability curve. The table below compares pnpm workspaces (the simplest entry point), Turborepo (the most popular task orchestrator), Nx (the most comprehensive), and Bazel (the most powerful for massive scale).
+
+<MonorepoCompareDemo client:visible />
+
+pnpm workspaces are not a build tool -- they handle dependency resolution and installation. For small monorepos (under 10 packages) with simple build pipelines, pnpm workspaces plus a root-level `package.json` scripts section might be all you need. You run builds manually or with a simple `npm-run-all` script.
+
+Turborepo is the sweet spot for most teams. It adds caching and parallel execution with minimal configuration. Its `turbo.json` pipeline is intuitive, and it integrates seamlessly with pnpm workspaces or Yarn workspaces. Remote caching through Vercel works out of the box.
+
+Nx offers the most sophisticated features: affected graph analysis (which tasks to run based on git changes), task graph visualization (a web UI showing the execution plan), and distributed task execution. It also provides generators and code scaffolding. The tradeoff is more configuration and a steeper learning curve.
+
+Bazel is designed for enormous repositories (Google's entire codebase runs on a forked version). It provides hermetic builds (pinned toolchains, sandboxed execution), distributed caching at scale, and strict correctness guarantees. The learning curve is steep and the configuration is verbose, making it appropriate only for repositories with hundreds of packages and specialized build requirements.
+
+## Scaling to Large Repositories
+
+As monorepos grow past 50-100 packages, basic caching and parallel execution start hitting limits. A full CI pipeline still takes too long if every PR runs tasks for all potentially affected packages.
+
+Advanced techniques include:
+
+**Incremental builds with affected detection.** Nx's `nx affected:build --base=main` compares the current branch against `main` and only runs build tasks for packages that changed or are affected by changes. This reduces CI time proportionally to change scope rather than repository size.
+
+**Distributed task execution.** Nx Cloud can split tasks across multiple CI agents. Each agent picks up available tasks, respecting the dependency graph. Turborepo does not support this natively but can be combined with CI-level parallelism (e.g., running independent packages in separate CI jobs).
+
+**Hermetic builds with Bazel.** Bazel goes further by sandboxing each build action. Builds are reproducible: the same inputs always produce the same outputs, regardless of the host machine. This enables extremely aggressive caching (cache hits across completely different projects) and distributed builds.
+
+**Content-addressable storage.** Both Turborepo and Nx use content hashing for cache keys. Bazel uses a more rigorous content-addressable store where every intermediate build artifact is stored by its hash. This eliminates redundant work even across unrelated build targets.
+
+## Choosing the Right Approach
+
+The right monorepo tool depends on your team size, repository complexity, and constraints.
+
+**Start with pnpm workspaces alone if:** you have fewer than 10 packages, your build is fast already, and you are happy running builds with a root-level script. You can always add Turborepo or Nx later without changing your workspace setup.
+
+**Add Turborepo if:** you have 10-50 packages, your CI build times are slowing down, and you want caching with minimal configuration. Turborepo integrates with your existing pnpm/Yarn workspace and adds caching in about 15 minutes.
+
+**Choose Nx if:** you have 50+ packages, need fine-grained dependency analysis, want distributed execution across CI agents, or need affected graph detection for PR pipelines. Nx also provides generators and consistent code scaffolding that help maintain conventions across a larger team.
+
+**Consider Bazel only if:** you have hundreds of packages, need hermetic builds across multiple languages (monorepos that span Go, Rust, TypeScript, and Python), or have strict reproducibility requirements. The configuration overhead and learning curve are only justified at this scale.
+
+## Migration Strategies
+
+Moving from a polyrepo to a monorepo is a gradual process. A common approach is to start by consolidating the package manager and workspace definition, then add build orchestration incrementally.
+
+**Step 1: Set up the workspace.** Create a root `package.json` with workspaces configuration. Move shared packages into `packages/` and applications into `apps/`. Keep each package's existing `package.json` intact. Verify that `pnpm install` resolves everything correctly.
+
+**Step 2: Establish shared configuration.** Extract shared TypeScript config, ESLint rules, and Prettier settings into root-level config files. Each package can extend the root config and override as needed. This is where the consistency benefits of a monorepo become visible.
+
+**Step 3: Add task orchestration.** Install Turborepo or Nx and create the pipeline configuration. Define task dependencies (`build` depends on `^build`) and output globs. Run `turbo run build --filter=...[main]` to verify affected-only builds.
+
+**Step 4: Enable caching.** Configure local caching first, then add remote caching. Verify that repeated builds are instant (cache hits) and that changes correctly invalidate the cache.
+
+**Step 5: Iterate.** Not all packages need to move at once. You can keep some projects in separate repos and import them via the package manager, gradually migrating them into the monorepo as you refactor shared code.
+
+## Conclusion
+
+Monorepos solve real problems that polyrepos create: shared code friction, cross-project coordination overhead, and tooling drift. Workspace managers like pnpm provide the dependency resolution foundation. Turborepo and Nx add caching, parallel execution, and task orchestration on top. For the largest scale, Bazel provides hermetic, distributed builds.
+
+The key insight is that these tools are complementary, not mutually exclusive. pnpm workspaces define the package graph. Turborepo or Nx schedule and cache the execution of tasks against that graph. You can start simple and layer complexity as your monorepo grows.
+
+Choose the tool that matches your current pain point. If builds are slow, add caching. If CI is spending too long on unaffected code, add affected detection. If your team is growing, add generators and project conventions. The monorepo ecosystem is mature enough that there is a tool for every stage of growth.
