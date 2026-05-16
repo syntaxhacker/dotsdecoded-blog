@@ -1,0 +1,527 @@
+---
+title: "OAuth 2.0 & OpenID Connect: Authorization Flows, Tokens, and Security"
+description: "A deep dive into OAuth 2.0 and OpenID Connect — authorization code flow with PKCE, implicit and client credentials grants, JWT structure and verification, refresh tokens, and security best practices."
+date: 2026-05-22T01:00:00
+tags: ["oauth", "oidc", "security", "authentication", "jwt"]
+---
+
+import OauthArchitectureDemo from '../../components/demos/OauthArchitectureDemo'
+import OauthAuthCodeDemo from '../../components/demos/OauthAuthCodeDemo'
+import OauthTokensDemo from '../../components/demos/OauthTokensDemo'
+import OauthRefreshDemo from '../../components/demos/OauthRefreshDemo'
+import OauthGrantsDemo from '../../components/demos/OauthGrantsDemo'
+
+Every time you click "Login with Google" or "Sign in with GitHub", you are using OAuth 2.0. It is the protocol that lets one application access your data on another service without ever seeing your password. OpenID Connect (OIDC) sits on top of OAuth 2.0 and adds identity verification — so the app knows not just that you allowed access, but who you actually are.
+
+This is not a dry specification walkthrough. We will build understanding from the ground up: what problem OAuth solves, how the pieces fit together, what each token contains, and how to implement it securely.
+
+## Authentication vs Authorization
+
+These two concepts are the foundation of everything that follows. They are easy to confuse because they often happen together, but they serve completely different purposes.
+
+**Authentication** answers "who are you?" It is the process of verifying identity. When you show your ID at a airport security checkpoint, that is authentication. In software, logging in with a username and password is authentication. The result is proof that you are who you claim to be.
+
+**Authorization** answers "what are you allowed to do?" After security checks your ID, they look at your boarding pass to see which gate you can access. That is authorization. In software, authorization determines whether you can read a file, write to a database, or call an API endpoint.
+
+OAuth 2.0 handles authorization — it gives applications a limited-access key to act on your behalf. OpenID Connect adds authentication on top — it also tells the application who you are. Think of OAuth as the valet key and OIDC as the valet key plus a photo ID.
+
+| Concept | Question | OAuth 2.0 | OIDC |
+|---------|----------|-----------|------|
+| Authentication | Who are you? | Not covered | Yes (via ID token) |
+| Authorization | What can you do? | Yes (via access token) | Yes (same access token) |
+
+## The Four Parties
+
+OAuth 2.0 defines exactly four roles that participate in every flow. Understanding who is who is essential before you can understand what each step does.
+
+- **Resource Owner** — The user who owns the data. In a typical flow, this is a person who wants to let an app access their Google Drive files or GitHub repositories.
+- **Client** — The application that wants to access the user's data. This could be a web app, a mobile app, a smart TV app, or a CLI tool. The client never sees the user's password.
+- **Authorization Server** — The service that authenticates the user and issues tokens. Google, GitHub, Auth0, and Keycloak all run authorization servers. This is the gatekeeper.
+- **Resource Server** — The API that holds the user's data. It accepts access tokens and returns data if the token is valid. Often the authorization server and resource server are run by the same organization (Google handles both auth and APIs).
+
+<OauthArchitectureDemo client:visible />
+
+## Why OAuth Exists Instead of Password Sharing
+
+Before OAuth, if you wanted an app to access your Google Calendar, you gave the app your Google username and password. This was a disaster for three reasons.
+
+First, the app now has full access to your entire Google account, not just your calendar. It could delete your emails, change your password, or lock you out. There was no way to grant limited access.
+
+Second, if the app got hacked, your Google password was stolen. You had to change your password everywhere. There was no way to revoke access for just that one app.
+
+Third, if you decided you no longer trusted the app, there was no way to cut off its access without changing your password and breaking every other app that used it.
+
+OAuth fixes all three problems. The app gets a token that is scoped (limited to specific permissions), revocable (you can revoke it without affecting other apps), and short-lived (it expires automatically).
+
+| Problem | Old Way (Password Sharing) | OAuth 2.0 |
+|---------|---------------------------|-----------|
+| Scope | Full account access | Limited, specific permissions |
+| Revocation | Change password (breaks everything) | Revoke individual tokens |
+| Expiry | Password valid until changed | Tokens expire automatically |
+| Exposure | Password sent to third party | Password stays with auth server |
+
+## The Authorization Code Flow
+
+This is the most important flow in OAuth 2.0. It is the recommended grant type for almost every scenario: web apps, mobile apps, and single-page applications (with PKCE).
+
+Imagine you are at a hotel. You want to let a housekeeper clean your room, but you do not want to give them your room key (which opens the main door, the pool, the gym, and everything else). Instead, you go to the front desk and get a special cleaning-only key. The front desk verifies you are the guest, then issues a limited key.
+
+In OAuth terms:
+- The hotel room is your data on the resource server.
+- The housekeeper is the client application.
+- The front desk is the authorization server.
+- The cleaning-only key is the access token.
+
+The flow has two distinct phases. Phase 1 obtains an authorization code. Phase 2 exchanges that code for tokens. The critical security property is that the code exchange happens server-to-server, so the client_secret is never exposed to the browser.
+
+<OauthAuthCodeDemo client:visible />
+
+### The Backend Token Exchange
+
+When your application's backend receives the authorization code, it exchanges it for tokens. This is a server-to-server HTTPS POST — the browser never sees this request or response.
+
+```http
+POST /token HTTP/1.1
+Host: accounts.google.com
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&code=4/0AX4XfWgV7k8mN2pQ9rS3tU6vWxYz
+&client_id=1234567890.apps.googleusercontent.com
+&client_secret=GOCSPX-abcdef123456
+&redirect_uri=https://yourapp.com/callback
+&code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk
+```
+
+The authorization server verifies everything: the code is valid and not expired, the client_id matches, the client_secret is correct, the redirect_uri matches the one used in the initial request, and SHA256(code_verifier) matches the code_challenge from earlier. If everything checks out, it returns tokens.
+
+```json
+{
+  "access_token": "ya29.a0AfH6...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "refresh_token": "1//0dx...",
+  "id_token": "eyJhbGciOiJSUzI1NiIs..."
+}
+```
+
+## PKCE — Proof Key for Code Exchange
+
+PKCE (pronounced "pixie") solves a specific attack. What if an attacker intercepts the authorization code before it reaches your app? This can happen on mobile apps (where custom URL schemes can be intercepted) or in SPAs (where redirect URLs might be compromised).
+
+PKCE works by creating a secret that the attacker cannot guess, even if they steal the authorization code. Here is how it works.
+
+When the app starts the authorization request, it generates a random string called the code_verifier. It then computes a hash of this string called the code_challenge. The app sends the code_challenge with the initial authorization request but keeps the code_verifier secret.
+
+Later, when the app exchanges the authorization code for tokens, it sends the original code_verifier. The authorization server hashes it and checks that it matches the code_challenge from the first request.
+
+If an attacker intercepts the authorization code, they cannot exchange it because they do not have the code_verifier. The attacker would need to know the original random string, which is cryptographically infeasible to guess.
+
+```javascript
+// Generating PKCE parameters in a browser app
+async function generatePKCE() {
+  // Step 1: Generate a random code_verifier
+  const array = new Uint8Array(32)
+  crypto.getRandomValues(array)
+  const codeVerifier = btoa(String.fromCharCode(...array))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+
+  // Step 2: Compute SHA-256 hash as code_challenge
+  const encoder = new TextEncoder()
+  const data = encoder.encode(codeVerifier)
+  const hash = await crypto.subtle.digest('SHA-256', data)
+  const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(hash)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+
+  return { codeVerifier, codeChallenge }
+}
+```
+
+PKCE is required for public clients (mobile apps, SPAs) and recommended for confidential clients (web apps with a backend). The OAuth Security BCP (Best Current Practice) now mandates PKCE for all authorization code flows.
+
+## Grant Types
+
+OAuth 2.0 defines several grant types, each designed for a specific kind of client. Choosing the wrong one is a security mistake. The authorization code flow with PKCE is the default choice for almost everything. The other grant types serve specific niches.
+
+The implicit grant is the one you should never use. It was designed for SPAs before PKCE existed, but it has a critical flaw: the access token appears in the URL fragment. This leaks the token to the browser history, server logs, referrer headers, and any JavaScript running on the page. It also provides no client authentication. The OAuth 2.0 Security BCP has deprecated the implicit grant entirely.
+
+Client credentials grant is for machine-to-machine communication. There is no user involved. A backend service authenticates directly with its client_id and client_secret to get a token for calling another API. This is safe because there is no user context to leak.
+
+Device code grant is for devices that lack a browser: smart TVs, game consoles, CLI tools. The device displays a code and a URL. The user visits the URL on their phone or laptop, enters the code, and authorizes. The device polls the auth server until the user completes the flow.
+
+<OauthGrantsDemo client:visible />
+
+### Grant Type Decision Matrix
+
+| Your Application Type | Grant Type | Notes |
+|---------------------|------------|-------|
+| Web app (server-rendered, e.g., Rails, Django, Express) | Authorization Code + PKCE | Backend keeps client_secret safe |
+| SPA (React, Vue, Angular) | Authorization Code + PKCE | No client_secret; PKCE prevents code interception |
+| Mobile app (iOS, Android) | Authorization Code + PKCE | System browser handles login; PKCE prevents URL scheme hijacking |
+| Backend service calling another API | Client Credentials | No user involved |
+| Smart TV, game console, CLI | Device Code | User authorizes on a separate device |
+
+## JWT Structure
+
+JWTs are the most common format for access tokens and ID tokens. Understanding their structure lets you inspect any token and verify it yourself.
+
+A JWT is three base64url-encoded JSON objects separated by dots: `header.payload.signature`. Each part has a specific purpose.
+
+The header contains metadata about the token: the signing algorithm (alg) and the key identifier (kid). The payload contains claims — statements about the user and the token itself. The signature is a cryptographic hash that proves the token has not been tampered with.
+
+### Standard Claims
+
+The JWT specification defines registered claims that appear in most tokens:
+
+- `sub` (subject) — Unique identifier for the user. This is how the app knows which user this token represents.
+- `iss` (issuer) — URL of the authorization server that issued the token. The resource server checks this to trust only tokens from known issuers.
+- `aud` (audience) — The intended recipient of the token. Usually the client_id of your application. The resource server verifies that the audience matches its own identifier.
+- `exp` (expiration) — Unix timestamp when the token expires. The resource server must reject tokens past this time.
+- `iat` (issued at) — Unix timestamp when the token was created.
+- `scope` — Space-separated list of permissions the token grants.
+
+Beyond these, the payload can contain any custom claims the authorization server wants to include: user name, email, roles, permissions, and so on. For ID tokens (OIDC), the payload includes specific identity claims like `email_verified`, `name`, and `picture`.
+
+<OauthTokensDemo client:visible />
+
+## JWKS — JSON Web Key Sets
+
+The authorization server does not sign every token with the same key. It rotates keys regularly for security. How does the resource server know which key to use for verification? It asks the authorization server's JWKS endpoint.
+
+JWKS (JSON Web Key Set) is a standard format for publishing public keys. The authorization server exposes an endpoint like `https://auth.example.com/.well-known/jwks.json` that returns a JSON object containing one or more public keys. Each key has a `kid` (key ID) that matches the `kid` in the JWT header.
+
+```json
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "kid": "key-1a2b3c",
+      "use": "sig",
+      "n": "0vx7agoebG...long-base64-encoded-modulus",
+      "e": "AQAB",
+      "alg": "RS256"
+    },
+    {
+      "kty": "RSA",
+      "kid": "key-4d5e6f",
+      "use": "sig",
+      "n": "1w...different-modulus",
+      "e": "AQAB",
+      "alg": "RS256"
+    }
+  ]
+}
+```
+
+The resource server caches these keys and uses the `kid` from the JWT header to select the correct public key. This allows key rotation: when the authorization server generates new keys, it publishes them to the JWKS endpoint. Old keys remain valid until tokens signed with them expire.
+
+### Verifying a JWT
+
+Here is how a resource server validates an access token in practice:
+
+```javascript
+// Token verification using jose library (or jsonwebtoken on Node)
+import { jwtVerify, createRemoteJWKSet } from 'jose'
+
+const JWKS_URL = 'https://auth.example.com/.well-known/jwks.json'
+const jwks = createRemoteJWKSet(new URL(JWKS_URL))
+
+async function verifyToken(token) {
+  try {
+    const { payload, protectedHeader } = await jwtVerify(token, jwks, {
+      issuer: 'https://auth.example.com',
+      audience: 'your-api-audience',
+    })
+
+    console.log('User ID:', payload.sub)
+    console.log('Scopes:', payload.scope)
+    console.log('Key used:', protectedHeader.kid)
+
+    return { valid: true, payload }
+  } catch (err) {
+    console.error('Token verification failed:', err.message)
+    return { valid: false, error: err.message }
+  }
+}
+```
+
+The verify function does four things: it checks that the signature matches using the correct JWKS key, it verifies the issuer matches the expected value, it confirms the audience is your application, and it rejects expired tokens by checking the `exp` claim.
+
+## Refresh Token Rotation
+
+Access tokens are short-lived by design — typically 1 hour. This limits the damage if a token leaks. But the user does not want to log in every hour. Refresh tokens solve this.
+
+A refresh token is a long-lived credential that the client uses to obtain new access tokens without user interaction. The refresh token is stored securely on the backend (never in the browser) and is sent to the token endpoint when the access token expires.
+
+```http
+POST /token HTTP/1.1
+Host: auth.example.com
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token
+&refresh_token=1//0dx...
+&client_id=YOUR_APP
+&client_secret=YOUR_SECRET
+```
+
+The authorization server responds with a new access token and, critically, a new refresh token. The old refresh token is invalidated. This is called refresh token rotation.
+
+Rotation is a security measure. If an attacker steals a refresh token and uses it, the server issues a new refresh token to the attacker but invalidates the one the legitimate client holds. The next time the legitimate client tries to refresh, the server detects that the refresh token was already used (and rotated), which indicates token theft. The server can then revoke all tokens for that client and force the user to re-authenticate.
+
+<OauthRefreshDemo client:visible />
+
+### Refresh Token Best Practices
+
+- Store refresh tokens securely on the backend (encrypted database, secure HTTP-only cookies).
+- Never expose refresh tokens to the browser or mobile app in a form they can read.
+- Implement refresh token rotation — every refresh invalidates the old token and issues a new one.
+- Set a maximum lifetime for refresh tokens (e.g., 30 days or 90 days), after which the user must re-authenticate.
+- Monitor for token reuse — if a compromised token is used, revoke all tokens for that user.
+
+## OIDC — OpenID Connect
+
+OpenID Connect extends OAuth 2.0 with an identity layer. OAuth 2.0 alone only provides authorization (what can the app do?). OIDC adds authentication (who is the user?).
+
+OIDC introduces the ID token — a JWT that contains identity claims about the user. When the authorization server issues tokens, the ID token is returned alongside the access token.
+
+```json
+{
+  "iss": "https://accounts.google.com",
+  "sub": "1234567890",
+  "aud": "your-app-id",
+  "exp": 1713747600,
+  "iat": 1713744000,
+  "name": "Jane Doe",
+  "email": "jane@example.com",
+  "email_verified": true,
+  "picture": "https://lh3.googleusercontent.com/a/...",
+  "nonce": "n-0S6_WzA2Mj"
+}
+```
+
+The ID token includes standard JWT claims (`iss`, `sub`, `aud`, `exp`, `iat`) plus standardized identity claims defined by the OIDC specification. The client verifies the ID token's signature and checks the `nonce` to prevent replay attacks.
+
+### The UserInfo Endpoint
+
+OIDC also defines the UserInfo endpoint. After the client has an access token, it can call this endpoint to get the user's profile information. This is useful when the ID token does not contain all the claims you need, or when you want to fetch fresh user data.
+
+```bash
+curl -H "Authorization: Bearer ya29.a0AfH6..." \
+  https://openidconnect.googleapis.com/v1/userinfo
+```
+
+```json
+{
+  "sub": "1234567890",
+  "name": "Jane Doe",
+  "given_name": "Jane",
+  "family_name": "Doe",
+  "picture": "https://lh3.googleusercontent.com/a/...",
+  "email": "jane@example.com",
+  "email_verified": true
+}
+```
+
+### OIDC vs OAuth 2.0
+
+| Capability | OAuth 2.0 | OIDC |
+|-----------|-----------|------|
+| Access token | Yes | Yes |
+| Refresh token | Yes | Yes |
+| User identity | Not specified | Yes (ID token) |
+| Standard claims | No | Yes (name, email, etc.) |
+| UserInfo endpoint | No | Yes |
+| Nonce protection | No | Yes |
+
+## Security Considerations
+
+OAuth 2.0 is a security protocol, which means the details matter enormously. A single misconfiguration can expose user data.
+
+### Redirect URI Validation
+
+The redirect URI is where the authorization server sends the authorization code. If an attacker can register a redirect URI they control, they can intercept codes. The authorization server must validate redirect URIs strictly: exact match, not prefix match. Never accept wildcard redirect URIs.
+
+```javascript
+// CORRECT: Exact match
+const VALID_REDIRECT_URI = 'https://app.example.com/callback'
+
+// WRONG: Prefix match allows subdomain takeover
+// const VALID_REDIRECT_URI = 'https://app.example.com/'
+// An attacker could use: https://app.example.com.evil.com/callback
+```
+
+### CSRF Protection
+
+The `state` parameter in OAuth 2.0 prevents CSRF attacks on the redirect flow. When your app initiates the authorization request, it generates a random `state` value and stores it (usually in a session cookie or localStorage). When the authorization server redirects back, your app checks that the `state` in the redirect matches the stored value.
+
+```javascript
+// Before redirecting to auth server
+const state = crypto.randomUUID()
+sessionStorage.setItem('oauth_state', state)
+
+const authUrl = `https://auth.example.com/authorize?
+  client_id=${CLIENT_ID}&
+  redirect_uri=${REDIRECT_URI}&
+  response_type=code&
+  state=${state}&
+  code_challenge=${codeChallenge}&
+  code_challenge_method=S256`
+
+// In the callback handler
+const urlState = new URLSearchParams(window.location.search).get('state')
+const savedState = sessionStorage.getItem('oauth_state')
+if (urlState !== savedState) {
+  throw new Error('CSRF attack detected: state mismatch')
+}
+```
+
+### Token Storage
+
+Where you store tokens determines how vulnerable they are to theft.
+
+For web apps with a backend, store tokens in server-side sessions or encrypted HTTP-only cookies. The browser never sees the raw tokens. For SPAs, store the access token in memory (a JavaScript variable) — never in localStorage or sessionStorage, which are accessible to any JavaScript running on the same origin. The refresh token, if you must have one at the SPA level, is best stored in an HTTP-only cookie set by your backend.
+
+For mobile apps, use the OS keychain (iOS Keychain, Android Keystore). Never store tokens in SharedPreferences or UserDefaults.
+
+| Storage Location | Accessible By | Risk Level |
+|-----------------|--------------|------------|
+| HTTP-only cookie | Backend only | Low |
+| Server session | Backend only | Low |
+| In-memory (JS variable) | Current page JS only | Medium |
+| sessionStorage | Same-origin JS | Medium |
+| localStorage | Same-origin JS (persists) | High |
+| URL fragment | Browser history, server logs | Very High |
+| SharedPreferences (mobile) | Any app on device | Very High |
+
+## OAuth for Single-Page Applications
+
+SPAs present a unique challenge for OAuth. They have no backend to keep a client_secret secret — everything runs in the browser. The entire security model must work without secrets.
+
+The modern approach is Authorization Code Flow with PKCE. The SPA redirects the user to the authorization server, receives the code via redirect, exchanges it using PKCE (no client_secret needed), and stores the resulting tokens in memory.
+
+```javascript
+// SPA OAuth login flow
+async function login() {
+  const { codeVerifier, codeChallenge } = await generatePKCE()
+  const state = crypto.randomUUID()
+
+  // Store PKCE verifier and state temporarily
+  sessionStorage.setItem('pkce_verifier', codeVerifier)
+  sessionStorage.setItem('oauth_state', state)
+
+  // Redirect to auth server
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: 'YOUR_SPA_CLIENT_ID',
+    redirect_uri: `${window.location.origin}/callback`,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+    state: state,
+    scope: 'openid profile email',
+  })
+  window.location.href = `https://auth.example.com/authorize?${params}`
+}
+
+async function handleCallback() {
+  const params = new URLSearchParams(window.location.search)
+  const code = params.get('code')
+  const state = params.get('state')
+  const savedState = sessionStorage.getItem('oauth_state')
+  const codeVerifier = sessionStorage.getItem('pkce_verifier')
+
+  // Verify state to prevent CSRF
+  if (state !== savedState) throw new Error('State mismatch')
+
+  // Exchange code for tokens
+  const response = await fetch('https://auth.example.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: code,
+      client_id: 'YOUR_SPA_CLIENT_ID',
+      redirect_uri: `${window.location.origin}/callback`,
+      code_verifier: codeVerifier,
+    }),
+  })
+  const tokens = await response.json()
+
+  // Store tokens in memory (not localStorage!)
+  memoryStore.accessToken = tokens.access_token
+  memoryStore.idToken = tokens.id_token
+  // Refresh token goes to an HTTP-only cookie via your backend
+}
+```
+
+The key insight: the SPA does not need a client_secret because the authorization code is useless without the code_verifier. PKCE replaces the need for a shared secret.
+
+## OAuth for Mobile Apps
+
+Mobile apps add another layer of complexity. The app cannot securely store a client_secret (it can be extracted from the binary). The app's custom URL scheme (e.g., `myapp://callback`) can be registered by any other app on the device.
+
+The solution is the same as SPAs: Authorization Code Flow with PKCE, using the system browser (not a WebView) for the authorization step.
+
+```kotlin
+// Android: Using Chrome Custom Tabs + AppAuth
+val authRequest = AuthorizationRequest.Builder(
+    serviceConfiguration,
+    "YOUR_CLIENT_ID",
+    ResponseTypeValues.CODE,
+    URI("myapp://callback")
+).setScope("openid profile email")
+ .setCodeVerifier(codeVerifier)
+ .setCodeVerifierChallenge(codeChallenge)
+ .setCodeVerifierChallengeMethod(CodeVerifierChallenge.S256)
+ .build()
+
+val authClient = AuthorizationManagementActivity()
+authClient.performAuthorizationRequest(this, authRequest, pendingIntent)
+```
+
+```swift
+// iOS: Using ASWebAuthenticationSession
+let authURL = URL(string: "https://auth.example.com/authorize?" +
+    "response_type=code&" +
+    "client_id=YOUR_CLIENT_ID&" +
+    "redirect_uri=myapp://callback&" +
+    "code_challenge=\(codeChallenge)&" +
+    "code_challenge_method=S256")!
+
+let session = ASWebAuthenticationSession(
+    url: authURL,
+    callbackURLScheme: "myapp"
+) { callbackURL, error in
+    guard let callbackURL = callbackURL else { return }
+    let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)
+    let code = components?.queryItems?.first(where: { $0.name == "code" })?.value
+    // Exchange code for tokens with PKCE
+}
+session.prefersEphemeralWebBrowserSession = true
+session.start()
+```
+
+The system browser approach means the user's login session (cookies from Google, GitHub, etc.) is already present, and the app never sees the user's password. The PKCE code_verifier is generated and stored in the app's secure storage (Keychain/Keystore), preventing any other app from intercepting the authorization code.
+
+### Mobile App Checklist
+
+- Use the system browser (ASWebAuthenticationSession on iOS, Chrome Custom Tabs on Android) — never a WebView
+- Use Authorization Code Flow with PKCE — never the implicit grant
+- Generate and store the code_verifier securely in the OS keychain
+- Validate the redirect URI — verify the scheme and path match your app exactly
+- Store tokens in the OS keychain (iOS Keychain, Android EncryptedSharedPreferences)
+- Implement token refresh with rotation on the backend
+
+## Self-Check Questions
+
+1. What is the difference between authentication and authorization? Give an example of each.
+2. Name the four parties in OAuth 2.0 and describe each one's role.
+3. Why is the authorization code flow more secure than the implicit grant?
+4. What attack does PKCE prevent? How?
+5. What are the three parts of a JWT? What information does each part contain?
+6. How does refresh token rotation detect token theft?
+7. Why should SPAs store access tokens in memory rather than localStorage?
+8. What is the difference between OAuth 2.0 and OpenID Connect?
+
+---
+
+OAuth 2.0 and OIDC are not magic. They are carefully designed protocols that solve the fundamental problem of delegated access. The authorization code flow with PKCE is the foundation for secure authentication in modern applications. Understanding the token structure, the role of each party, and the security mechanisms lets you implement OAuth correctly and avoid the common pitfalls that lead to data breaches.
