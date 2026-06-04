@@ -15,6 +15,7 @@ import ConcurrencyDemo from '../../components/demos/ConcurrencyDemo'
 import IsolationDemo from '../../components/demos/IsolationDemo'
 import WalDemo from '../../components/demos/WalDemo'
 import IndexAdvisorDemo from '../../components/demos/IndexAdvisorDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Your application has users. Users create data. That data needs to survive restarts, survive crashes, and be findable in milliseconds. You could write it to a file. People did that for decades. But files break down fast when you need to search, update, or share data across multiple users at the same time. That is why databases exist. They are not magic — they are carefully engineered systems built on a handful of core ideas. By the end of this, you will understand every single one.
 
@@ -257,6 +258,107 @@ You started with the question "why not just use files?" and now you understand t
 - **Isolation levels**: read uncommitted through serializable, each preventing different anomalies
 - **Write-ahead logging**: sequential log writes enable crash recovery and fast commits
 - **Index strategy**: add indexes for WHERE/JOIN/ORDER BY columns, remove unused ones
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why are databases faster than plain files for lookups?",
+    options: [
+      "Databases use RAM instead of disk",
+      "Databases use B-tree indexes to skip scanning every row",
+      "Databases compress data more efficiently",
+      "Databases run on faster hardware"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "B-tree indexes organize data so the database can jump directly to the right page instead of scanning every row, turning O(n) scans into O(log n) lookups."
+  },
+  {
+    question: "What is a page in database storage?",
+    options: [
+      "A single row of data",
+      "A fixed-size block (typically 4KB or 8KB) that holds multiple rows",
+      "A virtual memory page mapped by the OS",
+      "A query result set"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Databases store data in fixed-size pages (blocks) to amortize disk I/O cost — reading one byte costs the same as reading 8KB due to seek latency."
+  },
+  {
+    question: "Why is a B-tree faster than a binary search tree for databases?",
+    options: [
+      "B-trees use hashing for O(1) lookups",
+      "B-trees are wider (hundreds of children per node vs 2), reducing tree height and disk reads",
+      "B-trees store data in memory instead of disk",
+      "B-trees use a different comparison algorithm"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A B-tree with 100 keys per node has height ~4 for a million rows, requiring only 4 disk reads. A binary search tree with the same data has height ~20, requiring 20 disk reads."
+  },
+  {
+    question: "What is selectivity and why does it matter for index usage?",
+    options: [
+      "Selectivity measures how many indexes a table has",
+      "Selectivity is the fraction of rows matching a condition — high selectivity means an index helps, low selectivity means a full scan is faster",
+      "Selectivity determines which database engine to use",
+      "Selectivity is the number of columns in an index"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A condition matching 1% of rows is highly selective (index is faster). A condition matching 90% is not selective — reading the index plus data pages costs more than scanning everything once."
+  },
+  {
+    question: "What is the difference between a shared lock and an exclusive lock?",
+    options: [
+      "Shared locks are for reads, exclusive locks are for writes",
+      "Shared locks allow concurrent reads but block writes; exclusive locks block all access",
+      "Shared locks are faster than exclusive locks",
+      "There is no difference — both prevent concurrent access"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Multiple transactions can hold shared locks on the same data (for reading). Only one transaction can hold an exclusive lock, blocking all other reads and writes until released."
+  },
+  {
+    question: "Which isolation level prevents dirty reads but allows non-repeatable reads?",
+    options: [
+      "Read Uncommitted",
+      "Read Committed",
+      "Repeatable Read",
+      "Serializable"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Read Committed only shows data that has been committed. It prevents dirty reads (reading uncommitted data) but allows non-repeatable reads (a row can change between two reads within the same transaction)."
+  },
+  {
+    question: "Why is Write-Ahead Logging (WAL) fast?",
+    options: [
+      "WAL writes to memory instead of disk",
+      "WAL uses compression to reduce write volume",
+      "WAL writes sequentially to a log file, which is 10-100x faster than random writes to data pages",
+      "WAL bypasses the filesystem entirely"
+    ],
+    correctIndex: 2,
+    points: 13,
+    explanation: "Sequential writes are 10-100x faster than random writes because the disk head stays in one position. WAL appends changes to a log sequentially, then lazily writes to data pages in the background."
+  },
+  {
+    question: "Why should you not create an index on a column with only 2 distinct values (like gender)?",
+    options: [
+      "It wastes disk space",
+      "The B-tree cannot handle low-cardinality data",
+      "Low selectivity (~50%) means a full table scan is faster than reading the index plus data pages",
+      "Databases do not support indexes on enum columns"
+    ],
+    correctIndex: 2,
+    points: 13,
+    explanation: "With 50% selectivity, the database reads the index (half the table) then reads the matching data pages — more I/O than just scanning the entire table once. Indexes only help when selectivity is high (<5%)."
+  }
+]} />
 
 ### Self-Check
 

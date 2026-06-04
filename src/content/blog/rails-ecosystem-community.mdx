@@ -9,6 +9,7 @@ import GemExplorerDemo from '../../components/demos/GemExplorerDemo'
 import RailsReleaseDemo from '../../components/demos/RailsReleaseDemo'
 import DeployPipelineDemo from '../../components/demos/DeployPipelineDemo'
 import FrontendIntegrationDemo from '../../components/demos/FrontendIntegrationDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## The Gem Ecosystem
 
@@ -275,3 +276,92 @@ You have reached the end of our journey through the Rails ecosystem. Here is a c
 - [ ] I know at least three resources for staying up-to-date with Rails developments
 - [ ] I can explain when to choose Sinatra or Hanami over Rails
 - [ ] I understand why Ruby version matters and how to manage it with rbenv
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What does Bundler do, and why should Gemfile.lock be committed to version control?",
+    options: [
+      "Bundler runs tests; Gemfile.lock tracks test results",
+      "Bundler resolves and installs gem dependencies; Gemfile.lock ensures every developer and CI uses the exact same gem versions",
+      "Bundler compiles assets; Gemfile.lock stores compiled output",
+      "Bundler is a deployment tool; Gemfile.lock contains server config"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Bundler reads the Gemfile, resolves compatible gem versions, and installs them. The Gemfile.lock locks exact versions so everyone on the team gets identical dependencies."
+  },
+  {
+    question: "In Rails' semantic versioning (MAJOR.MINOR.PATCH), what does a MINOR release indicate?",
+    options: [
+      "Breaking changes that require code updates",
+      "Bug fixes only — always safe to upgrade",
+      "New features that are backward compatible — upgrading should be safe",
+      "Security patches for older versions"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "MAJOR = breaking changes, MINOR = new backward-compatible features, PATCH = bug fixes. A MINOR upgrade should not break existing code."
+  },
+  {
+    question: "Which of these is NOT a benefit of Hotwire/Turbo over a React SPA?",
+    options: [
+      "No Node.js or JavaScript build step required",
+      "Server-rendered HTML for excellent SEO",
+      "Full client-side state management and complex animation capabilities",
+      "Faster development speed"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Hotwire/Turbo sends HTML from the server and swaps it into the page. It handles 80% of use cases but has less control over client-side state and limited animation compared to React/Vue."
+  },
+  {
+    question: "Why does YJIT in Ruby 3.1+ improve Rails performance?",
+    options: [
+      "It caches database queries automatically",
+      "It compiles hot code paths to native machine code at runtime, giving 10-30% speedup",
+      "It replaces the Ruby interpreter entirely",
+      "It precompiles ERB templates during boot"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "YJIT (Yet Another Ruby JIT) identifies frequently executed code paths and compiles them to native machine code, eliminating interpreter overhead for hot loops and method calls."
+  },
+  {
+    question: "When should you choose Sinatra over Rails?",
+    options: [
+      "When building a full-stack e-commerce application",
+      "When you need a small API, webhook handler, or microservice with minimal overhead",
+      "When you need Active Record and the asset pipeline",
+      "When your team only knows Python"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Sinatra is a lightweight DSL for small web apps — a complete app can be 10 lines of Ruby. It's ideal when Rails' conventions feel like overhead, such as microservices or webhook handlers."
+  },
+  {
+    question: "What are the essential steps in a modern Rails deployment pipeline?",
+    options: [
+      "Write code, push to Git, done",
+      "Push to Git, CI runs tests/linters, assets compile, deploy to server, run migrations, restart app, health check",
+      "Run rails server locally, share the port",
+      "Only run database migrations — assets are precompiled client-side"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A modern pipeline: push code, CI validates (tests + linting), assets compile, new release deploys, migrations run, app restarts, and a health check confirms everything works."
+  },
+  {
+    question: "Why is Ruby version management important for a Rails team?",
+    options: [
+      "It doesn't matter — Rails works with any Ruby version",
+      "Each Rails release requires a minimum Ruby version, and version managers like rbenv ensure all developers and CI use the same Ruby",
+      "Ruby versions only affect test speed",
+      "Only the production server needs a specific Ruby version"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Rails versions have minimum Ruby requirements. Version managers (rbenv, rvm, asdf) let developers switch Ruby versions per-project, and .ruby-version ensures consistency across the team."
+  }
+]} />

@@ -9,6 +9,7 @@ import LeaderboardRequirementsDemo from '../../components/demos/LeaderboardRequi
 import SortedSetDemo from '../../components/demos/SortedSetDemo'
 import LeaderboardPaginationDemo from '../../components/demos/LeaderboardPaginationDemo'
 import LeaderboardArchitectureDemo from '../../components/demos/LeaderboardArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 You are in a system design interview. The interviewer says: "Design a real-time leaderboard for a competitive mobile game with millions of players." Where do you start?
 
@@ -519,6 +520,95 @@ def archive_leaderboard(key: str):
     # Expire the Redis key after archiving
     r.expire(key, 86400)  # TTL 1 day for old period
 ```
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why are Redis sorted sets ideal for leaderboards?",
+    options: [
+      "They store data on disk so it survives restarts",
+      "Members are always sorted by score with O(log N) insert, delete, and search operations",
+      "They automatically handle authentication and authorization",
+      "They support complex queries with JOIN operations"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Redis sorted sets use a skiplist internally, providing O(log N) for insert, delete, and search while keeping all members sorted by score. This makes rank queries like ZREVRANGE and ZREVRANK extremely fast."
+  },
+  {
+    question: "How does tie-breaking work when two players have the same score?",
+    options: [
+      "The player with the shorter username ranks higher",
+      "The system picks a random winner each time",
+      "The submission timestamp is encoded as a fractional part of the score — earlier submissions rank higher",
+      "Both players are assigned the same rank with no ordering"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "The submission timestamp is embedded as a tiny fractional value added to the score. Since Redis sorts numerically, earlier timestamps get a slightly higher fractional part, giving them priority when base scores are identical."
+  },
+  {
+    question: "Why is push-based fanout not used for celebrity accounts with millions of followers?",
+    options: [
+      "Celebrities don't need leaderboards",
+      "A single tweet from a celebrity would generate millions of timeline writes, saturating the database",
+      "Push fanout only works for accounts with fewer than 100 followers",
+      "Celebrities prefer to see their own scores only"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "If Taylor Swift tweets to 100M followers, push fanout would generate 100M writes to the timeline table from a single tweet. Instead, celebrity tweets are pulled at read time, and only regular users get push fanout."
+  },
+  {
+    question: "What is the purpose of the 30-second TTL on the cached top-100 leaderboard?",
+    options: [
+      "To prevent cache memory from growing indefinitely",
+      "To ensure stale data is never served to players",
+      "To balance freshness (staleness is invisible at 30s) with eliminating most Redis calls",
+      "To comply with data retention policies"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "90% of leaderboard views hit the top 100. A 30-second TTL means most reads are served from cache without touching Redis, while staleness is short enough that players won't notice rank changes being delayed."
+  },
+  {
+    question: "How does sharding the leaderboard by player ID hash work for global top-N queries?",
+    options: [
+      "Each shard returns its top-N, then a min-heap merges results across all shards",
+      "The global top-N is stored in a separate unsharded Redis instance",
+      "All shards are queried sequentially and results are concatenated",
+      "The client queries each shard and merges results client-side"
+    ],
+    correctIndex: 0,
+    points: 15,
+    explanation: "Each shard returns its top-N entries. A min-heap across all shards merges these results to produce the global top-N. With 16 shards, this is 16 ZREVRANGE calls plus a heap merge of 1600 entries, completing in 2-5ms."
+  },
+  {
+    question: "What data structure does Redis use internally for sorted sets, and why was it chosen over balanced trees?",
+    options: [
+      "Red-Black tree — because it guarantees O(log N) worst case",
+      "B+ tree — because it's optimized for disk-based storage",
+      "Skiplist — because it's simpler to implement, lock-free operations are easier, and memory overhead is lower for in-memory workloads",
+      "Hash table — because O(1) lookup is faster than O(log N)"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Redis uses a skiplist because it's simpler than balanced trees (no rotation logic), lock-free operations are easier to implement, and it has lower memory overhead for in-memory workloads. Nodes are promoted to higher levels with probability 1/2."
+  },
+  {
+    question: "Why does the leaderboard system use both RDB and AOF persistence for Redis?",
+    options: [
+      "RDB is faster for writes; AOF is faster for reads",
+      "RDB provides fast recovery from catastrophic failure; AOF provides minimal data loss (at most 1 second)",
+      "RDB stores compressed data; AOF stores uncompressed data",
+      "It's required by Redis licensing"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "RDB gives fast point-in-time snapshots for recovery, while AOF logs every write operation for durability. Together (aof-use-rdb-preamble), they provide at-most-1-second data loss with sub-second recovery for a 10GB dataset."
+  }
+]} />
 
 ## Summary
 

@@ -15,6 +15,7 @@ import ShoppingCartDemo from '../../components/demos/ShoppingCartDemo'
 import OrderPipelineDemo from '../../components/demos/OrderPipelineDemo'
 import InventoryDemo from '../../components/demos/InventoryDemo'
 import AmazonArchitectureDemo from '../../components/demos/AmazonArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 # Part 1: Design Uber
 
@@ -314,6 +315,95 @@ Synchronous communication (REST or gRPC) is used when the caller needs an immedi
 - **Elasticsearch**: product search index, autocomplete index
 - **S3**: product images, static assets, logs
 - **DynamoDB**: product catalog (key-value access pattern, massive scale), user preferences
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why can't you use a simple SQL query like SELECT * FROM drivers WHERE distance < 5 for Uber's driver matching?",
+    options: [
+      "SQL doesn't support geographic queries",
+      "Distance is a computed value — the database would have to scan every driver row and compute Haversine distance for each, taking seconds instead of milliseconds",
+      "SQL is too slow for real-time applications",
+      "Uber uses MongoDB, not SQL"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "With 5 million drivers, a distance query would require scanning every row, computing Haversine distance for each, then sorting. This takes seconds. A geospatial index (QuadTree, Geohash, or S2) finds nearby drivers in milliseconds."
+  },
+  {
+    question: "How does Uber's surge pricing formula work?",
+    options: [
+      "Prices double every time someone requests a ride",
+      "The surge multiplier is based on demand_factor = requests / (drivers * expected_completion_rate) — when this exceeds 1, prices increase",
+      "Surge pricing is random and changes every minute",
+      "Only the distance determines the fare"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Surge pricing divides the map into zones. Each zone tracks the ratio of ride requests to available drivers. When 300 requests exist with 20 drivers (each completing a ride every 10 minutes), the demand factor is 300/120 = 2.5x."
+  },
+  {
+    question: "What is the overselling problem in e-commerce inventory management?",
+    options: [
+      "When a product is listed at a lower price than intended",
+      "When two users both read inventory count as 1, both write 0, but a third user also reads 1 before the write — causing more units sold than in stock",
+      "When inventory is counted incorrectly during warehouse audits",
+      "When products are shipped to the wrong address"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "This is a classic race condition: multiple concurrent reads of the same inventory count can all see the value as 1, all decrement to 0, but the actual stock was only 1 — yet 3 orders got through. Solutions include distributed locking, optimistic concurrency, and pre-decrement with compensation."
+  },
+  {
+    question: "How does Amazon's hybrid cart storage strategy work?",
+    options: [
+      "All carts are stored in Elasticsearch for fast search",
+      "Anonymous carts live in Redis (fast, volatile); when a user logs in, the Redis cart is merged into the database cart (durable)",
+      "Carts are stored in the browser's localStorage only",
+      "Carts are stored in S3 as JSON files"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Amazon uses Redis for anonymous carts (sub-millisecond reads, volatile) and PostgreSQL for logged-in users (durable). When a user logs in, the Redis cart is merged into the database cart. Price calculations always happen server-side."
+  },
+  {
+    question: "What is the saga pattern in the context of Amazon's checkout flow?",
+    options: [
+      "A backup procedure for database recovery",
+      "A sequence of local transactions (create order, charge payment, reserve inventory, ship) where each step has a compensating action for rollback if any step fails",
+      "A caching strategy for product catalog data",
+      "An encryption protocol for payment data"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The checkout saga orchestrates multiple services: create order → process payment → reserve inventory → create shipment. If payment fails, the system cancels the order. If inventory is unavailable, it refunds the payment. Each failure triggers reverse compensating actions."
+  },
+  {
+    question: "What are the three phases of a search engine and how do they relate?",
+    options: [
+      "Crawl discovers pages, Index transforms content into an inverted index, Serve answers queries using the index",
+      "Fetch downloads HTML, Parse extracts text, Store saves to disk",
+      "Search finds URLs, Rank sorts them, Display renders results",
+      "Cache stores results, Query finds matches, Return sends responses"
+    ],
+    correctIndex: 0,
+    points: 10,
+    explanation: "Crawling discovers and downloads pages continuously. Indexing transforms page content into an inverted index (term → document list). Serving takes a user query, looks up matching documents in the index, scores them, and returns ranked results — all within 300ms."
+  },
+  {
+    question: "Why does Amazon use event-driven sagas instead of synchronous orchestration for checkout?",
+    options: [
+      "Synchronous orchestration is faster",
+      "Event-driven sagas provide better fault tolerance — each service scales independently and failures in one service don't block others",
+      "Synchronous calls can't handle payment processing",
+      "Event-driven is simpler to implement"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Event-driven sagas decouple services through message queues (Kafka, SQS). Each service subscribes to events and reacts independently. Adding a new service (like fraud detection) doesn't require modifying existing ones. Failures in one service don't cascade."
+  }
+]} />
 
 ## Trade-offs and Self-Check
 

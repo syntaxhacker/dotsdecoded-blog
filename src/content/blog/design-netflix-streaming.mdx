@@ -13,6 +13,7 @@ import RecommendationEngineDemo from '../../components/demos/RecommendationEngin
 import WatchHistoryDemo from '../../components/demos/WatchHistoryDemo'
 import ContentCatalogDemo from '../../components/demos/ContentCatalogDemo'
 import NetflixArchitectureDemo from '../../components/demos/NetflixArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 You press play. In under two seconds, your screen fills with video. The picture quality adjusts seamlessly as your wifi weakens. You pause, close the app, and open it later on your phone -- it picks up exactly where you left off. This experience, now so natural we take it for granted, is powered by one of the most sophisticated distributed systems ever built.
 
@@ -503,6 +504,53 @@ Putting it all together, here is the complete Netflix architecture:
 When you tap play, the entire chain fires in under 500ms: client to API gateway to playback service to catalog lookup to manifest generation to CDN assignment to stream URL delivery. The first segment arrives at the client within 1-2 seconds, and the ABR engine continuously adapts quality to match your network conditions.
 
 <NetflixArchitectureDemo client:visible />
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "How does adaptive bitrate (ABR) streaming work from the player's perspective?",
+    options: ["The server selects the best quality based on user preferences", "The player downloads segments from different quality levels based on real-time bandwidth measurements", "All quality levels are downloaded simultaneously", "The player always streams at the highest available quality"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The player downloads a manifest listing multiple quality renditions. It measures available bandwidth in real time and selects the best quality that won't cause buffering, switching between renditions segment by segment."
+  },
+  {
+    question: "What is per-title encoding and why does Netflix use it?",
+    options: ["Encoding each video at a fixed bitrate ladder", "Analyzing each title individually to determine optimal bitrates based on content complexity", "Encoding every title in the same resolution", "Using a single codec for all content"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Per-title encoding analyzes each movie individually. An animated film needs only half the bitrate of an action movie at the same resolution because motion complexity differs. This optimizes bandwidth usage per title."
+  },
+  {
+    question: "What is Netflix's Open Connect CDN and why did they build it?",
+    options: ["A commercial CDN service Netflix sells to other companies", "A custom CDN deployed inside ISP data centers to reduce delivery costs by keeping traffic within ISP networks", "A peer-to-peer content sharing network", "A CDN for serving static website assets"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Open Connect is Netflix's custom CDN with appliances deployed inside ISP data centers. By pre-positioning popular content within ISP networks, Netflix reduces expensive upstream bandwidth costs."
+  },
+  {
+    question: "Why does 4K Netflix require specific hardware even if you have the bandwidth?",
+    options: ["4K requires more than 100 Mbps connection", "DRM constraints (Widevine SL3000 with hardware TEE and HDCP 2.2) are required for 4K content", "4K content is only available on smart TVs", "Netflix limits 4K to premium subscribers"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Netflix's DRM enforces four security levels. 4K requires SL3000 (hardware TEE with HDCP 2.2 output protection). This is a DRM constraint, not a bandwidth constraint — the content is encrypted at this security level."
+  },
+  {
+    question: "How does Netflix's resume playback feature track your position?",
+    options: ["The client stores your position locally only", "The client sends periodic heartbeats with the current playback position, stored in Cassandra", "Netflix screenshots your screen to detect position", "The CDN tracks which segments you have downloaded"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Every few seconds during playback, the client sends a heartbeat with the current position to the playback service. These are stored in Cassandra (chosen for high write throughput) and used to populate the 'Continue Watching' row."
+  },
+  {
+    question: "What is the key difference between Netflix's custom CDN and third-party CDNs like Akamai?",
+    options: ["Custom CDNs are always faster", "Netflix controls content pre-positioning, pushing popular content to appliances during off-peak hours before demand spikes", "Third-party CDNs cannot serve video", "Custom CDNs have unlimited storage"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Netflix knows what content will be popular before release. Open Connect pre-positions this content during off-peak hours, so the first viewer gets a cache hit. This shifts traffic from expensive daytime to cheap nighttime bandwidth."
+  }
+]} />
 
 ## Summary
 

@@ -11,6 +11,7 @@ import ActiveJobDemo from '../../components/demos/ActiveJobDemo'
 import MultiTenancyDemo from '../../components/demos/MultiTenancyDemo'
 import RackMiddlewareDemo from '../../components/demos/RackMiddlewareDemo'
 import RailsApiDemo from '../../components/demos/RailsApiDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What This Covers
 
@@ -865,6 +866,107 @@ Build an engine when:
 - The feature has its own models, views, and controllers that form a coherent unit
 
 Popular examples of engines in the wild: **Devise** (authentication), **Spree Commerce** (e-commerce), **Forem** (forum platform), **ActiveAdmin** (admin dashboard), **Discourse** (built as an engine that becomes the entire app).
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "In Rails I18n, what does the interpolation syntax `%{name}` do inside a YAML translation file?",
+    options: [
+      "It creates a new locale key dynamically",
+      "It acts as a placeholder that gets replaced by a value passed to t()",
+      "It defines a default fallback value",
+      "It registers a pluralization rule"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The `%{name}` syntax is a placeholder. When you call `t(\"greeting\", name: \"Alice\")`, Rails replaces `%{name}` with the value passed in the hash."
+  },
+  {
+    question: "ActionCable uses WebSockets instead of HTTP. What is the key architectural difference between the two?",
+    options: [
+      "WebSockets are encrypted, HTTP is not",
+      "WebSockets maintain a persistent bidirectional connection, HTTP uses request-response cycles",
+      "WebSockets can only send data from server to client",
+      "WebSockets are faster because they skip DNS resolution"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "HTTP is a request-response protocol where the client asks and the server answers, then the connection closes. WebSockets establish a persistent, full-duplex connection where either side can send data at any time without re-establishing the connection."
+  },
+  {
+    question: "In ActionCable, what is the role of Redis in production?",
+    options: [
+      "It stores user session data for WebSocket connections",
+      "It acts as the pub/sub adapter to broadcast messages across multiple Rails processes",
+      "It caches frequently accessed channel subscriptions",
+      "It handles WebSocket authentication and encryption"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Redis serves as the pub/sub adapter in production. When one Rails process broadcasts a message, Redis distributes it to all other processes, ensuring every connected WebSocket client receives the update regardless of which process they are connected to."
+  },
+  {
+    question: "What happens when an Active Job with `retry_on StandardError, attempts: 5` fails on the third attempt?",
+    options: [
+      "The job is immediately discarded",
+      "The job is retried with exponential backoff up to 5 total attempts",
+      "The job raises an exception and halts the worker",
+      "The job is moved to a dead letter queue immediately"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The `retry_on` macro tells Active Job to re-enqueue the job on failure. With `wait: :exponentially_longer`, each retry waits longer (1s, 2s, 4s, 8s...). It will attempt up to 5 times total before giving up."
+  },
+  {
+    question: "In a shared-schema multi-tenancy architecture, what prevents Tenant A from seeing Tenant B's data?",
+    options: [
+      "Separate database connections for each tenant",
+      "A `default_scope` that filters every query by `tenant_id`",
+      "PostgreSQL schemas that isolate each tenant's tables",
+      "Encryption of row-level data with tenant-specific keys"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "In shared-schema multi-tenancy, all tenants share one database and one schema. A `default_scope` on `ApplicationRecord` adds `WHERE tenant_id = X` to every query, ensuring each tenant only sees their own data. Forgetting this scope on a query is a data leak risk."
+  },
+  {
+    question: "A Rack application must return a three-element array. What are those three elements?",
+    options: [
+      "A request hash, a response hash, and a middleware chain",
+      "An HTTP status code, a headers hash, and a response body",
+      "A controller class, an action name, and a params hash",
+      "A database connection, a template renderer, and a session store"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A Rack app returns `[status, headers, body]`. The status is an integer HTTP code (like 200), headers is a hash of HTTP response headers, and body is an enumerable (usually an array of strings) that produces the response content."
+  },
+  {
+    question: "What is the key difference between Prawn and Wicked PDF for generating PDFs in Rails?",
+    options: [
+      "Prawn renders HTML templates to PDF, Wicked PDF draws directly to a canvas",
+      "Prawn draws directly to a PDF canvas for pixel-level control, Wicked PDF converts HTML templates via a headless browser",
+      "Prawn only works with ERB templates, Wicked PDF supports all template engines",
+      "Prawn requires a running browser instance, Wicked PDF is pure Ruby"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Prawn is a pure-Ruby library that draws directly to a PDF canvas, giving you pixel-level control over layout. Wicked PDF uses wkhtmltopdf (a headless browser) to render HTML templates into PDFs, letting you reuse existing views and CSS."
+  },
+  {
+    question: "When should you use `async` vs `defer` on a `<script>` tag?",
+    options: [
+      "Use `async` for scripts that modify the DOM, `defer` for analytics",
+      "Use `async` for independent scripts like analytics, `defer` for scripts that need the full DOM",
+      "Use `async` for inline scripts, `defer` for external scripts",
+      "They are interchangeable — pick either one"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "`async` downloads in parallel and executes as soon as it finishes downloading, regardless of DOM state — good for independent scripts like analytics. `defer` downloads in parallel but executes after the DOM is fully parsed, in document order — ideal for application code that needs the DOM."
+  }
+]} />
 
 ## Self-Check
 

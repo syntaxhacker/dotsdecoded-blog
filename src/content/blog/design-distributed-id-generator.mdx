@@ -10,6 +10,7 @@ import SnowflakeDemo from '../../components/demos/SnowflakeDemo'
 import UuidComparisonDemo from '../../components/demos/UuidComparisonDemo'
 import DbSequenceDemo from '../../components/demos/DbSequenceDemo'
 import IdArchitectureDemo from '../../components/demos/IdArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 You are in a system design interview. The interviewer says: "Design a distributed ID generator." Where do you start? Not with the algorithm. You start by understanding why auto-increment IDs break at scale, what properties a distributed ID needs, and how to generate millions of unique IDs per second without a single point of failure.
 
@@ -406,6 +407,107 @@ Snowflake is not always the right answer. Consider the alternatives:
 Snowflake is the reference solution for distributed ID generation at scale. It is compact (64-bit), time-sortable (B-tree friendly), and deterministically unique (zero collisions). The trade-off is the need for a coordination service like ZooKeeper for worker ID assignment — but this is a one-time cost at service startup, not a per-ID cost.
 
 In a system design interview, start with the requirements, walk through the alternatives (UUIDs, DB sequences, range batching), then land on Snowflake. Explain the bit layout, the worker ID assignment strategy, the clock skew handling, and the multi-datacenter deployment. That is the complete answer.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the five properties of a good distributed ID?",
+    options: [
+      "Simple, cheap, fast, secure, readable",
+      "Globally unique, roughly time-sortable, compact (64-bit), high throughput, highly available with no single point of failure",
+      "Random, sequential, deterministic, encrypted, compressed",
+      "Unique, persistent, immutable, indexed, cached"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "IDs must be globally unique (no collisions), roughly time-sortable (B-tree friendly), compact (64-bit fits in a long), high throughput (local computation), and highly available (no single point of failure)."
+  },
+  {
+    question: "Why do random UUIDs (v4) cause B-tree index fragmentation?",
+    options: [
+      "They are too large for B-tree nodes",
+      "Each new ID lands at a random position in the tree, causing near-worst-case page splits and making inserts 10-100x slower than sequential keys",
+      "UUIDs cannot be indexed",
+      "B-trees do not support string keys"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "B-trees perform best with monotonically increasing keys. Random UUIDs cause every insert to land at a random leaf page, triggering frequent page splits that fragment the index and slow inserts dramatically."
+  },
+  {
+    question: "How does the Snowflake algorithm achieve deterministic uniqueness without per-ID coordination?",
+    options: [
+      "It uses random numbers",
+      "It combines a unique worker ID (assigned at startup via ZooKeeper), a millisecond timestamp, and a per-worker sequence counter — as long as no two workers share an ID, uniqueness is guaranteed",
+      "It contacts a central server for each ID",
+      "It uses a database sequence per ID"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Snowflake splits a 64-bit integer: 41-bit timestamp, 10-bit worker ID, 12-bit sequence. The worker ID (assigned once via ZooKeeper) is the deterministic uniqueness anchor. After that, all ID generation is local."
+  },
+  {
+    question: "What is the maximum throughput of a single Snowflake worker with default settings?",
+    options: [
+      "1,000 IDs per second",
+      "10,000 IDs per second",
+      "4,096 IDs per millisecond (about 4 million IDs per second cluster-wide with 1024 workers)",
+      "100 IDs per second"
+    ],
+    correctIndex: 2,
+    points: 12,
+    explanation: "The 12-bit sequence counter allows 4,096 IDs per millisecond per worker. With 1024 workers (10-bit worker ID), that's ~4.2 million IDs per second cluster-wide."
+  },
+  {
+    question: "How does Snowflake handle clock skew when NTP moves a clock backward?",
+    options: [
+      "It ignores the clock and continues generating IDs",
+      "If the current timestamp is less than the last timestamp, the worker spin-waits until the clock catches up — or shuts down if skew exceeds a threshold",
+      "It uses a different time source",
+      "It assigns a new worker ID"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Clock backward movement is dangerous — it could cause the worker to reuse sequence numbers, creating duplicate IDs. Snowflake detects this and either waits for the clock to catch up or shuts down the worker."
+  },
+  {
+    question: "Why does UUID v7 fix the index performance problem of UUID v4?",
+    options: [
+      "UUID v7 is smaller than v4",
+      "UUID v7 prepends a 48-bit millisecond timestamp, making IDs roughly time-sortable — B-tree indexes handle them much better than random v4 IDs",
+      "UUID v7 uses compression",
+      "UUID v7 is sequential, not random"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "UUID v7 puts the timestamp in the first 48 bits, so IDs sort roughly by creation time. B-tree inserts are much more sequential, avoiding the page split problem of random v4 IDs."
+  },
+  {
+    question: "How does ZooKeeper prevent duplicate worker IDs in Snowflake?",
+    options: [
+      "It assigns worker IDs via a database",
+      "Each service creates an ephemeral sequential node under /snowflake/workers/ — ZooKeeper guarantees no two services hold the same node, and the node auto-deletes on crash",
+      "Worker IDs are hardcoded in configuration files",
+      "ZooKeeper uses a hash to assign worker IDs"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "ZooKeeper ephemeral sequential nodes provide a lease-like mechanism. If a service crashes, its node is automatically deleted, freeing the worker ID. No two services can hold the same node simultaneously."
+  },
+  {
+    question: "When should you NOT use Snowflake and what should you use instead?",
+    options: [
+      "Never — Snowflake is always the best choice",
+      "Use UUID v4 for absolute simplicity and offline generation; use UUID v7 for time-sortability without coordination; use auto-increment for single-server apps",
+      "Use Snowflake for everything",
+      "Use database sequences for all distributed systems"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "Snowflake requires ZooKeeper for worker ID assignment. UUID v4 works offline with zero coordination. UUID v7 gives time-sortability without coordination. Auto-increment is simplest for single-server apps."
+  }
+]} />
 
 ## Self-Check
 

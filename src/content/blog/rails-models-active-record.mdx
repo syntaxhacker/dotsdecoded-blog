@@ -11,6 +11,7 @@ import AssociationDemo from '../../components/demos/AssociationDemo'
 import ActiveRecordQueryDemo from '../../components/demos/ActiveRecordQueryDemo'
 import N1QueryDemo from '../../components/demos/N1QueryDemo'
 import TransactionDemo from '../../components/demos/TransactionDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is Active Record?
 
@@ -607,3 +608,104 @@ Before moving on, make sure you can answer these:
 - What is the N+1 problem, and what method solves it?
 - What happens inside a transaction when one operation fails?
 - What two database columns make a polymorphic association work?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "How does Active Record know which database table a model maps to?",
+    options: [
+      "You must specify the table name in a configuration file",
+      "It uses convention over configuration — the model class User maps to the users table (pluralized)",
+      "It reads a YAML file with table mappings",
+      "It scans the database schema at boot time"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Active Record pluralizes the class name to find the table. User maps to users, BlogPost maps to blog_posts, Person maps to people (handling irregular plurals)."
+  },
+  {
+    question: "Why should you validate at the model level instead of only in the form/view?",
+    options: [
+      "Model validations are faster to execute",
+      "Forms are not the only way data enters your app — API endpoints, background jobs, and console commands bypass the UI",
+      "View validations are not supported in Rails",
+      "Model validations prevent SQL injection"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Data enters your app through many paths: API endpoints, background jobs, console commands, tests. If validations only live in the UI, all other paths are unprotected."
+  },
+  {
+    question: "What is the N+1 query problem, and which method solves it?",
+    options: [
+      "Loading too many columns — solved by SELECT only needed columns",
+      "Loading a collection then accessing associations one by one — solved by includes/eager loading",
+      "Using too many joins — solved by removing joins",
+      "Querying with raw SQL — solved by using Active Record"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "N+1 fires 1 query for the collection plus N queries for each association access. includes loads associations in advance using a few large queries (typically 2) instead of many small ones."
+  },
+  {
+    question: "Inside a transaction, why should you use update! (with bang) instead of update (without bang)?",
+    options: [
+      "update! is faster than update",
+      "update! raises an exception on failure, which triggers the transaction rollback; update silently returns false without rolling back",
+      "update! bypasses validations",
+      "update! only works inside transactions"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "update! raises ActiveRecord::RecordInvalid on failure, causing the transaction to roll back. update silently returns false, the transaction continues, and you may end up with partial data."
+  },
+  {
+    question: "Where does the foreign key live in a belongs_to/has_many relationship?",
+    options: [
+      "On the has_many side",
+      "On the belongs_to side — the comments table has a post_id column",
+      "On both sides",
+      "On a separate join table"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The foreign key is always on the belongs_to side. When you write belongs_to :post, Active Record looks for a post_id column on the current model's table."
+  },
+  {
+    question: "What does the dependent: :destroy option do on a has_many association?",
+    options: [
+      "It deletes the parent record when any child is deleted",
+      "It also destroys each associated child record when the parent is deleted",
+      "It sets the foreign key to NULL on child records",
+      "It prevents deletion of the parent record"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "dependent: :destroy deletes each child record individually (triggering callbacks). dependent: :nullify sets the foreign key to NULL. dependent: :delete_all deletes all children in one SQL query without callbacks."
+  },
+  {
+    question: "When should you use a service object instead of a model callback?",
+    options: [
+      "When you need to normalize an email address before saving",
+      "When the logic involves external effects like sending emails, processing payments, or notifying other systems",
+      "When you need a before_save hook",
+      "When the callback is simple data transformation"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Use callbacks for data integrity tasks (normalizing data, generating slugs). Use service objects for business logic with external effects — the model should not know about email delivery or payment processing."
+  },
+  {
+    question: "What are the two database columns that make a polymorphic association work?",
+    options: [
+      "foreign_key and association_type",
+      "commentable_id and commentable_type (or *_id and *_type)",
+      "parent_id and child_id",
+      "source_id and target_id"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A polymorphic association stores a *_type column (string naming the model) and a *_id column (integer record ID). Together they form a flexible pointer to any associated record."
+  }
+]} />

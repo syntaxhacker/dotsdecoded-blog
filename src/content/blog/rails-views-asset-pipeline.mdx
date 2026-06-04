@@ -10,6 +10,7 @@ import TemplateCompareDemo from '../../components/demos/TemplateCompareDemo'
 import PartialDemo from '../../components/demos/PartialDemo'
 import LayoutYieldDemo from '../../components/demos/LayoutYieldDemo'
 import TurbolinksDemo from '../../components/demos/TurbolinksDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## The Asset Pipeline: From Raw Files to Production Assets
 
@@ -798,3 +799,104 @@ This pattern -- declarative data attributes in HTML, imperative logic in JavaScr
 - What problem does Turbolinks solve, and what is its main gotcha with JavaScript initialization?
 - What replaced Webpacker in Rails 7, and when would you choose one approach over the other?
 - How do data attributes bridge the gap between Rails views and JavaScript?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the five stages of the asset pipeline, in order?",
+    options: [
+      "Compile, minify, fingerprint, cache, deploy",
+      "Detect (read manifests), concatenate (merge files), transform (preprocess), minify (strip whitespace), fingerprint (content hash)",
+      "Import, transpile, bundle, serve, optimize",
+      "Parse, validate, build, test, release"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Sprockets detects manifest directives, concatenates files, transforms (SCSS to CSS, ES6 to JS), minifies (strips whitespace), and appends a content hash for cache busting."
+  },
+  {
+    question: "What is the key difference between a partial and a full template in Rails?",
+    options: [
+      "Partials are faster to render",
+      "Partials are prefixed with an underscore (_post.html.erb) and are reusable fragments; full templates are complete pages",
+      "Partials can only contain HTML, not ERB",
+      "There is no difference — they are the same"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Partials start with an underscore and represent reusable fragments (header, comment card, sidebar). Full templates are complete pages that compose partials together."
+  },
+  {
+    question: "What problem does content_for solve that yield cannot?",
+    options: [
+      "content_for is faster than yield",
+      "It lets pages inject content into specific named blocks in the layout, not just the main yield — like a sidebar or custom head content",
+      "content_for works with JavaScript; yield does not",
+      "content_for is required for all layouts"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "yield marks where page content goes. content_for lets pages inject content into named blocks — a sidebar, a custom <title>, or any area the layout exposes via yield(:name)."
+  },
+  {
+    question: "Why should client-side validation never be the only layer of validation?",
+    options: [
+      "It's too slow",
+      "Users can disable JavaScript, modify HTML, or send crafted HTTP requests directly — server-side validation is the real authority",
+      "Client-side validation only works in Chrome",
+      "It doesn't support required fields"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Client-side validation improves UX by catching mistakes instantly. But it can be bypassed — disable JS, edit HTML, or send a raw HTTP request. Server-side (ActiveRecord) validations are the authority."
+  },
+  {
+    question: "What was the main reason Turbolinks (now Turbo) was created?",
+    options: [
+      "To replace ERB templates",
+      "To provide SPA-like fast navigation without building a full single-page app — by intercepting link clicks and swapping body content",
+      "To replace the asset pipeline",
+      "To add WebSocket support"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Turbolinks intercepts link clicks, fetches the new page via AJAX, and replaces only the body content. CSS and JS stay loaded, making navigation 100-300ms instead of 500-1500ms."
+  },
+  {
+    question: "What replaced Webpacker in Rails 7, and when would you choose each approach?",
+    options: [
+      "Sprockets replaced everything — no choice needed",
+      "importmap-rails for apps without npm packages; jsbundling-rails with esbuild for apps needing npm packages, JSX, or TypeScript",
+      "Webpacker was replaced by nothing — Rails uses plain script tags now",
+      "esbuild replaced all of Rails' JavaScript tooling"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "importmap-rails uses browser-native ES modules (no build step). jsbundling-rails uses esbuild/rollup/webpack for apps that need npm packages, JSX, or TypeScript. Choose based on your JS complexity."
+  },
+  {
+    question: "What is the purpose of fingerprinting in the asset pipeline?",
+    options: [
+      "To compress asset files",
+      "To append a content hash to filenames so the browser treats changed files as new, enabling automatic cache busting",
+      "To minify JavaScript code",
+      "To validate CSS syntax"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Fingerprinting appends a hash derived from file content to the filename. Change one character and the hash changes — the browser sees a new file and fetches the latest version."
+  },
+  {
+    question: "Why does Turbolinks cause issues with jQuery's $(document).ready()?",
+    options: [
+      "jQuery is not compatible with Turbolinks",
+      "$(document).ready() only fires on the first full page load, not on Turbolinks navigation — use turbo:load instead",
+      "Turbolinks disables jQuery entirely",
+      "The ready event fires before the DOM is loaded"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Turbolinks replaces body content without a full page reload, so $(document).ready() doesn't fire again. Use turbo:load to reinitialize JavaScript on every navigation."
+  }
+]} />

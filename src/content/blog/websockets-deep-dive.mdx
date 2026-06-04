@@ -11,6 +11,7 @@ import WsMessageDemo from '../../components/demos/WsMessageDemo'
 import WsPingPongDemo from '../../components/demos/WsPingPongDemo'
 import WsCloseDemo from '../../components/demos/WsCloseDemo'
 import WsArchitectureDemo from '../../components/demos/WsArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine you are in a library. You want to ask the librarian a series of questions. In the old web model, you would walk up to the desk, ask a question, wait for the answer, walk back to your seat, process the answer, then walk back to ask the next question. Every question requires a new trip. That is HTTP polling.
 
@@ -627,3 +628,92 @@ Before you close this page, make sure you can answer these:
 - [ws library](https://github.com/websockets/ws) — the most popular Node.js WebSocket implementation
 - [websockets library](https://websockets.readthedocs.io/) — Python asyncio WebSocket library
 - [WebSocket.org](https://websocket.org/) — protocol overview, echo server, and tools
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "How does the WebSocket opening handshake work?",
+    options: [
+      "The client sends a TCP SYN packet directly",
+      "The client sends an HTTP GET with Upgrade headers; the server responds with 101 Switching Protocols and a Sec-WebSocket-Accept token computed from SHA-1 of the key plus a magic GUID",
+      "The client sends a WebSocket frame immediately",
+      "The server initiates the connection"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The handshake starts as an HTTP request with Upgrade headers. The server computes the accept token by concatenating the Sec-WebSocket-Key with a magic GUID, SHA-1 hashing it, and base64-encoding the result."
+  },
+  {
+    question: "What is the minimum overhead of a WebSocket frame?",
+    options: [
+      "64 bytes (like an HTTP header)",
+      "2 bytes (FIN + opcode + short payload length)",
+      "0 bytes (no overhead)",
+      "14 bytes (always includes masking key)"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A simple text frame with a short payload can be as small as 2 bytes — FIN bit + opcode + 7-bit length. Compare that to hundreds of bytes for HTTP headers."
+  },
+  {
+    question: "Why must client-to-server WebSocket frames be masked?",
+    options: [
+      "To encrypt the data for security",
+      "To prevent cache poisoning attacks where an attacker sends data that looks like HTTP to a proxy",
+      "To reduce bandwidth",
+      "It is optional, not required"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Masking XORs the payload with a random key so intermediaries (proxies, caches) cannot misinterpret WebSocket data as HTTP requests. It is not encryption — it is a defense against broken intermediaries."
+  },
+  {
+    question: "What are the five WebSocket opcodes and their categories?",
+    options: [
+      "GET, POST, PUT, DELETE, PATCH",
+      "Text (1) and Binary (2) for data; Continuation (0), Close (8), Ping (9), Pong (10) for control",
+      "Open, Read, Write, Close, Error",
+      "SYN, ACK, FIN, RST, PUSH"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Data frames: Text (0x1), Binary (0x2), Continuation (0x0). Control frames: Close (0x8), Ping (0x9), Pong (0xA). Control frames cannot be fragmented."
+  },
+  {
+    question: "How does message fragmentation work in WebSocket?",
+    options: [
+      "Messages are split by the TCP layer automatically",
+      "The first fragment has the message opcode and FIN=0; continuation fragments have opcode=0 and FIN=0; the final fragment has FIN=1",
+      "Each fragment is a complete message",
+      "Fragmentation is not supported in WebSocket"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The first fragment carries the message type (text/binary) with FIN=0. Continuation frames use opcode=0. When FIN=1 on a continuation frame, the message is complete."
+  },
+  {
+    question: "Why do WebSocket servers need sticky sessions behind a load balancer?",
+    options: [
+      "To encrypt traffic",
+      "Because WebSocket connections are stateful — all frames from one client must go to the same server that holds the connection state",
+      "To balance CPU load",
+      "Sticky sessions are not needed for WebSocket"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "WebSocket connections are stateful. The server that completed the handshake holds session state, authentication, and subscriptions. All subsequent frames must route to that same server."
+  },
+  {
+    question: "When should you choose SSE over WebSocket?",
+    options: [
+      "When you need bidirectional communication",
+      "When you need server-to-client streaming with simplicity, auto-reconnection, and HTTP compatibility",
+      "When you need binary data transfer",
+      "When you need sub-protocol negotiation"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "SSE wins for server-to-client streaming: simpler setup, auto-reconnection, works through proxies, and uses standard HTTP. WebSocket is better for bidirectional, low-latency communication."
+  }
+]} />

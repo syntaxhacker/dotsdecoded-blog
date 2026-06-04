@@ -11,6 +11,7 @@ import WaitingRoomDemo from '../../components/demos/WaitingRoomDemo'
 import BookingConcurrencyDemo from '../../components/demos/BookingConcurrencyDemo'
 import PaymentFlowDemo from '../../components/demos/PaymentFlowDemo'
 import BookingArchitectureDemo from '../../components/demos/BookingArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine 2 million people press a button at the exact same instant, all competing for 50,000 seats. By the time you finish reading this sentence, the best seats are already gone. By the time you finish this paragraph, the event is sold out. That is the challenge Ticketmaster faces every time Taylor Swift, Beyonce, or the Super Bowl goes on sale. This is not a web app problem -- this is a distributed systems warfare problem.
 
@@ -689,6 +690,95 @@ Redis is configured with AOF persistence and replication to a secondary node. If
 | Payment flow | Saga pattern with idempotency keys | 2PC distributed transaction | Better fault tolerance, async compensation |
 | Real-time updates | WebSocket push | Client polling | Lower latency, less server load |
 | Cache | CDN + Redis + Read replicas | Single cache layer | Handles 167K reads/sec with sub-second freshness |
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why is ticket booking harder than e-commerce checkout?",
+    options: [
+      "Tickets are more expensive than physical products",
+      "Tickets are uniquely positioned assets — Seat 12, Row H is one-of-a-kind, and two people cannot both occupy it, unlike fungible goods",
+      "E-commerce doesn't need inventory management",
+      "Ticket booking requires less concurrency"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Unlike selling 10,000 identical wireless headphones, each ticket represents a specific, unique seat. This means every seat is a distinct item with its own inventory state, making contention management far more complex."
+  },
+  {
+    question: "How does SETNX in Redis help prevent double-selling of hot seats?",
+    options: [
+      "It encrypts the seat data so only one user can read it",
+      "SETNX is atomic — only one client can set the key, giving sub-millisecond seat reservation without touching the database",
+      "It creates a database transaction that locks the row",
+      "It sends a notification to other users that the seat is taken"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Redis SETNX (Set if Not eXists) is atomic — Redis guarantees only one client can successfully set a key. This provides sub-millisecond seat holds for the hottest inventory without database contention."
+  },
+  {
+    question: "What is the purpose of the waiting room queue before on-sale time?",
+    options: [
+      "To collect user email addresses for marketing",
+      "To meter the flow of users into the booking system, preventing collapse and ensuring fairness",
+      "To verify user identity before allowing purchases",
+      "To pre-authorize payment methods"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When 2 million people hit the site simultaneously, they can't all enter the booking flow at once. The waiting room meters users in batches (e.g., 5,000/minute) to prevent system collapse and give everyone a fair shot."
+  },
+  {
+    question: "Why does the system use optimistic locking with version numbers for seat inventory?",
+    options: [
+      "It's faster than any other concurrency control method",
+      "When two users try to grab the same seat, the UPDATE with WHERE version=X ensures only one succeeds — the other detects the mismatch and retries",
+      "It prevents users from selecting seats they can't afford",
+      "It automatically upgrades users to better seats if their original choice is taken"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Each inventory record has a version column. When attempting to hold a seat, the UPDATE includes WHERE version = read_version. If another thread already modified the row, the version won't match and zero rows are affected, signaling the conflict."
+  },
+  {
+    question: "What happens when a user's hold expires but their payment is still processing?",
+    options: [
+      "The payment is automatically cancelled",
+      "The seat is released to other users, potentially causing overselling",
+      "The system extends the hold and returns 'processing' status — an async worker later confirms or cancels the order",
+      "The user is placed back in the waiting room queue"
+    ],
+    correctIndex: 2,
+    points: 15,
+    explanation: "If the payment times out, the response says 'processing' and the client shows a spinner. The hold is extended by 2 minutes, and an async worker checks the payment status later to either confirm or cancel the order."
+  },
+  {
+    question: "Why does Ticketmaster intentionally overbook by 1-3% for popular events?",
+    options: [
+      "To create artificial scarcity and drive up prices",
+      "They know some percentage of confirmed orders will fail payment processing or be cancelled within the refund window",
+      "Their seat counting system has known bugs",
+      "More orders means more revenue from fees"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Like airlines, Ticketmaster knows from historical data that some confirmed orders will fail payment processing and some users will cancel within 24 hours. The overbooking percentage is calculated from historical conversion rates."
+  },
+  {
+    question: "What is the saga pattern and why is it used for the booking payment flow?",
+    options: [
+      "It's a backup strategy for when the primary database fails",
+      "It orchestrates multiple services (booking, payment, inventory, notification) with compensating transactions for rollback if any step fails",
+      "It's an encryption standard for payment data",
+      "It's a caching strategy for seat maps"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "A booking involves multiple services with separate databases. The saga pattern executes each step (create order, charge payment, reserve inventory) and if any fails, triggers compensating actions in reverse (release inventory, cancel order, refund payment)."
+  }
+]} />
 
 ## Self-Check
 

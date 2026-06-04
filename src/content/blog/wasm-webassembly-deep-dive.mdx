@@ -10,6 +10,7 @@ import WasmStackMachineDemo from '../../components/demos/WasmStackMachineDemo'
 import WasmLinearMemoryDemo from '../../components/demos/WasmLinearMemoryDemo'
 import WasmImportExportDemo from '../../components/demos/WasmImportExportDemo'
 import WasmCompilerDemo from '../../components/demos/WasmCompilerDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What is WebAssembly?
 
@@ -570,3 +571,92 @@ Before moving on, make sure you can answer these questions:
 - Threads, SIMD, and multi-value returns bring modern CPU capabilities to WASM.
 - WASM GC and the Component Model will make WASM a universal application platform.
 - WASM complements JavaScript -- it handles computation, JS handles orchestration.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What 8 bytes does every WASM binary start with, and what do they represent?",
+    options: [
+      "A file size header and a hash",
+      "00 61 73 6D (\\0asm magic number) followed by version 1 in little-endian",
+      "The module name and entry point index",
+      "A UTF-8 string identifying the source language"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The first 4 bytes spell \\0asm in ASCII (the magic number), and the next 4 bytes are the version number (version 1) in little-endian format."
+  },
+  {
+    question: "How does a stack machine differ from a register machine?",
+    options: [
+      "Stack machines use named registers like eax and ebx",
+      "Instructions push values onto and pop values off an implicit stack rather than operating on named registers",
+      "They are the same thing",
+      "Stack machines are faster than register machines"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "WASM is a stack machine: instructions push/pop values on an implicit stack. i32.add pops two values, adds them, and pushes the result. Register machines (like x86) operate on named registers."
+  },
+  {
+    question: "Why is WASM linear memory called 'linear'?",
+    options: [
+      "It uses linked lists",
+      "It is a flat, contiguous array of bytes with no heap, no stack frames, and no virtual memory",
+      "It grows in linear increments",
+      "It is always exactly 64KB"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Linear memory is one contiguous, flat byte array. There are no segments or virtual memory — just a single array that grows by 64KB pages."
+  },
+  {
+    question: "How do imports and exports create a two-way bridge between JS and WASM?",
+    options: [
+      "They do not — WASM is isolated from JavaScript",
+      "Exports make WASM functions available to JS; imports let JS provide functions (like console.log) that WASM can call",
+      "They use JSON serialization",
+      "They share no memory"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Exports expose WASM functions to the host (JS). Imports let the host provide functions and resources to WASM. Together they form a bidirectional communication bridge."
+  },
+  {
+    question: "What problem does WASI solve that WASM in the browser does not?",
+    options: [
+      "WASI adds garbage collection",
+      "WASI provides POSIX-like system interfaces (files, sockets, clocks) so WASM can run outside the browser",
+      "WASI enables DOM access",
+      "WASI replaces the stack machine model"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "WASI extends WASM to server/edge environments by providing system interfaces — file I/O, networking, clocks, randomness — that browsers provide through Web APIs."
+  },
+  {
+    question: "When would you use WASM threads vs SIMD?",
+    options: [
+      "Threads for parallel data processing, SIMD for concurrency",
+      "Threads for running multiple independent tasks concurrently via SharedArrayBuffer; SIMD for processing multiple data points with a single instruction",
+      "They are the same thing",
+      "Threads for browser code, SIMD for server code"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Threads (via SharedArrayBuffer) enable multiple WASM instances to run concurrently. SIMD processes 4 i32 values or 8 i16 values in parallel with a single instruction — useful for image processing and linear algebra."
+  },
+  {
+    question: "What does WASM GC enable that was not possible before?",
+    options: [
+      "Faster binary parsing",
+      "Languages with garbage collectors (Java, Kotlin, Dart) can compile to WASM directly without bundling their own GC",
+      "Direct DOM manipulation",
+      "Dynamic linking of shared libraries"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "WASM GC adds native support for struct types, array types, and type hierarchies, enabling languages with managed runtimes to compile to WASM without embedding their own garbage collector."
+  }
+]} />

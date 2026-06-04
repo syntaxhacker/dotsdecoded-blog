@@ -14,6 +14,7 @@ import MessageOrderingDemo from '../../components/demos/MessageOrderingDemo'
 import GroupMessageDemo from '../../components/demos/GroupMessageDemo'
 import PresenceDemo from '../../components/demos/PresenceDemo'
 import ArchitectureDemo from '../../components/demos/ChatArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine you have a walkie-talkie. You press a button, speak, and your friend on the other side hears you instantly. No dialing, no waiting for a ring, no voicemail. Push-to-talk, always-on, immediate. Now imagine that walkie-talkie works for two billion people simultaneously, across every country on Earth, on devices ranging from a $50 Android phone to the latest iPhone. That is WhatsApp.
 
@@ -507,6 +508,107 @@ Each WebSocket connection consumes memory (~50KB for buffers and state) and a fi
 - At 100K connections per server, that is 5,000 connection servers
 
 In practice, connection servers use techniques like connection multiplexing (multiple logical connections over one TCP connection), buffer pooling, and zero-copy I/O to reduce per-connection overhead. The presence service offloads most state to Redis, keeping the connection servers lean.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the four properties that make chat fundamentally different from other systems?",
+    options: [
+      "Fast, cheap, secure, scalable",
+      "Real-time, bidirectional, ordered, guaranteed delivery",
+      "Stateful, synchronous, linear, durable",
+      "Connected, cached, persistent, encrypted"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Chat is real-time (sub-200ms latency), bidirectional (both sides send anytime), ordered (messages in sequence), and has guaranteed delivery (no lost messages). These four constraints make it one of the hardest systems to build."
+  },
+  {
+    question: "Why is WebSocket preferred over long polling and SSE for chat?",
+    options: [
+      "WebSocket is simpler to implement",
+      "WebSocket is bidirectional with low overhead (2-10 bytes per frame), while long polling wastes bandwidth and SSE is unidirectional",
+      "WebSocket requires no server infrastructure",
+      "WebSocket uses less memory than HTTP"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Chat needs both sides to send messages. Long polling wastes bandwidth (~500 bytes per poll even with no data). SSE is unidirectional (needs separate HTTP for sending). WebSocket is bidirectional with minimal frame overhead."
+  },
+  {
+    question: "How does the system handle reconnection when a mobile user goes through a tunnel?",
+    options: [
+      "All messages are lost and must be resent",
+      "The client reconnects with exponential backoff and sends the last received message sequence number — the server replays any missed messages",
+      "The system waits until the user manually refreshes",
+      "A new WebSocket connection is established with a new session"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "On reconnect, the client sends the last received sequence number. The server sends any messages the client missed during the disconnect. This 'resume from last sequence' approach ensures no messages are lost during brief disconnections."
+  },
+  {
+    question: "What is the difference between at-most-once, at-least-once, and exactly-once delivery?",
+    options: [
+      "At-most-once retries, at-least-once drops, exactly-once is impossible",
+      "At-most-once may lose messages (no retries); at-least-once retries but may duplicate; exactly-once uses deduplication to effectively prevent both loss and duplicates",
+      "They all provide the same guarantee",
+      "Exactly-once is the default in all message queues"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "At-most-once fires and forgets. At-least-once retries until acknowledged (but may duplicate). Exactly-once is theoretically impossible in distributed systems but achieved via server-side and client-side deduplication using message IDs."
+  },
+  {
+    question: "How are messages ordered across multiple servers in a distributed chat system?",
+    options: [
+      "Messages are not ordered in distributed systems",
+      "Each conversation has a centralized sequence generator (Redis INCR or Lamport timestamps) ensuring monotonic ordering per conversation",
+      "Ordering is handled by the client",
+      "Messages are sorted by timestamp"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A centralized sequence generator per conversation (Redis INCR or Lamport timestamps) ensures messages are numbered monotonically. Clients buffer and reorder by sequence number before display."
+  },
+  {
+    question: "Why does WhatsApp use fan-out-on-write for small groups but fan-out-on-read for large channels?",
+    options: [
+      "Small groups need stronger consistency",
+      "Fan-out-on-write is efficient for small groups (few copies), but storing 10,000 copies of one message for a large channel is wasteful — store once and assemble on read instead",
+      "Large channels use a different database",
+      "Fan-out-on-read is always more efficient"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "For small groups (<100 members), writing one copy per recipient is cheap. For large channels (10,000+ members), storing 10,000 copies is wasteful. Store the message once and let each recipient read from the shared channel."
+  },
+  {
+    question: "How does the presence service track whether a user is online?",
+    options: [
+      "The user sends a single connection event and stays marked as online forever",
+      "The client sends periodic heartbeats (every 30s); if the server misses a heartbeat for 60s, it marks the user offline",
+      "The server pings the user's IP address",
+      "The user's device sends GPS coordinates"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "Heartbeat-based presence: client pings every 30s, server marks offline after 60s without a heartbeat. The presence service is a distributed hash table (Redis Cluster) mapping user_id to connection_server_id."
+  },
+  {
+    question: "What are the four delivery statuses for a group chat message?",
+    options: [
+      "Sent, received, read, deleted",
+      "Queued, sent, delivered, read",
+      "Pending, active, completed, failed",
+      "Draft, published, archived, removed"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "Queued (waiting for offline member), sent (pushed to device), delivered (acknowledged by device), read (member opened and saw the message). Each group member can have a different status for the same message."
+  }
+]} />
 
 ## Self-Check
 

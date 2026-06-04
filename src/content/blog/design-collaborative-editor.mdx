@@ -10,6 +10,7 @@ import OtTransformDemo from '../../components/demos/OtTransformDemo'
 import CrdtDemo from '../../components/demos/CrdtDemo'
 import MultiCursorDemo from '../../components/demos/MultiCursorDemo'
 import CollabArchitectureDemo from '../../components/demos/CollabArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Designing a real-time collaborative editor is one of the most rewarding system design problems you will encounter. It touches on distributed systems, conflict resolution, networking, data structures, and UI engineering -- all within a single system. By the end of this post, you will understand how Google Docs, Notion, and Figma handle dozens of users editing the same document simultaneously, and you will be able to design one yourself.
 
@@ -609,6 +610,107 @@ Client App (React/ProseMirror)
 ```
 
 When you use Google Docs, Notion, or Figma, this entire pipeline fires for every keystroke -- often in under 50ms. The user sees characters appear instantly on their screen and milliseconds later on everyone else's screen. The complexity is invisible.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the core challenge of collaborative editing?",
+    options: [
+      "Rendering rich text in the browser",
+      "Concurrent modification of shared state — multiple users editing the same document simultaneously without data loss",
+      "Storing documents in a database",
+      "Managing user authentication"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The fundamental problem is ensuring that concurrent operations from multiple users are mathematically guaranteed to converge to the same state, regardless of the order in which they arrive."
+  },
+  {
+    question: "How does Operational Transformation (OT) resolve conflicts?",
+    options: [
+      "It locks the document during edits",
+      "When two operations conflict, the server transforms one operation against the other so both can be applied without data loss",
+      "It uses last-writer-wins to discard one operation",
+      "It sends all operations to every client and lets the client decide"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "OT transforms concurrent operations against each other using TP1 (transformation property 1): applying opA then opB' produces the same result as opB then opA'. This ensures convergence."
+  },
+  {
+    question: "What makes CRDTs fundamentally different from OT?",
+    options: [
+      "CRDTs are faster than OT",
+      "CRDTs design the data structure itself to be mergeable — convergence is guaranteed by mathematical properties (commutativity, idempotency), not by transforming operations",
+      "CRDTs require a central server while OT does not",
+      "CRDTs only work for text, not for graphs or maps"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "CRDTs are designed so that merging is commutative and idempotent. Two replicas that accept operations in different orders still converge to the same state, with no central server required."
+  },
+  {
+    question: "Why does cursor synchronization not need OT or CRDT?",
+    options: [
+      "Cursors are persisted to disk",
+      "Cursor positions are ephemeral and approximate — if a cursor update is lost, the next update corrects it, so no conflict resolution is needed",
+      "Cursors only work in single-user mode",
+      "Cursor sync uses a different protocol entirely"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Cursors are ephemeral — they show approximate positions and are throttled to ~30fps. A lost update is self-correcting on the next cursor position message. No reliability or transformation is needed."
+  },
+  {
+    question: "What is the snapshot + delta strategy and why is it used?",
+    options: [
+      "It stores every operation twice for redundancy",
+      "Every N operations a full snapshot is created; to restore state, load the nearest snapshot and replay operations since it — giving O(1) connect time in the common case",
+      "It compresses operations using lossy compression",
+      "It stores snapshots on a separate database"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Replaying the full log from the beginning becomes impractical as it grows. Snapshots capture full state periodically; only deltas since the last snapshot need to be replayed, giving fast initial load."
+  },
+  {
+    question: "How does undo work in a collaborative editor?",
+    options: [
+      "The server undoes the last operation globally",
+      "Each user has a separate undo stack; the server finds the user's most recent operation, generates an inverse, and transforms it against all subsequent operations",
+      "Undo is not possible in collaborative editors",
+      "The client sends an undo request and the server deletes the operation from the log"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Undo must only undo the user's own changes. The server generates an inverse operation and transforms it against all operations that happened after the original, so the undo is correctly positioned in the current document state."
+  },
+  {
+    question: "Why is offline editing harder with OT than with CRDTs?",
+    options: [
+      "OT does not work at all offline",
+      "OT requires transforming offline operations against all operations that happened while offline, which can be thousands or millions; CRDTs simply merge commutatively without transformation",
+      "CRDTs store more data offline",
+      "OT requires a network connection to generate operations"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "OT offline operations must be transformed against every operation that occurred during disconnection. CRDTs append edits locally and merge commutatively when reconnected — no transform needed."
+  },
+  {
+    question: "What is fractional indexing in CRDTs and why is it important?",
+    options: [
+      "It assigns integer positions to characters",
+      "It assigns position values between existing characters (e.g., midpoint) so new characters can always be inserted between neighbors, enabling O(1) insert at any position",
+      "It uses binary search to find insertion points",
+      "It compresses character positions for network efficiency"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "Fractional indexing assigns positions as midpoints between neighbors (1.0 and 2.0 → 1.5). String-based fractional indexing provides unlimited insertions. This allows each character to have a unique position for deterministic ordering."
+  }
+]} />
 
 ### Self-Check Questions
 

@@ -9,6 +9,7 @@ import MonorepoDepGraphDemo from '../../components/demos/MonorepoDepGraphDemo'
 import MonorepoCacheDemo from '../../components/demos/MonorepoCacheDemo'
 import MonorepoTaskDemo from '../../components/demos/MonorepoTaskDemo'
 import MonorepoCompareDemo from '../../components/demos/MonorepoCompareDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Introduction
 
@@ -233,3 +234,64 @@ Monorepos solve real problems that polyrepos create: shared code friction, cross
 The key insight is that these tools are complementary, not mutually exclusive. pnpm workspaces define the package graph. Turborepo or Nx schedule and cache the execution of tasks against that graph. You can start simple and layer complexity as your monorepo grows.
 
 Choose the tool that matches your current pain point. If builds are slow, add caching. If CI is spending too long on unaffected code, add affected detection. If your team is growing, add generators and project conventions. The monorepo ecosystem is mature enough that there is a tool for every stage of growth.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What does the `workspace:*` protocol in pnpm do?",
+    options: ["Installs the package from the npm registry", "Resolves the package from the local workspace instead of a registry", "Forces a specific version across all packages", "Enables strict dependency isolation"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The workspace:* protocol tells pnpm (or Yarn) to resolve the dependency from the local monorepo workspace rather than fetching it from the npm registry."
+  },
+  {
+    question: "In a dependency graph, what does topological sort determine?",
+    options: ["Which packages have the most dependencies", "The order in which packages must be built", "Which packages share the most code", "The optimal parallelism strategy"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Topological sort orders packages so that every dependency is built before the packages that depend on it. If app depends on ui which depends on utils, the build order is utils, ui, app."
+  },
+  {
+    question: "What is content-addressable caching?",
+    options: ["Caching based on the file path and name", "Caching based on a hash of all task inputs", "Caching based on the git commit hash", "Caching based on the package version"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Content-addressable caching hashes all inputs to a task (source files, dependencies' outputs, environment variables) into a single cache key. If the same key exists, the output is restored without re-execution."
+  },
+  {
+    question: "What does the `^build` dependency in turbo.json mean?",
+    options: ["Build only the current package", "Build the current package and all its dependencies first", "Build all packages in the monorepo", "Skip the build step entirely"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The ^ prefix (caret) means 'build of dependencies.' ^build tells Turborepo that the build task depends on the build task of all upstream packages that this package depends on."
+  },
+  {
+    question: "Which tool uses git diff to determine which projects are affected by a PR?",
+    options: ["Turborepo", "pnpm workspaces", "Nx", "Bazel"],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Nx provides the `nx affected` command that uses git diff to compare the current branch against main, determining which projects changed and which depend on those changes."
+  },
+  {
+    question: "What is the key advantage of remote caching in CI?",
+    options: ["It makes local builds faster", "Artifacts from one CI run can be reused by other branches and PRs", "It eliminates the need for build configuration", "It replaces the need for a dependency graph"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Remote caching stores build artifacts in a shared location. A PR branch that changes only one package can download cached artifacts for all other packages instead of rebuilding them from scratch."
+  },
+  {
+    question: "When should you choose Bazel over Turborepo or Nx?",
+    options: ["For small monorepos under 10 packages", "When you need caching with minimal configuration", "For massive repositories requiring hermetic, reproducible builds across multiple languages", "When you want the easiest migration from polyrepo"],
+    correctIndex: 2,
+    points: 15,
+    explanation: "Bazel is designed for enormous repositories (like Google's codebase) that need hermetic builds (pinned toolchains, sandboxed execution), strict reproducibility, and support for multiple languages. The overhead is only justified at massive scale."
+  },
+  {
+    question: "What is the recommended first step when migrating from polyrepo to monorepo?",
+    options: ["Install Turborepo and configure caching", "Set up the workspace by creating a root package.json with workspaces configuration", "Move all repositories into one on day one", "Set up distributed task execution"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Step 1 is to create a root package.json with workspaces and move shared packages into packages/ and apps into apps/. You keep each package's existing configuration and verify pnpm install resolves everything correctly before adding build orchestration."
+  }
+]} />

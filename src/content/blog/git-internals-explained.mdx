@@ -17,6 +17,7 @@ import RebaseDemo from '../../components/demos/RebaseDemo'
 import ReflogDemo from '../../components/demos/ReflogDemo'
 import CherryPickDemo from '../../components/demos/CherryPickDemo'
 import ResetTypesDemo from '../../components/demos/ResetTypesDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is Git?
 
@@ -676,3 +677,57 @@ The graph walker in `git log` uses a **priority queue** — it always shows the 
 2. Can a commit exist without a tree? **No** — every commit must have exactly one root tree (the `tree` field in the commit object).
 3. What happens to the old commit objects after a rebase? **They become dangling** — unreachable from any ref. They persist in `.git/objects/` for 90 days (reflog) before `git gc` reclaims them.
 4. Can two different commits have the same root tree? **Yes** — if the second commit introduces no file changes (e.g., `git commit --allow-empty` with no changes, or two commits with identical file trees but different metadata/timestamps). The tree hash only depends on directory contents, not on commit metadata.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is content-addressable storage and why is it foundational to Git?",
+    options: ["Files are stored by their filename", "Every object is identified by a SHA-1 hash of its contents — the same content always produces the same hash, enabling deduplication and integrity verification", "Git stores files in directories named by date", "Content is stored on a remote server identified by URL"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Git computes a SHA-1 hash from each object's type, size, and content. The hash serves as both identifier and lookup key. Identical content produces the same hash (automatic deduplication), and any tampering changes the hash (integrity verification)."
+  },
+  {
+    question: "A blob stores file contents but not filenames. How does Git know which file a blob belongs to?",
+    options: ["The blob contains the filename in its header", "Tree objects map filenames to blob hashes — a tree is a directory listing that associates names with content hashes", "The commit object stores the filename", "The index file tracks blob-to-filename mappings"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Trees are Git's directory abstraction. Each tree entry contains a mode, a filename, and the hash of a blob (file) or another tree (subdirectory). The root tree of a commit maps the entire project's file structure to blob hashes."
+  },
+  {
+    question: "What is the three-way merge base and why does Git need it?",
+    options: ["The base is the latest commit on main", "It is the most recent common ancestor of both branches — Git diffs base-to-ours and base-to-theirs to determine what changed on each side", "The base is the staging area snapshot", "It is the first commit in the repository"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The merge base (common ancestor) is the reference point. Git computes two diffs: what 'ours' changed since the base, and what 'theirs' changed. If both sides changed the same region differently, it is a conflict. Without the base, Git could not distinguish 'changed by us' from 'changed by them.'"
+  },
+  {
+    question: "Why is rebasing dangerous on shared branches?",
+    options: ["Rebasing is slow", "Rebasing rewrites commit hashes — anyone who pulled the old commits will have a divergent history to reconcile", "Rebasing deletes the branch", "Rebasing cannot resolve conflicts"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Rebase creates new commits with different hashes (D becomes D'). Anyone who pulled the original D will have a different version. When they push, Git sees divergent histories that must be reconciled, potentially causing duplicate commits and confusion."
+  },
+  {
+    question: "What does git reset --soft HEAD~1 do versus git reset --hard HEAD~1?",
+    options: ["soft discards files; hard preserves them", "soft moves HEAD only — changes stay staged; hard moves HEAD, index, AND working tree — changes are discarded", "soft is for commits; hard is for branches", "They are identical in behavior"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "--soft only moves HEAD, leaving the index and working tree untouched (changes remain staged). --hard moves HEAD and resets both index and working tree to the target commit, discarding all uncommitted changes. --mixed (default) moves HEAD and resets the index but preserves the working tree."
+  },
+  {
+    question: "How can you recover a commit after running git reset --hard HEAD~2?",
+    options: ["It is impossible — hard reset is permanent", "Use git reflog to find the commit hash, then create a branch or merge at that reflog entry", "Use git revert to undo the reset", "Delete the repository and clone again"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Git reflog records every HEAD movement. The lost commits still exist in .git/objects/ — they are just unreachable from any branch. The reflog preserves them for 90 days, and you can recover them by creating a branch at the reflog entry (e.g., git branch recovered HEAD@{1})."
+  },
+  {
+    question: "What is the purpose of the staging area (index) in Git?",
+    options: ["It stores backup copies of files", "It lets you build commits incrementally — stage specific changes from multiple files and commit only those", "It tracks which files are checked out", "It stores merge conflict resolutions permanently"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The staging area is a binary file tracking what will go into the next commit. It lets you edit five files, stage two of them, and commit only those two. The third file stays modified but unstaged. git status is derived from comparing HEAD vs index (staged) and index vs working tree (unstaged)."
+  }
+]} />

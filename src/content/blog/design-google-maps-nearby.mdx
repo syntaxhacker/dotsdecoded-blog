@@ -11,6 +11,7 @@ import QuadTreeDemo from '../../components/demos/QuadTreeDemo'
 import RoutingDemo from '../../components/demos/RoutingDemo'
 import ReverseGeocodingDemo from '../../components/demos/ReverseGeocodingDemo'
 import MapsArchitectureDemo from '../../components/demos/MapsArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Are We Building?
 
@@ -777,6 +778,53 @@ Bringing it all together, here is how a single navigation request flows through 
 | Street View | GCS (panoramas) | CDN | Immutable blobs, low access frequency per item |
 
 <MapsArchitectureDemo client:visible />
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why does Web Mercator project the entire world into a square tile?",
+    options: ["It preserves area measurements perfectly", "It simplifies tile coordinate math — each zoom level splits tiles into a 2x2 grid", "It is the most accurate projection for navigation", "It was chosen because it uses less memory"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Web Mercator treats the world as a square so that at each zoom level, every tile splits into a 2x2 grid of children. This creates a simple quadtree-like structure where tiles are addressed by (z, x, y) coordinates."
+  },
+  {
+    question: "What is a key property of geohashes that makes them useful for proximity search?",
+    options: ["Geohashes are encrypted for security", "Locations sharing a longer common prefix are physically closer together", "Geohashes always return exact distances", "Geohashes work only for points on the equator"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Two locations sharing a longer common prefix are physically closer. This enables prefix-based proximity search — a simple B-tree prefix scan finds nearby points without complex spatial queries."
+  },
+  {
+    question: "How does a quadtree handle dense regions like Manhattan?",
+    options: ["It stops subdividing at a fixed depth", "It recursively subdivides until reaching a minimum cell size or capacity threshold", "It creates a separate data structure for dense regions", "It stores all points in the root node"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A quadtree recursively subdivides regions when they exceed their capacity. In dense areas like Manhattan, the tree becomes deep. Google uses a loose quadtree with a minimum cell size to prevent infinite subdivision."
+  },
+  {
+    question: "What is the heuristic function in A* search for routing?",
+    options: ["The straight-line distance from start to current node", "The estimated cost from the current node to the goal (haversine distance / max speed)", "The total cost of the path so far", "The number of hops to the destination"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "A* uses f(n) = g(n) + h(n) where h(n) is the estimated cost from node n to the goal. For routing, this is haversine distance / max speed, giving a lower bound on remaining travel time."
+  },
+  {
+    question: "Why do nearby searches query 8 neighboring geohash cells in addition to the center cell?",
+    options: ["To increase result count artificially", "To handle points near cell boundaries that may be physically close but in different cells", "Because geohashes are always 8 characters long", "To account for elevation differences"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Points near geohash cell boundaries can be physically adjacent but in different cells. Querying the center cell plus its 8 neighbors ensures no nearby points are missed due to boundary artifacts."
+  },
+  {
+    question: "How does map matching snap noisy GPS points to the road graph?",
+    options: ["By finding the nearest intersection", "Using a Hidden Markov Model with emission and transition probabilities", "By drawing a straight line to the nearest road", "By averaging multiple GPS readings"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Map matching uses a Hidden Markov Model: emission probabilities measure how likely a GPS reading is given a road segment, and transition probabilities measure how likely it is to move between segments. Viterbi finds the most likely path."
+  }
+]} />
 
 ## Self-Check Questions
 

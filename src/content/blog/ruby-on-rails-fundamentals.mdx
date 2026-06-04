@@ -11,6 +11,7 @@ import ConventionConfigDemo from '../../components/demos/ConventionConfigDemo'
 import RouteMapperDemo from '../../components/demos/RouteMapperDemo'
 import LayoutYieldDemo from '../../components/demos/LayoutYieldDemo'
 import CrudDemo from '../../components/demos/CrudDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is Ruby on Rails?
 
@@ -391,6 +392,97 @@ end
 Try each CRUD operation in the interactive demo below. Watch the controller action and SQL that Rails generates for each:
 
 <CrudDemo client:visible />
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "In the MVC pattern, which component is responsible for coordinating between the Model and the View?",
+    options: ["The Model", "The View", "The Controller", "The Router"],
+    correctIndex: 2,
+    points: 10,
+    explanation: "The Controller orchestrates the flow: it receives the request, asks the Model for data, and passes that data to the View. The Model handles data and business logic, and the View handles presentation."
+  },
+  {
+    question: "What does `resources :articles` generate in config/routes.rb?",
+    options: [
+      "Only the index and show routes",
+      "Seven RESTful routes: index, new, create, show, edit, update, and destroy",
+      "A single catch-all route for /articles",
+      "Only POST and GET routes"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "`resources :articles` generates all seven standard RESTful routes mapping HTTP verbs and URL patterns to controller actions (index, new, create, show, edit, update, destroy)."
+  },
+  {
+    question: "What is the purpose of 'convention over configuration' in Rails?",
+    options: [
+      "It requires more configuration files than other frameworks",
+      "It establishes sensible defaults so you write less configuration — model name maps to table name, controller maps to views folder, etc.",
+      "It eliminates the need for a database",
+      "It forces every developer to use the same text editor"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Convention over configuration means Rails establishes agreed-upon defaults (singular CamelCase for models, plural snake_case for tables, etc.) so you don't have to configure things that follow the standard pattern."
+  },
+  {
+    question: "What does the `yield` keyword do in a Rails layout?",
+    options: [
+      "It stops the current request",
+      "It inserts page-specific template content at that point in the layout",
+      "It renders a partial view",
+      "It defines a new route"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "When Rails renders a page, it encounters `yield` and inserts the page-specific template content at that point. Named yields like `yield :sidebar` receive content provided by the page via `content_for`."
+  },
+  {
+    question: "Which SQL verb maps to the 'Delete' CRUD operation?",
+    options: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+    correctIndex: 3,
+    points: 10,
+    explanation: "CRUD's Delete maps to SQL DELETE and the HTTP DELETE verb. The controller's `destroy` action finds the record, calls `.destroy`, and redirects."
+  },
+  {
+    question: "What is a gem in the Rails ecosystem?",
+    options: [
+      "A database migration tool",
+      "A self-contained Ruby library packaged for distribution — like an app store for your Rails application",
+      "A built-in Rails testing framework",
+      "A CSS preprocessor"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A gem is a self-contained Ruby library packaged for distribution. The Ruby community maintains over 180,000 gems on RubyGems.org for features like authentication, background jobs, and payment processing."
+  },
+  {
+    question: "What does `bundle install` do after you add a gem to your Gemfile?",
+    options: [
+      "It only updates the Gemfile.lock",
+      "It reads the Gemfile, resolves all gem versions and dependencies, installs them, and generates a Gemfile.lock with exact versions",
+      "It compiles Ruby code into machine code",
+      "It restarts the Rails server"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Bundler reads the Gemfile, resolves all gem versions including their dependencies, installs everything, and generates a Gemfile.lock that records exact versions to ensure consistency across environments."
+  },
+  {
+    question: "Why does Rails use strong parameters in controller actions?",
+    options: [
+      "To make database queries faster",
+      "To whitelist which form fields are allowed — a security feature preventing malicious data submission",
+      "To automatically generate API documentation",
+      "To validate email formats"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Strong parameters whitelist which form fields a controller action is allowed to accept. This prevents mass-assignment vulnerabilities where an attacker could submit extra fields to modify data they shouldn't access."
+  }
+]} />
 
 ## Self-Check
 

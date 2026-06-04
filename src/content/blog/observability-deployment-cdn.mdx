@@ -11,6 +11,7 @@ import CiCdPipelineDemo from '../../components/demos/CiCdPipelineDemo'
 import DeployStrategyDemo from '../../components/demos/DeployStrategyDemo'
 import CdnRoutingDemo from '../../components/demos/CdnRoutingDemo'
 import EdgeVsOriginDemo from '../../components/demos/EdgeVsOriginDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is Observability?
 
@@ -305,9 +306,66 @@ Not everything belongs at the edge. Understanding what to cache and what to forw
 
 **Real work example:** Your homepage loads 3 static assets (cached at edge, 10ms each), 2 semi-dynamic components (product recommendations and localized pricing via edge functions, 25ms each), and 1 dynamic component (user's shopping cart, 200ms from origin). Total: 10+10+10+25+25+200 = 280ms. Without CDN/edge: 200+200+200+200+200+200 = 1200ms. The edge cuts your load time by 77%.
 
-## Self-Check
+## Test Your Knowledge
 
-- Can you explain the difference between monitoring and observability?
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the three pillars of observability and what does each answer?",
+    options: ["CPU, Memory, Disk — resource usage", "Logs, Metrics, Traces — what happened, how much, and where time went", "Alerts, Dashboards, Reports — notification and visualization", "Build, Test, Deploy — pipeline stages"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Logs tell you what happened in detail, Metrics tell you how much or how fast, and Traces tell you where a request went across services. You need all three — logs alone lack frequency, metrics lack context, traces lack full scope."
+  },
+  {
+    question: "Why is structured logging preferred over unstructured logging?",
+    options: ["Structured logs take less disk space", "Structured logs are machine-readable and queryable by any field", "Structured logs are written faster", "Structured logs are easier to write"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Structured logs (JSON format) can be queried by any field — filter by user_id, IP, status code, or timestamp. Unstructured logs require grepping through free-form text, which is slow and error-prone at scale."
+  },
+  {
+    question: "What does a correlation ID do?",
+    options: ["It encrypts log data for security", "It ties together log lines from different services for a single request", "It measures request latency", "It identifies the server that processed the request"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A correlation ID is generated when a request enters the system and attached to every log line across all services it touches. Filtering by this ID shows the entire journey of one request, making it possible to trace issues across microservices."
+  },
+  {
+    question: "What is the difference between the RED method and the USE method?",
+    options: ["RED monitors resources, USE monitors requests", "RED monitors requests (Rate, Errors, Duration), USE monitors resources (Utilization, Saturation, Errors)", "They are the same thing with different names", "RED is for databases, USE is for APIs"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "RED (Rate, Errors, Duration) monitors request-based metrics — how many requests, what error rate, and how fast. USE (Utilization, Saturation, Errors) monitors resource-based metrics — how much of a resource is used, how much work is queued, and hardware errors."
+  },
+  {
+    question: "In distributed tracing, what is a span?",
+    options: ["The total time of a request across all services", "A single unit of work within one service, with a timestamp and duration", "The network latency between two services", "A log entry in the tracing system"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A span represents one unit of work within a single service (e.g., a database query, an API call). Spans have parent-child relationships, forming a trace that shows the full journey of a request and exactly where time was spent."
+  },
+  {
+    question: "What is the key difference between a Docker image and a container?",
+    options: ["They are the same thing", "An image is a read-only blueprint; a container is a running instance of an image", "An image runs on the server; a container runs locally", "An image contains code; a container contains configuration"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "An image is the read-only blueprint (like a class in OOP). A container is a running instance of that image (like an object). You can run 100 containers from the same image, each with its own state."
+  },
+  {
+    question: "What does Kubernetes add that Docker alone cannot provide?",
+    options: ["Container packaging", "Orchestration — scheduling, self-healing, rolling updates, and auto-scaling across multiple servers", "Network isolation", "Image versioning"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Docker runs containers on a single server. Kubernetes orchestrates containers across a cluster: it schedules pods, restarts crashed containers, rolls out updates without downtime, scales based on CPU/memory, and reschedules pods when nodes fail."
+  },
+  {
+    question: "Why is a canary deployment safer than a rolling deployment?",
+    options: ["Canary deploys faster", "Canary releases to a small percentage of users first, allowing monitoring before full rollout", "Canary uses fewer resources", "Canary does not require a load balancer"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Canary deployments send only a small percentage of traffic (e.g., 5%) to the new version first. If error rates or latency spike, the rollout is stopped before most users are affected. Rolling deployments replace instances one by one, exposing all users eventually."
+  }
+]} />
 - What are the three pillars of observability, and what question does each answer?
 - Why is structured logging better than unstructured logging?
 - What is a correlation ID and how does it help debug issues?

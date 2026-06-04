@@ -19,6 +19,7 @@ import DockerComposeDemo from '../../components/demos/DockerComposeDemo'
 import RegistryPullDemo from '../../components/demos/RegistryPullDemo'
 import SecurityCapsDemo from '../../components/demos/SecurityCapsDemo'
 import ImageOptimizeDemo from '../../components/demos/ImageOptimizeDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine you are moving into a new city. You could buy a house — foundation, walls, roof, plumbing, electrical — all built from scratch for you. That takes time and money, and the house is completely separate from every other house. Each house has its own foundation dug into the earth, its own separate pipes connected to the main water line, its own electrical panel.
 
@@ -630,6 +631,67 @@ RUN apt-get update && apt-get install -y curl \
 <ImageOptimizeDemo client:visible />
 
 The demo compares image sizes across different base images and optimization strategies. Toggle options to see the effect on final image size.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the fundamental difference between a container and a virtual machine?",
+    options: ["Containers are slower to start than VMs", "Containers share the host OS kernel while VMs run a full guest OS with their own kernel", "VMs use less memory than containers", "Containers cannot run Linux processes"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A VM virtualizes everything from the CPU up, running a complete guest OS with its own kernel. A container runs directly on the host kernel using Linux namespaces and cgroups for isolation, making it lightweight but unable to run a different OS."
+  },
+  {
+    question: "Why should you COPY package.json before running npm install in a Dockerfile?",
+    options: ["It is a Docker requirement", "npm install cannot run without package.json in the directory", "It maximizes layer caching — dependencies only reinstall when package.json changes", "It reduces the final image size"],
+    correctIndex: 2,
+    points: 12,
+    explanation: "Docker caches each layer. If package.json has not changed, the cached npm install layer is reused. If you COPY everything first, any source code change invalidates the npm install layer, forcing a full reinstall on every build."
+  },
+  {
+    question: "What is the difference between namespaces and cgroups in container isolation?",
+    options: ["Namespaces control resource usage; cgroups control visibility", "Namespaces control what a container can see; cgroups control how much it can use", "They are the same thing with different names", "Namespaces are for networking; cgroups are for filesystem"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Namespaces partition kernel resources so a container sees only its own processes, network, and mounts. Cgroups limit and account for resource usage — CPU, memory, I/O bandwidth — preventing one container from starving others."
+  },
+  {
+    question: "What happens to data written to a container's writable layer when the container is removed?",
+    options: ["It persists until manually deleted", "It is moved to a backup volume automatically", "It is permanently lost", "It is compressed and stored in the image"],
+    correctIndex: 2,
+    points: 10,
+    explanation: "The writable layer is ephemeral — it exists only for the lifetime of the container. When the container is removed, the layer is discarded. Volumes must be used for any data that needs to persist beyond the container's lifetime."
+  },
+  {
+    question: "In a multi-stage Dockerfile, what is the benefit of copying artifacts from a builder stage into a minimal runtime stage?",
+    options: ["It makes the build faster", "It excludes build-time dependencies from the production image, reducing size and attack surface", "It enables Docker Compose integration", "It allows running multiple containers from one Dockerfile"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Multi-stage builds let you use a full toolchain (compilers, package managers) in the builder stage and copy only the compiled output into a minimal runtime image (e.g., Alpine or distroless). The final image contains no source code, compilers, or dev dependencies."
+  },
+  {
+    question: "How do veth pairs connect a container to the Docker bridge network?",
+    options: ["They create a physical network cable between containers", "One end appears as eth0 inside the container; the other end connects to the docker0 bridge on the host", "They replace the host's network interface", "They are virtual NICs that bypass the bridge entirely"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A veth pair is a virtual Ethernet cable with two endpoints. One end is placed inside the container as eth0, the other end is attached to the docker0 bridge. Traffic from the container flows through the veth pair to the bridge, which routes it to other containers or the outside world via NAT."
+  },
+  {
+    question: "Why is running a container as root a security risk?",
+    options: ["Root containers use more memory", "A root process inside the container can exploit kernel vulnerabilities to escape to the host", "Root containers cannot use Docker volumes", "Root containers cannot be stopped gracefully"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Containers share the host kernel. A process running as root inside a container with full capabilities can exploit kernel vulnerabilities to break out of the namespace and gain root access on the host. Using a non-root user and dropping capabilities reduces this risk."
+  },
+  {
+    question: "When you pull an ARM64 image on an ARM Mac, how does Docker know which layers to download?",
+    options: ["It downloads all architectures and discards the unused ones", "It reads the manifest list and selects the manifest matching the host's architecture", "It recompiles the image for ARM64 during pull", "It uses the :latest tag to determine architecture"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Multi-architecture images use a manifest list (or OCI index) that maps platform tags (amd64, arm64) to per-platform manifests. Docker detects the host architecture and downloads only the layers for the matching platform."
+  }
+]} />
 
 ## Self-Check
 

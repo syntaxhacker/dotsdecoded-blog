@@ -11,6 +11,7 @@ import PythonAsyncioDemo from '../../components/demos/PythonAsyncioDemo'
 import PythonMemoryDemo from '../../components/demos/PythonMemoryDemo'
 import PythonDescriptorDemo from '../../components/demos/PythonDescriptorDemo'
 import PythonArchitectureDemo from '../../components/demos/PythonArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Python is the second-oldest major language still in widespread use (after C), yet most developers have never looked under the hood. We type `python my_script.py` and assume magic happens. It does not. What happens is a carefully orchestrated sequence of parsing, compiling, interpreting, memory allocating, and locking — all inside a C program called CPython.
 
@@ -457,3 +458,64 @@ Async/await side-steps the GIL entirely by providing cooperative multitasking wi
 The next few years will be transformative for Python. NoGIL will unlock true multi-core parallelism for threaded Python code. Subinterpreters offer an alternative communication-through-isolation model. PyPy continues to push the boundary of pure-Python performance.
 
 Understanding these internals makes you a better Python developer. You will know when `threading` helps and when it hurts. You will understand why `async def` exists and when to use it. You will be able to write safer, faster, more memory-efficient code — and debug it when things go wrong.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the GIL and why does CPython have it?",
+    options: ["A garbage collection algorithm for cycle detection", "A mutex that prevents multiple threads from executing Python bytecode simultaneously, protecting reference counts from corruption", "A JIT compiler for optimizing hot loops", "A memory allocator for small objects"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The GIL (Global Interpreter Lock) is a single mutex that ensures only one thread executes Python bytecode at a time. It exists because CPython uses reference counting — multiple threads modifying an object's refcount simultaneously would corrupt memory. The simplest fix is a global lock."
+  },
+  {
+    question: "CPython compiles .py files to bytecode. What is the .pyc file?",
+    options: ["Compiled machine code for the CPU", "Cached bytecode that skips the parse+compile step on subsequent runs if the source hasn't changed", "An encrypted version of the source file", "A compressed archive of all imports"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The .pyc file in __pycache__/ is cached bytecode. If the source file hasn't changed, CPython skips parsing and compiling entirely and loads the bytecode directly. This speeds up startup for modules that are imported frequently."
+  },
+  {
+    question: "How does reference counting handle memory deallocation?",
+    options: ["A background thread periodically scans all objects", "Each object tracks how many references point to it; when the count hits zero, the object is freed immediately", "Objects are freed when the function that created them returns", "The OS reclaims memory when the process exits"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Every Python object has an ob_refcount field. Assignments and container insertions increment it; del and rebinding decrement it. When refcount hits zero, CPython immediately frees the memory. This is deterministic — no waiting for a garbage collector to run."
+  },
+  {
+    question: "Why does reference counting need a separate garbage collector?",
+    options: ["Reference counting is too slow for large objects", "Reference counting cannot detect reference cycles (A points to B, B points to A, nothing else references either)", "The GC handles memory allocation, not deallocation", "The GC is only used for C extension objects"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "If object A references B and B references A, both have refcount 1 and will never reach zero — even though nothing external references either. The generational GC periodically detects and frees these cycles. It only runs when allocation thresholds are exceeded."
+  },
+  {
+    question: "What happens when you await an asyncio.sleep(1) in a coroutine?",
+    options: ["The thread is blocked for 1 second", "The task suspends, the event loop runs other ready tasks, and the suspended task resumes after 1 second", "A new thread is spawned to handle the sleep", "The GIL is released for 1 second"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "await asyncio.sleep(1) yields control back to the event loop. The event loop checks its ready queue and scheduled callbacks, running any tasks whose I/O or timers have completed. After 1 second, the sleeping task is re-added to the ready queue. No thread is blocked — this is cooperative multitasking."
+  },
+  {
+    question: "How does the descriptor protocol power @property?",
+    options: ["@property uses metaclasses to intercept attribute access", "@property is a descriptor class whose __get__ calls the getter function you provided", "@property modifies the bytecode at import time", "@property is handled by the C compiler, not the interpreter"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "property is a class that implements __get__, __set__, and __delete__. When you access an attribute that is a descriptor, Python invokes these methods instead of normal attribute access. property.__get__ calls your getter function. @staticmethod and @classmethod work the same way."
+  },
+  {
+    question: "Why can C extensions like NumPy achieve parallelism despite the GIL?",
+    options: ["NumPy uses subprocesses instead of threads", "NumPy explicitly releases the GIL using Py_BEGIN_ALLOW_THREADS before entering long-running C computations", "NumPy has its own GIL that is more efficient", "The GIL does not apply to C code"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "C extensions can release the GIL explicitly using Py_BEGIN_ALLOW_THREADS / Py_END_ALLOW_THREADS. NumPy does this before entering BLAS routines, allowing true multi-core parallelism for matrix operations. The GIL only protects Python bytecode execution."
+  },
+  {
+    question: "What is the key difference between CPython and PyPy?",
+    options: ["PyPy does not support the GIL", "CPython interprets bytecode in C; PyPy uses a tracing JIT that compiles hot loops to machine code at runtime", "PyPy is written in C while CPython is written in Python", "CPython has a garbage collector but PyPy uses reference counting"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "CPython interprets bytecode via a C switch statement (CEval loop). PyPy traces which code paths execute most frequently and compiles those hot loops to native machine code at runtime (JIT compilation). This makes PyPy 4-7x faster on pure Python, though C extensions see less benefit."
+  }
+]} />

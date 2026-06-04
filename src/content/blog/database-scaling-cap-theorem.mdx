@@ -11,6 +11,7 @@ import CapTriangleDemo from '../../components/demos/CapTriangleDemo'
 import ConsistencySpectrumDemo from '../../components/demos/ConsistencySpectrumDemo'
 import QuorumDemo from '../../components/demos/QuorumDemo'
 import ReadReplicaDemo from '../../components/demos/ReadReplicaDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Your app is growing. Users are signing up faster than expected. Queries that took 5 milliseconds last month now take 500. Your single database server is sweating. You upgrade the CPU, add more RAM, slap in a faster SSD — and it helps, for a while. But hardware has a ceiling, and your traffic does not. At some point, you cannot buy a bigger box. You need more boxes. That is where database scaling begins. It is not just "add another server." It is a series of deliberate trade-offs about what you are willing to sacrifice — consistency, simplicity, or money — to keep your system fast and available. By the end of this, you will know exactly which trade-offs to make and when.
 
@@ -234,6 +235,107 @@ You now know the full toolkit: replication for read scaling, sharding for write 
 **Uber** geo-shards by city or region. Ride data for New York lives in one cluster, San Francisco in another. Drivers and riders querying in the same city hit the same cluster. Cross-city queries (like viewing a driver's lifetime history across cities) require querying multiple clusters.
 
 <ReadReplicaDemo client:visible />
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the fundamental difference between replication and sharding?",
+    options: [
+      "Replication copies data across machines for read scaling; sharding splits data across machines for write scaling",
+      "Replication is for SQL databases; sharding is for NoSQL",
+      "Replication increases storage; sharding increases RAM",
+      "They are the same thing with different names"
+    ],
+    correctIndex: 0,
+    points: 10,
+    explanation: "Replication stores the same data on multiple machines (copying writes to all nodes), so it helps with reads but not writes. Sharding splits different data onto different machines, distributing writes across nodes."
+  },
+  {
+    question: "Why is asynchronous replication faster but riskier than synchronous replication?",
+    options: [
+      "Async replication uses compression",
+      "Async replication does not wait for slaves to confirm, so the master responds immediately — but slaves may have stale data",
+      "Async replication skips the write entirely",
+      "Synchronous replication uses UDP instead of TCP"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "In async replication, the master tells the application 'write successful' immediately without waiting for slaves. This is fast, but a slave may not have the latest data yet — leading to stale reads during replication lag."
+  },
+  {
+    question: "Which sharding strategy creates hotspots when certain key ranges are more popular?",
+    options: [
+      "Hash-based sharding",
+      "Range-based sharding",
+      "Directory-based sharding",
+      "Random sharding"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Range-based sharding assigns key ranges to shards. If 80% of users have names starting with S, the shard holding that range gets crushed. Hash-based sharding distributes evenly but makes range queries expensive."
+  },
+  {
+    question: "According to the CAP theorem, why is partition tolerance (P) non-negotiable in distributed systems?",
+    options: [
+      "Because networks are always fast",
+      "Because network partitions are inevitable — cables get cut, switches fail, routers misbehave",
+      "Because it improves performance",
+      "Because you can always avoid partitions with good engineering"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Network partitions are inevitable in distributed systems. Since P is not optional, you must choose between Consistency and Availability during a partition — leading to CP or AP systems."
+  },
+  {
+    question: "What does the quorum rule R + W > N guarantee?",
+    options: [
+      "Zero replication lag",
+      "Every read overlaps with at least one node that has the latest write, ensuring strong consistency",
+      "Every write is synchronous",
+      "The system can survive N node failures"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "If W nodes have the latest write and you read from R nodes where R + W > N, at least one read node must be among the write nodes — guaranteeing you always see the latest data."
+  },
+  {
+    question: "When would you choose denormalization over normalization?",
+    options: [
+      "When you need strong consistency across all reads",
+      "When your workload is read-heavy and you want to avoid expensive JOINs at the cost of write complexity",
+      "When you have unlimited disk space",
+      "When your data changes frequently"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Denormalization copies data into multiple places so reads avoid JOINs. It trades write complexity (updating multiple copies) for read speed — ideal for read-heavy systems like social media feeds."
+  },
+  {
+    question: "If N=5, which values of W and R guarantee consistency via quorum?",
+    options: [
+      "W=1, R=1",
+      "W=3, R=3",
+      "W=1, R=3",
+      "W=2, R=1"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "R + W > N means 3 + 3 = 6 > 5. Any combination where R + W > N guarantees consistency. W=1, R=1 gives 2 ≤ 5 — no consistency guarantee. W=3, R=1 gives 4 ≤ 5 — also no guarantee."
+  },
+  {
+    question: "Why does Twitter use fan-out-on-write for most users but fan-out-on-read for celebrities?",
+    options: [
+      "Celebrities have slower internet connections",
+      "Writing to millions of followers' timelines is too expensive for celebrities, so their tweets are stored once and assembled on read",
+      "Celebrities have different database schemas",
+      "Fan-out-on-read is always more efficient"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "A user with 100 followers gets fan-out-on-write (cheap). A user with 50 million followers would require writing 50 million copies per tweet — far more efficient to store once and assemble the feed on read."
+  }
+]} />
 
 ## Self-Check
 

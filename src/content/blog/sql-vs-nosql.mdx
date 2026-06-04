@@ -15,6 +15,7 @@ import SqlQueryDemo from '../../components/demos/SqlQueryDemo'
 import NoSqlQueryDemo from '../../components/demos/NoSqlQueryDemo'
 import ScalingDemo from '../../components/demos/ScalingDemo'
 import DecisionTreeDemo from '../../components/demos/DecisionTreeDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Every app you have ever used — Instagram, Spotify, your bank, this blog — stores data somewhere. That somewhere is a database. But not all databases work the same way. Some organize data into rigid tables with strict rules. Others stuff everything into flexible containers that can hold anything. The first kind is SQL. The second is NoSQL.
 
@@ -242,6 +243,95 @@ You started with zero database knowledge and now you understand:
 - How to write basic queries in both SQL and NoSQL
 - How scaling works (vertical vs horizontal) and why it matters
 - How to choose the right database for your specific use case
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the difference between 'schema-on-write' and 'schema-on-read'?",
+    options: [
+      "Schema-on-write is faster; schema-on-read is slower",
+      "Schema-on-write (SQL) checks data against the schema before accepting it; schema-on-read (NoSQL) accepts anything and shifts validation to the application",
+      "They are the same thing",
+      "Schema-on-write is used by NoSQL databases"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Schema-on-write means the database rejects any row that doesn't match the schema (SQL). Schema-on-read means the database accepts anything, and your application code must interpret the data correctly when reading (NoSQL)."
+  },
+  {
+    question: "When should you use embedded documents in NoSQL instead of JOINs in SQL?",
+    options: [
+      "When the data is referenced from many places and needs to stay consistent",
+      "When the data is always accessed together, rarely changes after creation, and the parent 'owns' the child data",
+      "When you need ACID transactions across multiple collections",
+      "When the data has complex many-to-many relationships"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Embed when data is always accessed together (blog post + comments), rarely changes (completed order items), and the parent owns the child. Use references when data is shared across many parents or needs centralized updates."
+  },
+  {
+    question: "What does ACID stand for, and which property prevents a bank transfer from partially completing?",
+    options: [
+      "Availability, Consistency, Integrity, Durability — Consistency prevents partial completion",
+      "Atomicity, Consistency, Isolation, Durability — Atomicity ensures the entire transaction succeeds or none of it does",
+      "Asynchronous, Concurrent, Independent, Durable — Isolation prevents partial completion",
+      "Atomicity, Concurrency, Integrity, Durability — Durability prevents partial completion"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "ACID stands for Atomicity, Consistency, Isolation, Durability. Atomicity guarantees that a transaction is all-or-nothing: if any part fails, the entire transaction rolls back. This prevents partial states like a bank transfer deducting money without crediting it."
+  },
+  {
+    question: "Why do SQL databases traditionally struggle with horizontal scaling?",
+    options: [
+      "SQL servers are too small to distribute",
+      "JOINs across multiple servers become slow and complex, and ACID transactions spanning servers require expensive coordination",
+      "SQL does not support networking",
+      "Horizontal scaling only works with document databases"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "SQL's power comes from JOINs and ACID guarantees across all data. When data is spread across servers, JOINs requiring data from multiple servers become slow and complex. ACID transactions spanning servers require expensive coordination protocols."
+  },
+  {
+    question: "For a banking application that requires strict transactional guarantees, which database is the better default choice?",
+    options: [
+      "MongoDB — document databases are always faster",
+      "PostgreSQL — SQL databases provide ACID transactions out of the box, which is non-negotiable for financial data",
+      "Redis — in-memory databases are better for money",
+      "Cassandra — it handles writes better"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Banking requires strong consistency guarantees. PostgreSQL (SQL) provides ACID transactions out of the box. The article explicitly mentions Stripe uses PostgreSQL for transactions because ACID is non-negotiable for payments."
+  },
+  {
+    question: "What is the main tradeoff between SQL and NoSQL databases?",
+    options: [
+      "SQL is newer; NoSQL is older",
+      "SQL gives strong consistency and complex relationships but is harder to scale; NoSQL scales easily but gives weaker consistency guarantees",
+      "SQL uses less memory than NoSQL",
+      "NoSQL supports JOINs; SQL does not"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The core tradeoff: SQL provides strong consistency (ACID) and powerful JOINs but scales vertically (harder). NoSQL scales horizontally (easier) but relaxes consistency (eventual consistency) and lacks JOINs."
+  },
+  {
+    question: "Which of these is a valid reason to choose NoSQL over SQL?",
+    options: [
+      "You need complex JOINs across many tables",
+      "Your data shape changes frequently and you're iterating fast, or you need massive write throughput across multiple servers",
+      "You need ACID transactions for financial data",
+      "Your data fits perfectly into rigid tables"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Choose NoSQL when data shape changes frequently (schema flexibility), when you need massive write throughput that exceeds a single server (horizontal scaling), or when the data maps naturally to a document model."
+  }
+]} />
 
 ### Self-Check
 

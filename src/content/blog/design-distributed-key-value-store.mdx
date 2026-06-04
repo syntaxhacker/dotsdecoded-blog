@@ -11,6 +11,7 @@ import QuorumNodesDemo from '../../components/demos/QuorumNodesDemo'
 import HintedHandoffDemo from '../../components/demos/HintedHandoffDemo'
 import MerkleTreeDemo from '../../components/demos/MerkleTreeDemo'
 import GossipProtocolDemo from '../../components/demos/GossipProtocolDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine you are building the shopping cart service for an e-commerce site that serves 100 million users. Every time a user adds an item to their cart, you need to write that data somewhere. Every time they view their cart, you need to read it back. You need it to be fast -- under 10 milliseconds. You need it to be available -- no downtime during Black Friday. And you need it to survive the inevitable hardware failures that happen when you run thousands of servers.
 
@@ -225,6 +226,60 @@ DynamoDB uses a simpler model: **strongly consistent reads** (R=N, W=N) vs **eve
 | Vector clocks | Yes | Yes (NTP-baesd timestamps) | Yes |
 | Query language | Key-only | CQL (SQL-like) | Key + secondary indexes |
 | Consistency levels | Per-operation | Per-operation | Per-operation |
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the primary advantage of consistent hashing over modulo-N hashing when a node is added or removed?",
+    options: ["It eliminates all data movement", "It only requires moving ~1/N of the keys", "It uses less memory than modulo-N", "It provides stronger consistency guarantees"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When a node is added to a consistent hashing ring, only the keys in the range between the new node and its clockwise neighbor need to move. This is approximately 1/N of all keys, compared to a full reshuffle with modulo-N hashing."
+  },
+  {
+    question: "What problem do virtual nodes solve in a consistent hashing ring?",
+    options: ["They reduce the total number of physical nodes needed", "They ensure even data distribution across heterogeneous nodes", "They eliminate the need for replication", "They prevent network partitions"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Virtual nodes ensure even data distribution by placing each physical node at multiple positions on the ring. This also allows heterogeneous clusters where machines with more capacity get more virtual nodes."
+  },
+  {
+    question: "In a quorum system with N=3 replicas, which R and W values guarantee no stale reads?",
+    options: ["W=1, R=1", "W=2, R=2", "W=3, R=1", "W=1, R=3"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The quorum formula R + W > N must hold. With N=3, W=2 and R=2 gives 2+2=4>3, guaranteeing that every read overlaps with at least one replica that has the latest write."
+  },
+  {
+    question: "What is the purpose of hinted handoff in a Dynamo-style system?",
+    options: ["It encrypts data before replication", "It stores writes locally when a replica is down, then replays them when it recovers", "It hashes keys to determine which node stores them", "It resolves conflicts between concurrent writes"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Hinted handoff keeps writes succeeding during failures. The coordinator stores the write locally with a hint about which node was the intended recipient, then replays it when the node comes back online."
+  },
+  {
+    question: "What is a key limitation of read repair as an anti-entropy mechanism?",
+    options: ["It only works during write operations", "It only fixes data that is actively being read", "It requires a central coordinator", "It cannot detect concurrent writes"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Read repair is passive — it only repairs stale replicas for keys that are actively being read. If a key is written once and never read, stale replicas remain unrepaired."
+  },
+  {
+    question: "How many gossip rounds does it take for information to propagate to all nodes in a 1024-node cluster?",
+    options: ["About 10 rounds", "About 100 rounds", "About 512 rounds", "About 1024 rounds"],
+    correctIndex: 0,
+    points: 10,
+    explanation: "Gossip protocols spread information exponentially. In O(log N) rounds, information reaches all nodes. For N=1024, that is roughly log2(1024) = 10 rounds."
+  },
+  {
+    question: "What happens when two concurrent writes create a conflict detected by vector clocks?",
+    options: ["The later timestamp always wins", "All conflicting versions are returned to the client for resolution", "The write with the higher vector counter is discarded", "The system automatically merges the values"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "When vector clocks indicate concurrent writes (neither dominates the other), the coordinator returns all conflicting versions to the client. The client must resolve the conflict, typically using a last-write-wins strategy or application-specific logic."
+  }
+]} />
 
 ## Self-Check
 

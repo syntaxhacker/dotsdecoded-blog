@@ -11,6 +11,7 @@ import IdempotencyDemo from '../../components/demos/IdempotencyDemo'
 import SagaDemo from '../../components/demos/SagaDemo'
 import ConnectionPoolDemo from '../../components/demos/ConnectionPoolDemo'
 import CqrsDemo from '../../components/demos/CqrsDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Why Systems Fail
 
@@ -286,6 +287,60 @@ Node C (follower) -- waits for work
 When Node A crashes, Nodes B and C detect it (via heartbeat timeout) and hold an election. Node B wins, becomes the new leader, and Node C becomes a follower again. The transition is automatic and usually completes in seconds.
 
 **Real work example:** You have 5 API servers running the same cron job to send daily emails. Without leader election: 5 emails sent per user. With leader election: one server wins the lock and sends emails, the other 4 skip. If the leader crashes mid-job, another server picks up where it left off (using a cursor/checkpoint in the database).
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why are immediate retries worse than exponential backoff when a server is struggling?",
+    options: ["Immediate retries use more memory", "They create a thundering herd — 1,000 clients retrying simultaneously overwhelm the already-struggling server", "Immediate retries cannot detect server errors", "Exponential backoff is always faster"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When a server returns errors due to overload, immediate retries from all clients hit at the same instant, compounding the problem. Exponential backoff spreads retries over increasing intervals, giving the server breathing room to recover."
+  },
+  {
+    question: "What is the difference between a connection timeout and a read timeout?",
+    options: ["Connection timeout is for TCP handshake; read timeout is for waiting for response data", "Connection timeout is always shorter than read timeout", "They are the same thing with different names", "Read timeout applies only to HTTPS"],
+    correctIndex: 0,
+    points: 10,
+    explanation: "Connection timeout limits how long to wait for establishing the TCP connection (handshake + TLS). Read timeout limits how long to wait for the first byte of the response after the connection is established. Both must be set — a request without either can hang forever."
+  },
+  {
+    question: "Why does POST require an idempotency key but PUT does not?",
+    options: ["POST is faster than PUT", "POST is not idempotent by definition — creating an order twice yields two orders — while PUT is idempotent by design", "PUT does not support JSON payloads", "Idempotency keys only work with POST"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "PUT is idempotent — setting a value to 'Alice' 10 times results in the same state. POST creates new resources, so executing it twice creates two resources. An idempotency key lets the server detect the duplicate and return the original result."
+  },
+  {
+    question: "What is the main advantage of the Saga pattern over Two-Phase Commit (2PC) for distributed transactions?",
+    options: ["Saga is faster", "Saga avoids distributed locks and coordinator dependency by using local transactions with compensating actions", "Saga provides stronger consistency", "Saga supports more participants"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "2PC is a blocking protocol — if the coordinator crashes after phase 1, all participants hold locks indefinitely. Saga breaks the transaction into independent local steps with compensating actions. No locks are held, and the system remains available even if individual steps fail."
+  },
+  {
+    question: "In CQRS, what is the 'projection' and what does it do?",
+    options: ["A projection is a backup of the write database", "It listens to events from the write side and updates a denormalized read model optimized for queries", "It projects data onto a screen for monitoring", "It converts write operations into read operations"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A projection consumes events published by the write side (e.g., OrderCreated, PriceUpdated) and updates a denormalized read model. The read model has pre-computed joins, full-text search text, and aggregated fields, making queries fast without expensive JOINs."
+  },
+  {
+    question: "Why does a distributed lock (like Redlock) need an expiration time?",
+    options: ["To prevent memory leaks", "To prevent deadlocks — if the lock holder crashes without releasing, the lock auto-expires so other nodes can acquire it", "To improve performance", "To support read-heavy workloads"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If a lock holder crashes after acquiring the lock but before releasing it, all other nodes would wait forever without an expiration. The TTL ensures the lock is automatically released after a bounded time, preventing system-wide deadlocks."
+  },
+  {
+    question: "What problem does graceful degradation solve that failing fast does not?",
+    options: ["Graceful degradation is faster", "Graceful degradation provides partial functionality when dependencies fail, instead of returning a complete error", "Graceful degradation prevents all errors", "Failing fast cannot return error messages"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Failing fast returns an error immediately when a dependency is unavailable. Graceful degradation continues operating with reduced functionality — serving cached data, hiding non-critical features, or using fallbacks — so the user gets something instead of nothing."
+  }
+]} />
 
 ## Self-Check
 

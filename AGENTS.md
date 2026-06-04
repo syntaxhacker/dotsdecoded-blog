@@ -64,6 +64,92 @@ Frontmatter fields:
 9. Assume zero knowledge — explain concepts with analogies before diving into technical details
 10. Each major section should have an interactive demo placed inline immediately after the relevant heading
 
+## Quiz System
+
+Every blog post has a QuizDemo at the end. The quiz tests core concepts from the post.
+
+### QuizDemo Component
+
+- **Location**: `src/components/demos/QuizDemo.tsx`
+- **Props**: `questions: QuizQuestion[]`
+- **Usage in MDX**:
+
+```mdx
+import QuizDemo from '../../components/demos/QuizDemo'
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What does X do?",
+    options: ["A", "B", "C", "D"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Brief explanation of the correct answer."
+  },
+]} />
+```
+
+### Quiz Question Interface
+
+```typescript
+interface QuizQuestion {
+  question: string
+  options: string[]          // Always 4 options
+  correctIndex: number       // 0-3
+  points: number             // 10-15 pts typical
+  explanation?: string       // Shown when correct
+}
+```
+
+### Quiz Features
+
+- Progress bar with question count
+- Point values per question
+- Immediate feedback (correct/wrong + explanation)
+- ASCII art results screen (EXCELLENT/GOOD/KEEP LEARNING)
+- Retry button
+- Saves completion to localStorage
+
+### localStorage Tracking
+
+**Key**: `blogProgress`
+
+```typescript
+interface BlogProgress {
+  [slug: string]: {
+    read: boolean        // Auto-marked at 50% scroll
+    completed: boolean   // Marked when quiz score >= 70%
+    score?: number       // Quiz score
+    maxScore?: number    // Max possible score
+    lastVisited?: string // ISO date
+  }
+}
+```
+
+### Auto-Mark as Read
+
+- `BaseLayout.astro` has an `is:inline` script that detects blog post pages
+- Marks `read: true` in localStorage when user scrolls past 50%
+- Uses sessionStorage flag to prevent repeated writes per session
+
+### Home Page Indicators
+
+- `index.astro` reads `blogProgress` from localStorage
+- `.blog-card` elements get a status indicator:
+  - Green checkmark (circle with check) = completed (quiz passed)
+  - Blue dot = read (scrolled past 50%, quiz not completed)
+  - No indicator = not read
+- CSS classes: `.post-status`, `.post-status-read`, `.post-status-completed`
+
+### Adding Quizzes to New Posts
+
+When creating a new blog post:
+1. Add `import QuizDemo from '../../components/demos/QuizDemo'` at the top
+2. Add a `## Test Your Knowledge` section at the end (before Related Posts or `---`)
+3. Create 5-8 questions covering the post's core concepts
+4. Use varying point values (10-15 pts) with explanations
+
 ## Demo Architecture
 
 Each blog post uses **multiple small, focused demo components** placed inline throughout the post — one per concept or section. This is NOT a single monolithic demo at the bottom.
@@ -219,7 +305,15 @@ Each post should follow a layered progression from zero knowledge to mastery:
 3. Keep each demo focused on ONE concept — if it does too much, split it
 4. Add to barrel file `src/components/demos/index.ts`
 
-### Step 4: Verify
+### Step 4: Add Quiz
+
+1. Import `QuizDemo` at the top of the MDX file
+2. Add `## Test Your Knowledge` section before Related Posts or `---`
+3. Create 5-8 questions with varying point values (10-15 pts)
+4. Each question tests a core concept from the post
+5. Include explanations for correct answers
+
+### Step 5: Verify
 
 1. Run `bun run build` to check for errors
 2. Do NOT run dev commands

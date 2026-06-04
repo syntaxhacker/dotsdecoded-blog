@@ -22,6 +22,7 @@ import PluginSkillDemo from '../../components/demos/PluginSkillDemo'
 import WorktreeDemo from '../../components/demos/WorktreeDemo'
 import LspDiagnosticDemo from '../../components/demos/LspDiagnosticDemo'
 import AgentSdkDemo from '../../components/demos/AgentSdkDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 You type a question. Claude thinks. It reads your files. It edits your code. It runs your tests. It responds with the answer. But between your keystroke and the answer appearing on screen, a remarkable amount of machinery runs. Understanding that machinery is the difference between using Claude Code effectively and just hoping for the best.
 
@@ -831,3 +832,92 @@ You now understand the full machinery inside Claude Code:
 - [ ] How do git worktrees isolate work from the main branch?
 - [ ] How do LSP diagnostics flow from the language server to Claude's context?
 - [ ] What does the Agent SDK expose beyond what the CLI provides?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the agentic loop in Claude Code and why is it an infinite while(true)?",
+    options: [
+      "It runs a fixed sequence of tools and exits after one pass",
+      "It streams from the API, executes tools, feeds results back, and continues until Claude decides it is done",
+      "It polls the user for input in a blocking loop",
+      "It retries failed API calls indefinitely"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The agentic loop is an infinite while(true) that streams API responses, executes tool calls, appends results to the conversation, and repeats until Claude produces a response with no tool calls."
+  },
+  {
+    question: "Why does Claude Code split the system prompt into static and dynamic parts?",
+    options: [
+      "The static part is encrypted while the dynamic part is in plaintext",
+      "The static part is cached globally across conversations to save tokens and latency, while the dynamic part changes per session",
+      "The dynamic part is optional and can be omitted",
+      "The static part contains secrets that must be isolated"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The static portion (role, tool guidelines, philosophy) is cached globally with scope: 'global'. The dynamic portion (git context, CLAUDE.md, MCP instructions) changes per session and is computed each time."
+  },
+  {
+    question: "How does Claude Code handle tool execution ordering?",
+    options: [
+      "All tools run in parallel regardless of type",
+      "Read-only tools batch together for parallel execution, while write tools each get their own serial batch",
+      "All tools run sequentially in the order they appear",
+      "Write tools run first, then read tools run in parallel"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Consecutive read-only tools (like FileRead) are batched together and execute in parallel (up to 10 concurrent). Write tools each get their own batch and run serially to prevent conflicts."
+  },
+  {
+    question: "What is the copy-on-write overlay filesystem in speculation?",
+    options: [
+      "A full copy of the project directory for each speculative agent",
+      "A sandbox where speculation writes go to a temporary overlay, leaving the real working directory untouched until the suggestion is accepted",
+      "A read-only snapshot of the filesystem for comparison",
+      "A compressed archive of modified files"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The COW overlay copies modified files to a temporary directory. Reads check the overlay first. If the suggestion is accepted, overlay files are copied to the real directory. If dismissed, the overlay is discarded."
+  },
+  {
+    question: "What are the two main reasons Claude Code uses the raw SSE stream instead of BetaMessageStream?",
+    options: [
+      "BetaMessageStream does not support tool calls",
+      "BetaMessageStream's partialParse is O(n^2) on large tool inputs, and the raw stream lets Claude Code start executing tools before the full response arrives",
+      "The raw stream supports more event types",
+      "BetaMessageStream requires a paid API plan"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "BetaMessageStream calls partialParse on every input_json_delta, which is O(n^2). The raw stream also allows streaming tool execution -- tools start running as their content_block_stop arrives, before the full response completes."
+  },
+  {
+    question: "How does MCP extend Claude Code's capabilities?",
+    options: [
+      "MCP replaces the built-in tool system with a plugin architecture",
+      "MCP lets Claude Code connect to external tool servers that expose callable functions, readable data, and slash commands",
+      "MCP is a caching layer for API responses",
+      "MCP provides language server integration for code analysis"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "MCP (Model Context Protocol) lets Claude Code connect to external tool servers via stdio, SSE, HTTP, or WebSocket. These servers expose tools, resources, and prompts that Claude can use like built-in tools."
+  },
+  {
+    question: "What triggers auto-compact and what happens to the conversation?",
+    options: [
+      "Auto-compact triggers when the user types /compact and replaces the entire conversation with a summary",
+      "Auto-compact triggers when token usage approaches the context window limit, sending the full conversation to the API for summarization and replacing old messages with the summary",
+      "Auto-compact triggers after every 10 messages and deletes tool results",
+      "Auto-compact triggers when the user goes idle and caches the conversation to disk"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When token usage approaches the context window limit (threshold: context_window - 13,000 tokens), Claude Code sends the full conversation to the API for summarization, replaces old messages with the summary, and restores critical context."
+  }
+]} />

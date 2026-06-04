@@ -11,6 +11,7 @@ import WindowLimitDemo from '../../components/demos/WindowLimitDemo'
 import CachePolicyDemo from '../../components/demos/CachePolicyDemo'
 import LruEvictionDemo from '../../components/demos/LruEvictionDemo'
 import CacheLayerDemo from '../../components/demos/CacheLayerDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Why Rate Limiting?
 
@@ -239,6 +240,92 @@ A real system doesn't have one cache. It has multiple layers, each faster than t
 <CacheLayerDemo client:visible />
 
 **Real work example:** A user loads your product page. The browser checks its local cache (0ms). If it's there (Cache-Control hasn't expired), the page loads instantly. If not, the request goes to the CDN (10-30ms). If the CDN has it (a previous user loaded it), it's returned from the edge. If not, it hits your API server, which checks Redis (\&lt;1ms). If Redis has it, returned immediately. If not, it queries PostgreSQL (50-200ms). Each miss falls through to the next layer. The first request is slow; every subsequent request is fast.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Which rate limiting algorithm allows burst traffic up to a configured capacity, then settles into a steady rate?",
+    options: ["Leaky Bucket", "Token Bucket", "Fixed Window", "Sliding Window"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The Token Bucket algorithm holds tokens up to a capacity. Requests consume tokens, and tokens refill at a steady rate. This naturally allows bursts (up to bucket capacity) while enforcing sustained limits."
+  },
+  {
+    question: "What is the key difference between the leaky bucket and token bucket algorithms?",
+    options: [
+      "Leaky bucket allows bursts; token bucket smooths output",
+      "Token bucket allows bursts; leaky bucket smooths output to a fixed rate",
+      "They are identical but with different names",
+      "Leaky bucket uses Redis; token bucket does not"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The leaky bucket processes requests at a fixed leak rate regardless of arrival speed, smoothing traffic. The token bucket allows bursts up to capacity before settling into the refill rate."
+  },
+  {
+    question: "What exploit does the fixed window rate limiter suffer from?",
+    options: [
+      "Memory overflow from storing timestamps",
+      "Boundary burst — double the limit at window reset",
+      "Inability to handle concurrent requests",
+      "Tokens leaking between windows"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "A client can send the maximum allowed requests at the end of one window and the same amount at the start of the next, effectively doubling the rate for a short period. The sliding window eliminates this by using a rolling time period."
+  },
+  {
+    question: "Which cache pattern writes to both the cache and database simultaneously on every write?",
+    options: ["Cache-aside", "Write-back", "Write-through", "Write-around"],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Write-through updates both cache and database at the same time. This guarantees consistency (the cache is always up to date) but makes writes slower since two operations must complete."
+  },
+  {
+    question: "What is the 'thundering herd' problem in caching?",
+    options: [
+      "Too many cache misses cause excessive logging",
+      "A cache expires and many simultaneous requests all hit the database at once",
+      "The cache grows too large and causes memory pressure",
+      "Multiple servers write conflicting data to the cache"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "When a popular cache key expires, every concurrent request sees a miss and tries to rebuild the cache from the database simultaneously. The fix is to use a lock key so only one request rebuilds while others return stale data."
+  },
+  {
+    question: "Why is Redis generally preferred over Memcached for distributed caching?",
+    options: [
+      "Redis is faster for simple get/set operations",
+      "Redis supports multiple data types, persistence, and built-in clustering",
+      "Memcached does not support expiration",
+      "Redis uses less memory than Memcached"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Redis supports strings, hashes, lists, sets, and sorted sets, plus persistence (RDB + AOF) and built-in clustering. Memcached is simpler (strings only, no persistence) but less versatile."
+  },
+  {
+    question: "What HTTP status code indicates a request was rate limited?",
+    options: ["403 Forbidden", "429 Too Many Requests", "503 Service Unavailable", "408 Request Timeout"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "HTTP 429 Too Many Requests is the standard status code for rate limiting. The response typically includes Retry-After and X-RateLimit headers to guide the client."
+  },
+  {
+    question: "Which cache eviction policy is most commonly used and why?",
+    options: [
+      "FIFO — it is the simplest to implement",
+      "LFU — frequency is always the best predictor",
+      "LRU — it matches real user behavior where recently accessed items are likely to be accessed again",
+      "TTL — expiration is the only reliable metric"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "LRU (Least Recently Used) is the most popular eviction policy because it aligns with real access patterns: items accessed recently are more likely to be accessed again. Redis uses a variant of LRU."
+  }
+]} />
 
 ## Self-Check
 

@@ -10,6 +10,7 @@ import OauthAuthCodeDemo from '../../components/demos/OauthAuthCodeDemo'
 import OauthTokensDemo from '../../components/demos/OauthTokensDemo'
 import OauthRefreshDemo from '../../components/demos/OauthRefreshDemo'
 import OauthGrantsDemo from '../../components/demos/OauthGrantsDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Every time you click "Login with Google" or "Sign in with GitHub", you are using OAuth 2.0. It is the protocol that lets one application access your data on another service without ever seeing your password. OpenID Connect (OIDC) sits on top of OAuth 2.0 and adds identity verification — so the app knows not just that you allowed access, but who you actually are.
 
@@ -522,6 +523,65 @@ The system browser approach means the user's login session (cookies from Google,
 7. Why should SPAs store access tokens in memory rather than localStorage?
 8. What is the difference between OAuth 2.0 and OpenID Connect?
 
----
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the fundamental difference between authentication and authorization?",
+    options: ["They are the same thing", "Authentication verifies identity (who are you?), authorization determines permissions (what can you do?)", "Authentication uses tokens, authorization uses passwords", "Authentication happens first, authorization happens after"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Authentication answers 'who are you?' (verifying identity), while authorization answers 'what are you allowed to do?' (granting permissions). OAuth 2.0 handles authorization; OIDC adds authentication on top."
+  },
+  {
+    question: "What are the four parties in OAuth 2.0?",
+    options: ["User, Server, Database, Cache", "Resource Owner, Client, Authorization Server, Resource Server", "Client, Server, Browser, API", "User, App, Google, Database"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The Resource Owner (user), Client (application), Authorization Server (token issuer like Google), and Resource Server (API holding the data). Understanding these four roles is essential to understanding any OAuth flow."
+  },
+  {
+    question: "What attack does PKCE prevent?",
+    options: ["SQL injection", "Authorization code interception by an attacker", "Cross-site scripting", "Man-in-the-middle on the token endpoint"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "PKCE (Proof Key for Code Exchange) prevents an attacker from using a stolen authorization code. The attacker would need the code_verifier to exchange the code for tokens, which they cannot guess even if they intercept the code."
+  },
+  {
+    question: "How does refresh token rotation detect token theft?",
+    options: ["It encrypts the refresh token with a new key each time", "Each refresh issues a new token and invalidates the old one; if the old token is used again, it signals theft", "It sends an email to the user when the token is refreshed", "It requires re-authentication on every refresh"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "When a refresh token is used, the server issues a new one and invalidates the old. If an attacker uses a stolen token, the legitimate client's next refresh will fail because the token was already rotated. The server detects this reuse and revokes all tokens for that user."
+  },
+  {
+    question: "Where should a SPA store access tokens?",
+    options: ["localStorage for persistence", "sessionStorage for session lifetime", "In memory (JavaScript variable)", "In a browser cookie with no flags"],
+    correctIndex: 2,
+    points: 12,
+    explanation: "SPAs should store access tokens in memory (a JavaScript variable). localStorage and sessionStorage are accessible to any JavaScript on the same origin, making them vulnerable to XSS attacks. The token is lost on page refresh, which is acceptable since the SPA can re-authenticate."
+  },
+  {
+    question: "What are the three parts of a JWT?",
+    options: ["Username, Password, Salt", "Header, Payload, Signature", "Access Token, Refresh Token, ID Token", "Key, Value, Timestamp"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A JWT is three base64url-encoded JSON objects separated by dots: the header (algorithm and key ID), the payload (claims about the user and token), and the signature (proves the token hasn't been tampered with)."
+  },
+  {
+    question: "Which JWT claims does a resource server MUST verify?",
+    options: ["Only the signature", "Signature, issuer (iss), audience (aud), and expiration (exp)", "Only the expiration time", "Only the subject (sub) claim"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The resource server must verify the signature (using the JWKS public key), the issuer matches the expected authorization server, the audience matches the application's client_id, and the token hasn't expired. Skipping any of these checks creates a security vulnerability."
+  },
+  {
+    question: "Why is the implicit grant deprecated?",
+    options: ["It is too slow for production use", "The access token appears in the URL fragment, leaking it to browser history, server logs, and referrer headers", "It does not support refresh tokens", "It requires a client_secret which SPAs cannot store"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The implicit grant returns the access token directly in the URL fragment, which leaks to browser history, server logs, referrer headers, and any JavaScript on the page. Authorization Code + PKCE is the recommended replacement for all client types."
+  }
+]} />
 
 OAuth 2.0 and OIDC are not magic. They are carefully designed protocols that solve the fundamental problem of delegated access. The authorization code flow with PKCE is the foundation for secure authentication in modern applications. Understanding the token structure, the role of each party, and the security mechanisms lets you implement OAuth correctly and avoid the common pitfalls that lead to data breaches.

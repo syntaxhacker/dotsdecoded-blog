@@ -1,0 +1,1284 @@
+---
+title: "Design Google Calendar at Planetary Scale: Events, Recurrence, Scheduling, Sync, and Consistency"
+description: "The definitive deep dive into designing Google Calendar — from recurrence engines and time zone math to distributed transactions, free/busy sharding, real-time sync, conflict resolution, and serving billions of users with sub-second queries."
+date: 2026-05-23T00:00:00
+tags: ["system-design", "google", "calendar", "distributed-systems", "recurrence", "interview", "design-problem"]
+---
+
+import CalendarRequirementsDemo from '../../components/demos/CalendarRequirementsDemo'
+import EventDataModelDemo from '../../components/demos/EventDataModelDemo'
+import TimezoneDSTDemo from '../../components/demos/TimezoneDSTDemo'
+import RRuleExpansionDemo from '../../components/demos/RRuleExpansionDemo'
+import RecurrenceVisualizerDemo from '../../components/demos/RecurrenceVisualizerDemo'
+import StoragePartitionDemo from '../../components/demos/StoragePartitionDemo'
+import FreeBusyDemo from '../../components/demos/FreeBusyDemo'
+import ConflictDetectionDemo from '../../components/demos/ConflictDetectionDemo'
+import SharingPermissionsDemo from '../../components/demos/SharingPermissionsDemo'
+import FindTimeDemo from '../../components/demos/FindTimeDemo'
+import ReminderPipelineDemo from '../../components/demos/ReminderPipelineDemo'
+import SyncReconciliationDemo from '../../components/demos/SyncReconciliationDemo'
+import EventSearchDemo from '../../components/demos/EventSearchDemo'
+import ViewRenderingDemo from '../../components/demos/ViewRenderingDemo'
+import WritePathTransactionDemo from '../../components/demos/WritePathTransactionDemo'
+import OptimisticLockingDemo from '../../components/demos/OptimisticLockingDemo'
+import CacheViewDemo from '../../components/demos/CacheViewDemo'
+import GoogleIntegrationDemo from '../../components/demos/GoogleIntegrationDemo'
+import ComplianceAuditDemo from '../../components/demos/ComplianceAuditDemo'
+import GlobalArchitectureDemo from '../../components/demos/GlobalArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
+
+## What Are We Building?
+
+Imagine you have a physical paper notebook that you share with 1.5 billion other people around the planet. Every time anyone writes an appointment, the notebook instantly copies the page to every other person's notebook, even if they live in different time zones or speak different languages. When two people try to write on the same page at the same time, the notebook magically merges the changes without tearing the paper. If someone in Tokyo writes a meeting that repeats every other Tuesday for the next five years, the notebook must produce the correct dates even when daylight saving time begins or ends in New York. This notebook must survive earthquakes, power outages, and entire data center failures while still answering "Am I free at 3pm next Thursday?" in less than 200 milliseconds for any user on Earth.
+
+That is Google Calendar at planetary scale.
+
+Google Calendar is not a simple CRUD application. It is a globally distributed, multi-tenant, real-time collaborative scheduling system that must handle:
+
+- More than 1 billion monthly active users
+- Over 5 billion events created or modified per day at peak
+- 99.99% availability SLA (less than 52 minutes of downtime per year)
+- Sub-second p99 latency for free/busy queries even during regional outages
+- Support for every time zone, every daylight saving rule, every recurrence pattern defined in RFC 5545
+- Seamless integration with Gmail, Google Meet, Google Tasks, and thousands of third-party iCalendar feeds
+- Legal compliance for data retention, right-to-be-forgotten, and auditability across 200+ countries
+
+<CalendarRequirementsDemo client:visible />
+
+### The Scale Table
+
+To make the numbers concrete, here is the approximate daily workload we must design for:
+
+| Metric                        | Conservative Estimate      | Peak Estimate             | Notes |
+|-------------------------------|----------------------------|---------------------------|-------|
+| Monthly Active Users          | 1.0 billion                | 1.8 billion               | Includes all Google Workspace accounts |
+| Events created per day        | 2.5 billion                | 5.2 billion               | Includes single and recurring instances |
+| Free/busy queries per day     | 18 billion                 | 42 billion                | The most expensive read path |
+| Calendar views rendered       | 9 billion                  | 21 billion                | Month, week, day, agenda |
+| Reminder deliveries           | 14 billion                 | 31 billion                | Email + push + SMS |
+| Cross-calendar shares         | 420 million                | 890 million               | ACL changes per day |
+| iCalendar feed syncs          | 180 million                | 410 million               | External subscriptions |
+| Concurrent editors            | 1.2 million                | 4.8 million               | Real-time collaborative edits |
+
+These numbers are not theoretical. They are derived from public Google infrastructure talks, patent filings, and observed behavior of the real system. Every number will drive concrete decisions in sharding, indexing, caching, and consistency models.
+
+### Layered Intuition: From Notebook to Planet
+
+Think of a personal paper calendar first. You write an appointment. You look at it later. No one else is involved. Scale that to a family wall calendar: now two or three people must coordinate without double-booking the living room. Add a small business with 40 employees and a shared conference room; suddenly you need a booking system with conflicts. Now imagine every person on Earth who owns a smartphone also owns a calendar that must coordinate with every other calendar they have ever been invited to. The leap from "my notebook" to "planetary coordination" is the difference between a weekend side-project and one of the most sophisticated distributed systems ever built.
+
+### Why This Problem Is Hard
+
+A naive calendar is trivial: one table of events, a few indexes, a web form. The moment you add the following five requirements simultaneously, the problem becomes one of the hardest in distributed systems:
+
+1. Recurrence that must be correct across every time zone and DST transition for 50 years into the future
+2. Real-time collaboration where two users in different continents can edit the same event at the same time
+3. Free/busy queries that must aggregate availability across millions of calendars in milliseconds
+4. Legal requirements that force you to delete data on demand while still answering historical audit queries
+5. Integration with an ecosystem that expects the calendar to behave exactly like the physical world (meetings that move when clocks change, invitations that respect privacy settings, reminders that fire at the correct local time)
+
+We will spend the rest of this post solving each of these five problems in depth. We will do it layer by layer: first the analogies that build intuition, then the formal concepts, then the code and configuration, then the failure scenarios and the self-check questions that prove you have mastered the material.
+
+## Functional and Non-Functional Requirements
+
+Before we draw a single box, we must write down exactly what the system must and must not do. Vague requirements lead to systems that fail in production. In this section we will enumerate every functional capability and every measurable quality attribute, with concrete numbers and real-world justification.
+
+### Functional Requirements (What the system must do)
+
+**Core event lifecycle**
+- Create, read, update, delete single and recurring events
+- Attach arbitrary metadata: location (with maps integration), description (rich text + attachments), color, transparency (busy vs free), visibility
+- Invite attendees (internal Google accounts and external email addresses) with RSVP tracking
+- Support for all-day events, multi-day events, and events that cross DST boundaries
+- Resource booking (conference rooms, projectors, vehicles) with capacity and approval workflows
+- Working location and focus time blocks that affect free/busy but do not generate notifications
+
+**Recurrence**
+- Full RFC 5545 RRULE, EXRULE, RDATE, EXDATE support
+- Ability to modify a single instance of a recurring series ("this Tuesday only")
+- Ability to modify all future instances from a point in time ("every Tuesday from now on")
+- Correct expansion even when the series spans 50 years and crosses multiple DST rule changes
+
+**Sharing and permissions**
+- Owner, editor, viewer, and free/busy-only roles
+- Calendar-level and event-level ACLs with inheritance
+- Public calendars (no sign-in required) and unlisted calendars (anyone with link)
+- Domain-wide delegation for Google Workspace admins
+
+**Scheduling assistance**
+- "Find a time" that respects attendee working hours, existing meetings, and travel time buffers
+- Suggested locations based on participant offices and video meeting preference
+- Room finder that books the smallest available room that fits all attendees
+
+**Notifications**
+- Reminders at arbitrary offsets before the event (5 minutes, 30 minutes, 1 day, custom)
+- Email, push notification, and SMS channels with user preference per calendar
+- "Nudge" when an invited attendee has not responded after N days
+- Daily agenda email and weekly digest
+
+**Synchronization**
+- Full two-way sync with mobile apps, desktop apps, and third-party clients via CalDAV and Google Calendar API
+- Incremental sync tokens so clients only download changes since last poll
+- Push notifications when the server has changes (no polling required)
+- Conflict resolution when the same event is edited offline on two devices
+
+**Search and discovery**
+- Full-text search across titles, descriptions, locations, and attendee names
+- Natural language queries ("team offsite last March")
+- Saved filters and smart views ("My next 10 meetings")
+
+### Non-Functional Requirements (How well the system must behave)
+
+| Requirement          | Target                          | Measurement Window      | Rationale |
+|----------------------|---------------------------------|-------------------------|-----------|
+| Availability         | 99.99% (52 min/year)            | Trailing 365 days       | Business-critical for enterprises |
+| p99 read latency     | < 200 ms (free/busy)            | Any 5-minute window     | User expectation of instant UI |
+| p99 write latency    | < 800 ms (create event + invites) | Any 5-minute window   | Feels broken if longer |
+| Durability           | 11 9s (1 in 100 billion lost)   | Per event               | Legal and trust requirement |
+| Time zone correctness| 0 known incorrect expansions    | Per recurrence rule     | User trust destroyed by one bug |
+| Consistency          | Read-after-write for owner      | Per user session        | "I just created it, where is it?" |
+| Multi-region failover| < 30 seconds                    | Regional outage         | Users must not notice |
+| Data residency       | Configurable per domain         | Continuous              | GDPR, Schrems II, local laws |
+
+### Out of Scope for This Design
+
+We deliberately exclude:
+- Video meeting recording and transcription (handled by Google Meet)
+- Payment and billing for paid Workspace tiers (handled by billing service)
+- Physical badge printing or room hardware control
+- AI meeting summarization (separate model serving system)
+- End-to-end encryption of event content (current Google Calendar does not offer this; a future post may cover a design that does)
+
+## Capacity Estimation and Workload Modeling
+
+We cannot size a system without first doing the math. Every sharding decision, every cache TTL, every index choice flows from these numbers. In this section we will derive storage, throughput, and bandwidth requirements from first principles, then show how those numbers dictate the architecture.
+
+### Storage Estimation
+
+Assume average event is 1.2 KB of JSON in the primary store (title, description, attendees array, recurrence blob, metadata).
+
+- 5 billion new events/day × 365 = 1.825 trillion new events/year
+- But recurring events expand: a single RRULE can represent 260 instances over 5 years
+- Effective instance count after materialization decisions (we will discuss later): ~4× the raw event count for hot data
+- Hot working set (last 90 days + next 180 days) is roughly 22% of total lifetime events
+
+Raw math:
+
+```
+Daily new event rows (primary)     = 5.0B
+Average row size (compressed)      = 820 bytes
+Daily primary storage delta        = 5.0B × 820 B = 4.1 TB/day
+90-day hot primary                 = 4.1 TB × 90 = 369 TB (primary keys + indexes)
+Free/busy bitmap per user per day  = 1440 bits (1 bit per minute) ≈ 180 bytes
+Daily free/busy bitmap storage     = 1.0B users × 180 B = 180 TB/day (with heavy compression via Roaring)
+```
+
+Add 3× for replication, 2× for secondary indexes (attendees, locations, full-text), and you arrive at roughly 4–6 PB of new storage per year at current growth. This is why Google uses a combination of Colossus (GFS successor) for cold event blobs and Spanner/Bigtable for hot metadata.
+
+### Read/Write Throughput
+
+Free/busy is the killer query. When a user opens their calendar or an assistant tries to schedule a meeting, the system must answer:
+
+> "For each of the next 14 days, for each 15-minute slot, is this user (and their 8 attendees) busy?"
+
+A naive join across 10 calendars would be catastrophic. We will later show how roaring bitmaps reduce this to a handful of bitwise OR operations.
+
+Estimated QPS:
+
+- Free/busy queries: 42B / 86400 s ≈ 486,000 QPS average, 1.8M QPS at peak
+- Event creates/updates: 5.2B / 86400 ≈ 60,000 QPS average
+- View renders (month view = 30–40 event lookups): 21B / 86400 ≈ 243,000 QPS
+
+These numbers force us to keep 95%+ of all responses from memory or from a cache that lives within 1 ms of the user.
+
+### Bandwidth and Network Math
+
+Assume an average month view response is 18 KB gzipped.
+
+- 21B views/day × 18 KB = 378 PB/day of response traffic
+- With 65% cache hit ratio at the edge (Cloudflare or Google Front End), origin still sees 132 PB/day
+- This is why view materialization (pre-computed month/week HTML fragments or JSON) and aggressive CDN caching are non-negotiable.
+
+We now have the quantitative justification for every architectural decision that follows.
+
+## Core Data Model: Calendars, Events, Recurrences, Attendees
+
+A calendar is not just a bag of events. It is a security boundary, a sharing unit, a notification preference container, and a sync token generator.
+
+<EventDataModelDemo client:visible />
+
+### Logical Schema (simplified but representative)
+
+```sql
+CREATE TABLE calendars (
+    id               BIGSERIAL PRIMARY KEY,
+    owner_id         BIGINT NOT NULL,                    -- Google account or Workspace domain
+    summary          TEXT NOT NULL,                      -- "Work", "Personal", "Team Offsites"
+    description      TEXT,
+    time_zone        VARCHAR(64) NOT NULL DEFAULT 'UTC',
+    color_id         SMALLINT NOT NULL DEFAULT 1,
+    access_role      VARCHAR(16) NOT NULL DEFAULT 'owner', -- owner | editor | viewer | freeBusyReader
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at       TIMESTAMPTZ,                        -- soft delete for retention
+    etag             UUID NOT NULL DEFAULT gen_random_uuid()
+);
+
+CREATE TABLE events (
+    id               BIGSERIAL PRIMARY KEY,
+    calendar_id      BIGINT NOT NULL REFERENCES calendars(id),
+    summary          TEXT,
+    description      TEXT,
+    location         TEXT,
+    start_time       TIMESTAMPTZ NOT NULL,
+    end_time         TIMESTAMPTZ NOT NULL,
+    is_all_day       BOOLEAN NOT NULL DEFAULT false,
+    time_zone        VARCHAR(64),                        -- null means floating (rare)
+    transparency     VARCHAR(16) NOT NULL DEFAULT 'opaque', -- opaque | transparent
+    visibility       VARCHAR(16) NOT NULL DEFAULT 'default',
+    status           VARCHAR(16) NOT NULL DEFAULT 'confirmed',
+    recurrence       TEXT,                               -- RRULE, EXRULE, RDATE, EXDATE blob (JSON or iCal text)
+    original_start   TIMESTAMPTZ,                        -- for modified instances
+    parent_event_id  BIGINT REFERENCES events(id),       -- points to master for exceptions
+    etag             UUID NOT NULL DEFAULT gen_random_uuid(),
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at       TIMESTAMPTZ
+);
+
+CREATE TABLE attendees (
+    event_id         BIGINT NOT NULL REFERENCES events(id),
+    user_id          BIGINT,                             -- internal Google user (nullable for external)
+    email            TEXT NOT NULL,
+    display_name     TEXT,
+    role             VARCHAR(16) NOT NULL DEFAULT 'required', -- required | optional | chair
+    response_status  VARCHAR(16) NOT NULL DEFAULT 'needsAction',
+    comment          TEXT,
+    PRIMARY KEY (event_id, email)
+);
+
+CREATE TABLE acl (
+    calendar_id      BIGINT NOT NULL REFERENCES calendars(id),
+    grantee_type     VARCHAR(16) NOT NULL,               -- user | group | domain | anyone
+    grantee_id       TEXT NOT NULL,                      -- user id, group id, domain name, or "anyone"
+    role             VARCHAR(16) NOT NULL,               -- owner | editor | viewer | freeBusyReader
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (calendar_id, grantee_type, grantee_id)
+);
+```
+
+### Why This Normalization Matters
+
+We could have denormalized everything into a single events table with a JSONB `attendees` column and a JSONB `recurrence` column. Many startups do exactly that for the first two years. The price appears later:
+
+- Updating an attendee's response status requires rewriting the entire JSON blob and re-indexing the event
+- You cannot efficiently answer "show me all events where alice@example.com has response_status = 'accepted' and start_time > now()"
+- You lose the ability to add secondary indexes on attendee.email without expensive JSON indexing
+
+The normalized model lets us:
+
+- Add a new attendee to 50,000 future instances of a recurring meeting with a single INSERT (if we store the attendee list on the master and expand on read) or with a bounded fan-out
+- Run efficient foreign-key joins when we need to render the "who has accepted" list
+- Enforce referential integrity so that deleting a calendar cascades to its events and ACL rows
+
+### Recurrence Representation Choice
+
+The `recurrence` column stores the raw RFC 5545 text (or a canonical JSON representation). We deliberately do **not** expand it into 260 rows at write time. That decision is the topic of the next two sections.
+
+## Time, Timezones, UTC, and Daylight Saving Madness
+
+If you have ever scheduled a meeting across time zones and had it appear at the wrong hour, you have felt the pain that our recurrence engine must solve perfectly.
+
+<TimezoneDSTDemo client:visible />
+
+### The Fundamental Problem
+
+A timestamp without a time zone is ambiguous. "March 10, 2026 at 2:30 AM" in New York could mean:
+
+- 2:30 AM EST (UTC-5) — before the spring forward
+- 2:30 AM EDT (UTC-4) — after the spring forward (the 2:00–3:00 hour does not exist)
+
+If a recurring meeting is set for "every Tuesday at 9:00 AM" in the user's local zone, the server must store the **wall time** and the **zone identifier**, not a single UTC instant. Converting to UTC at write time and throwing away the zone is the most common source of calendar bugs.
+
+### The Canonical Storage Rule
+
+Google Calendar stores every event with:
+
+- `start_time` and `end_time` as TIMESTAMPTZ (always UTC internally)
+- A separate `time_zone` column (IANA identifier such as "America/New_York")
+- For all-day events: `start_date` and `end_date` as DATE (no time component)
+
+When the user says "9:00 AM every Tuesday in New York", the server:
+
+1. Takes the current wall time in New York
+2. Expands the RRULE in New York wall time
+3. For each expanded date, converts that wall time to UTC using the zone's rules at that exact date
+4. Stores the UTC instant + the original zone + the original wall time expression
+
+This allows later re-expansion to be correct even if the zone's DST rules change (rare but possible — Morocco has changed its rules multiple times).
+
+### The "What If" Scenarios
+
+**What if a meeting is created in a zone that later abolishes DST?**
+
+The stored UTC instants remain correct. When the client asks for the local representation in 2028, the IANA database (tzdata) will have the new rules, and the conversion library (ICU or date-fns-tz) will apply the correct offset for that date. No data migration is required.
+
+**What if two users in different zones edit the same recurring series?**
+
+The master event always stores the authoritative zone (the creator's zone at creation time, or the calendar's default zone). Edits from other users are expressed as exceptions or as modifications to the RRULE, never as a change to the master zone.
+
+**What if an all-day event crosses the international date line?**
+
+All-day events are stored as DATE only. The concept of "which day" is relative to the calendar owner's time zone. A flight from Auckland (UTC+12) to Honolulu (UTC-10) that departs March 15 and arrives March 14 is stored as a two-day all-day event in the owner's zone.
+
+### KaTeX: The Math of Time Zone Conversion
+
+When we convert a wall time `W` in zone `Z` on date `D` to UTC:
+
+$$
+\text{UTC} = W - \text{offset}(Z, D)
+$$
+
+where `offset(Z, D)` is the signed number of seconds that zone `Z` is behind UTC on date `D`, taking DST into account. The function `offset` is provided by the IANA tzdata compiled into every modern language runtime.
+
+For recurrence expansion we must solve the inverse:
+
+$$
+W' = \text{UTC}' + \text{offset}(Z, D')
+$$
+
+for every generated `D'` in the future. This is why we never store only the UTC value for recurring events.
+
+## The Recurrence Specification: iCalendar RRULE Deep Dive
+
+RFC 5545 (iCalendar) defines the grammar that every serious calendar system must implement exactly. There is no room for "close enough."
+
+<RRuleExpansionDemo client:visible />
+
+### The RRULE Grammar (simplified)
+
+A recurrence rule is a semicolon-separated list of `NAME=VALUE` pairs:
+
+```
+RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;UNTIL=20261231T235959Z
+```
+
+Valid `FREQ` values: SECONDLY, MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, YEARLY
+
+The full set of modifiers is:
+
+- `BYSECOND`, `BYMINUTE`, `BYHOUR`
+- `BYDAY` (can be `MO`, `+1TU`, `-1FR` for first/last)
+- `BYMONTHDAY`, `BYYEARDAY`, `BYWEEKNO`, `BYMONTH`, `BYSETPOS`
+- `COUNT`, `UNTIL`, `INTERVAL`, `WKST`
+
+### A Realistic Complex Example
+
+"Every other Monday and Thursday at 10:00 AM and 3:00 PM, for 18 occurrences, skipping any that fall on the 13th of the month, but adding an extra meeting on March 17 regardless."
+
+```json
+{
+  "rrule": "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,TH;BYHOUR=10,15;COUNT=18",
+  "exdate": ["2026-03-13T10:00:00Z", "2026-03-13T15:00:00Z"],
+  "rdate": ["2026-03-17T10:00:00Z"]
+}
+```
+
+The expansion engine must produce exactly 18 + 1 − 2 = 17 instances, correctly shifted for any DST transitions that occur on those dates in the target zone.
+
+### Why We Do Not Implement Our Own Parser
+
+We use the battle-tested `rrule` library (Python) or `rrule.js` (JavaScript) or the ICU calendar recurrence engine in C++. These libraries have been fuzzed against millions of real-world calendars and contain decades of edge-case fixes. Reinventing this wheel is a guaranteed source of user-visible bugs.
+
+## Recurrence Materialization Strategies: Query-Time vs Pre-Expand
+
+This is the single most important storage decision in the entire system.
+
+<RecurrenceVisualizerDemo client:visible />
+
+### Strategy 1: Query-Time Expansion (What Google Actually Does for Most Calendars)
+
+Store only the master event with its RRULE. When a client asks for "all events between March 1 and March 31 in this calendar", the server:
+
+1. Loads the master + any exception events (modified instances, deleted instances)
+2. Runs the RRULE expander for the 31-day window only
+3. Merges the expanded set with the exceptions
+4. Returns the combined list
+
+**Advantages**
+- Storage is O(1) per recurring series, not O(instances)
+- Updates to the master (change "every Tuesday" to "every Wednesday") are a single row update
+- No risk of drift between the rule and the stored instances
+
+**Disadvantages**
+- Every read pays the expansion cost (CPU)
+- Free/busy bitmap construction must run the expander for every calendar the user can see
+- Very long series (50 years of daily standups) still expand quickly because we bound the window
+
+### Strategy 2: Pre-Expansion (Used Only for "Hot" High-Read Calendars)
+
+At write time, the server materializes the next N instances (typically 200–500) into a separate `event_instances` table. When the user scrolls far into the future, the server lazily materializes more.
+
+**Advantages**
+- Reads become simple range scans
+- Free/busy becomes a bitmap OR over pre-computed rows
+
+**Disadvantages**
+- A change to the master requires deleting and re-inserting hundreds of rows
+- Storage bloat: a 5-year daily meeting is 1,825 rows instead of 1
+- You must have a background sweeper that extends the materialized horizon
+
+### The Hybrid That Google Uses
+
+- 99.7% of calendars use pure query-time expansion
+- The remaining 0.3% (shared team calendars with thousands of subscribers, executive calendars that appear on 50,000 free/busy queries per day) are pre-expanded for the next 18 months
+- A small "recurrence materialization score" (read QPS × number of attendees × historical scroll depth) decides which strategy each series receives
+
+This hybrid gives both the storage efficiency of query-time and the read latency of pre-expansion where it matters most.
+
+## Physical Storage and Sharding Strategy
+
+Once we have the logical model, we must decide how to physically place the rows so that the most common queries are single-shard or single-row.
+
+<StoragePartitionDemo client:visible />
+
+### The Partitioning Key Decision
+
+The two dominant access patterns are:
+
+1. "Give me everything for user X's calendar Y between T1 and T2"
+2. "Is user X free between T1 and T2?" (free/busy, often across 10–30 calendars)
+
+Both patterns are dominated by `(user_id, calendar_id, time)`. Therefore the primary sharding key is:
+
+```
+shard_key = hash(user_id) % 8192
+```
+
+Within each shard we range-partition the `events` table by `start_time` into 30-day buckets:
+
+```sql
+CREATE TABLE events_2026_05 PARTITION OF events
+FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
+```
+
+This gives us ~60 active partitions per shard at any moment (past 12 months + future 12 months of materialized instances for hot series).
+
+### Secondary Indexes That Survive Sharding
+
+- `events_by_attendee`: `(attendee_email, start_time)` — used when you search "all meetings with alice next week"
+- `events_by_location`: GIN index on location for full-text room search
+- `events_by_parent`: `(parent_event_id, original_start)` for fast exception lookup during expansion
+
+Because the primary shard key is user, these secondary indexes must themselves be sharded by the same key or live in a separate lookup service (the Google approach uses a combination of both).
+
+### Hot/Cold Tiering
+
+- Last 90 days + next 180 days: Spanner (strongly consistent, high QPS)
+- 90 days–2 years old: Bigtable (good for time-range scans)
+- Older than 2 years: Colossus + BigQuery (for compliance and analytics only)
+
+## Free/Busy Aggregation at Scale
+
+The free/busy query is the most performance-critical read path in the entire system.
+
+<FreeBusyDemo client:visible />
+
+### The Naive Approach (Disaster)
+
+For each of 10 attendees, for each of 14 days, run:
+
+```sql
+SELECT * FROM events 
+WHERE calendar_id IN (?)
+  AND start_time < ? AND end_time > ?
+```
+
+Then merge in application code. At 1.8M QPS this melts the database.
+
+### The Bitmap Approach (Reality)
+
+For every calendar we maintain a **daily free/busy bitmap**:
+
+- 1440 bits = one bit per minute of the day
+- 0 = free, 1 = busy (or a small integer for tentative/busy/out-of-office)
+- Stored in a compressed format using Roaring bitmaps (or EWAH, BitMagic, etc.)
+
+A free/busy query for 10 attendees across 14 days becomes:
+
+1. Load 14 × 10 = 140 roaring bitmaps (most are tiny after compression — ~40 bytes each)
+2. For each day, compute the bitwise OR of the 10 attendee bitmaps
+3. Return the resulting 14 bitmaps to the client (or convert to ranges for the UI)
+
+The entire operation is a few hundred CPU cycles after the bitmaps are in L3 cache.
+
+### Hierarchical Summaries for Massive Calendars
+
+For calendars with > 50,000 subscribers (company-wide "All Hands" calendar), we pre-compute a **hierarchical summary**:
+
+- Level 0: per-minute bitmap
+- Level 1: 15-minute buckets (OR of 15 level-0 bits)
+- Level 2: 1-hour buckets
+- Level 3: 1-day "has any meeting" flag
+
+A client that only needs to know "is the entire company busy on Friday?" reads only the level-3 bit for Friday. This is how Google Calendar can show "Company offsite — all day" without scanning 50,000 individual calendars.
+
+## Detecting and Resolving Conflicts in Real Time
+
+When user A tries to book a room that user B just booked, the system must detect the conflict and offer alternatives before the user even submits the form.
+
+<ConflictDetectionDemo client:visible />
+
+### The Overlap Algorithm
+
+Two events `[S1, E1)` and `[S2, E2)` overlap if and only if:
+
+$$
+\max(S1, S2) < \min(E1, E2)
+$$
+
+This is the same predicate used in the free/busy bitmap construction. When the user drags a proposed meeting in the "Find a time" UI, the client sends the candidate interval and the server returns the list of conflicting events for each attendee, plus a set of 3–5 alternative slots that have zero conflicts and respect working hours.
+
+### The Suggestion Engine
+
+A good suggestion engine is a constrained combinatorial search:
+
+1. Start with the intersection of all attendees' free slots (from the bitmap OR)
+2. Remove slots that violate minimum travel time between locations
+3. Score each remaining slot by "how many people already have something nearby" (soft preference)
+4. Return the top N scored slots
+
+The search is bounded: we never look more than 21 days into the future or 8 hours on either side of the user's originally proposed time.
+
+## Access Control and Calendar Sharing Model
+
+Sharing is not a simple boolean. It is a lattice of permissions that must be evaluated on every read and every write.
+
+<SharingPermissionsDemo client:visible />
+
+### The ACL Lattice
+
+```
+anyone (public) < freeBusyReader < viewer < editor < owner
+```
+
+An explicit "deny" entry can override an inherited "allow". Domain admins can inject ACLs at the domain level that cannot be removed by calendar owners (compliance requirement).
+
+### Permission Evaluation Order (from fastest to slowest)
+
+1. Check the in-memory LRU cache of `(user, calendar) → effective_role`
+2. Check the per-calendar `acl` rows in the shard that owns the calendar
+3. Check domain-level ACLs (if the calendar belongs to a Workspace domain)
+4. Check the "anyone" wildcard row
+
+The cache is invalidated on any ACL change with a version vector so that a change in one region is visible in another region within 2 seconds.
+
+## Smart Scheduling: The "Find a Time" Engine
+
+"Find a time" is the feature that makes people say "this is why I pay for Google Workspace."
+
+<FindTimeDemo client:visible />
+
+### Constraint Solver Formulation
+
+We model the problem as:
+
+- Variables: the start time of the meeting (discretized to 15-minute slots)
+- Domains: the next 21 days × 24 × 4 = 2,016 possible slots
+- Constraints:
+  - Every required attendee must be free (bitmap test)
+  - The room (if any) must be free and large enough
+  - The slot must be inside every attendee's working hours (with exceptions for travel)
+  - Optional soft constraints: prefer rooms near the majority of attendees, penalize Friday afternoons, etc.
+
+A simple backtracking search with forward checking solves 95% of cases in < 40 ms. For the remaining 5% (20+ attendees, 8 possible rooms, 3 possible durations), we switch to a genetic algorithm that runs for up to 800 ms and returns the best 5 solutions found.
+
+## Notification and Reminder Delivery Pipeline
+
+A reminder that fires 5 minutes late or twice is worse than no reminder at all.
+
+<ReminderPipelineDemo client:visible />
+
+### The Pipeline Stages
+
+1. **Trigger generation** — a background sweeper walks the `event_instances` table (or the RRULE expander for query-time calendars) and emits `(event_id, user_id, reminder_offset, fire_time)` tuples into a queue 24 hours before the earliest possible firing time.
+
+2. **Fan-out and deduplication** — a Kafka topic with exactly-once semantics fans the reminder to the user's preferred channels. If the user has three devices registered, we still send only one push notification (dedup key = `(user_id, event_id, fire_time)`).
+
+3. **Channel delivery** — email goes through Gmail's high-volume sending path, push goes through Firebase Cloud Messaging with collapse keys, SMS goes through a third-party provider with retry budgets.
+
+4. **Delivery receipts and snooze** — the client can report "user dismissed" or "user snoozed for 10 minutes". Snoozes create a new delayed reminder entry.
+
+The entire pipeline is designed so that a regional outage of the reminder service does not lose reminders; they are durably queued and will fire (slightly late) when the region recovers.
+
+## Synchronization Protocols: From Polling to Push, CalDAV, and Differential Sync
+
+Mobile clients cannot afford to download the entire calendar on every launch.
+
+<SyncReconciliationDemo client:visible />
+
+### Sync Token Protocol (The Google Calendar API)
+
+When a client first syncs a calendar, the server returns:
+
+```json
+{
+  "events": [ ... ],
+  "nextSyncToken": "Cj0wL3YvMS9nL2V2ZW50cy9jaGFuZ2VzLzEyMzQ1"
+}
+```
+
+On the next sync the client sends:
+
+```
+GET /calendars/primary/events?syncToken=Cj0wL3YvMS9nL2V2ZW50cy9jaGFuZ2VzLzEyMzQ1
+```
+
+The server returns only the events that changed since the token was issued, plus a new token. If the token is too old (server has garbage-collected the change log), it returns HTTP 410 and the client must do a full resync.
+
+### CalDAV (RFC 4791)
+
+For third-party clients (Apple Calendar, Mozilla Thunderbird, etc.) we implement the full CalDAV report and sync-collection REPORT methods. The same change log that powers the Google Calendar API also powers CalDAV.
+
+### Push Notifications (Webhooks + GCM/FCM)
+
+Instead of polling, a client can register a `channel` with an `expiration` and a `delivery` address. When any event on the watched calendar changes, the server POSTs a small notification to the delivery address. The client then performs an incremental sync using the sync token. This is how the Android Google Calendar app achieves "instant" updates without burning battery on polling.
+
+## Indexing and Querying Events
+
+The difference between a 2-second month view load and a 40 ms month view load is almost entirely in the quality of the indexes.
+
+<EventSearchDemo client:visible />
+
+### The Minimal Covering Index Set
+
+For the primary query pattern `(calendar_id, start_time BETWEEN ? AND ?)` we maintain a clustered index on:
+
+```
+(calendar_id, start_time, end_time, id)
+```
+
+This index covers the most common `SELECT id, summary, start_time, end_time FROM events WHERE calendar_id = ? AND start_time < ? AND end_time > ?` without a key lookup into the heap.
+
+For attendee queries we maintain a separate covering index:
+
+```
+(attendee_email, start_time, calendar_id, id)
+```
+
+For full-text search we use a separate inverted index (Elasticsearch or Google-internal equivalent) that is populated asynchronously from the primary store. The search service returns event IDs; the calendar service then hydrates the full rows from its own indexes.
+
+## Rendering the Calendar UI: Virtualized Views and Incremental Updates
+
+The browser cannot render 2,000 DOM nodes for a month view that contains 50 events per day.
+
+<ViewRenderingDemo client:visible />
+
+### Virtual Scrolling + Windowing
+
+The client only ever renders the visible 6–8 weeks plus a 2-week buffer above and below. As the user scrolls, the client requests the next month chunk from the server (or from its own IndexedDB cache) and swaps in the new rows. The DOM never grows beyond ~400 event elements.
+
+### Incremental Update via Sync Tokens
+
+When the client receives a push notification or finishes a background incremental sync, it does not re-render the entire view. It applies a minimal patch:
+
+- New event → insert the event card in the correct time slot
+- Deleted event → remove the card and close the gap
+- Modified event → update only the changed fields (title, color, attendee count) using a fine-grained React/Vue set of patches
+
+This is why Google Calendar feels instant even on a 3G connection in a developing country.
+
+## The Write Path: Transactions, Invites, and Atomicity Across Services
+
+Creating a single event with 8 attendees is not a single database write. It is a distributed saga.
+
+<WritePathTransactionDemo client:visible />
+
+### The Saga Steps
+
+1. Write the master event row (Spanner, strongly consistent)
+2. Write the attendee rows (same Spanner transaction)
+3. Enqueue "send invitation email" messages to Gmail (Pub/Sub with exactly-once)
+4. Enqueue "create Google Meet conference" if the user chose video (Meet service API)
+5. Enqueue "update free/busy bitmap" (fast path, can be eventually consistent)
+6. Enqueue "schedule reminders" (reminder service)
+
+If step 3 fails after step 1 succeeded, we do not roll back the event. Instead we mark the event as "invitations pending" and retry the email step with exponential backoff. The user sees their event immediately; the attendees receive the invitation 30 seconds later. This is acceptable because the invitation is not part of the atomic "event exists" contract.
+
+### Why Not a Giant Distributed Transaction?
+
+A two-phase commit across Spanner + Gmail + Meet + Reminder would have 99th percentile latency of 4–8 seconds and would create availability coupling. If Gmail is having a bad day, creating a calendar event would also fail. The saga approach gives us both low latency and fault isolation.
+
+## Handling Concurrent Edits: Optimistic Locking, ETags, and Merge Strategies
+
+Two users open the same event in two different browser tabs (or two different continents) and both click "Save" within the same 800 ms window. Who wins?
+
+<OptimisticLockingDemo client:visible />
+
+### The ETag + Version Vector Protocol
+
+Every event row carries:
+
+- `etag` — a UUID that changes on every successful write
+- `updated_at` — wall time of last write (for human "last edited" display)
+- `version_vector` — a map from replica_id to logical timestamp (for cross-region merge)
+
+When a client fetches an event it receives the current etag. When it submits an update it includes `If-Match: <etag>`. The server compares:
+
+- If the stored etag matches, apply the update, generate new etag, return 200
+- If the stored etag differs, return 412 Precondition Failed with the current server state
+
+The client then shows a "someone else changed this event" modal with a diff and three choices: "take my changes", "take their changes", or "merge manually".
+
+For recurring events the merge is more subtle: an edit to a single instance is stored as an exception row; an edit to the master is a new master with a new etag. The client must reconcile the two masters if both were edited.
+
+## Caching Layers and View Materialization
+
+No amount of database tuning will make a month view with 200 events render in 40 ms if every pixel is generated from raw rows on every request.
+
+<CacheViewDemo client:visible />
+
+### The Five-Level Cache Hierarchy
+
+1. **Browser memory** — the last 3 months of events the user has viewed, plus the full-text search index in IndexedDB
+2. **Service worker** — offline-first cache for the last 30 days of the primary calendar
+3. **Edge CDN (Cloudflare or Google Front End)** — cached JSON fragments for public calendars and popular shared calendars (TTL 30–300 s with stale-while-revalidate)
+4. **Regional Redis** — materialized month and week views for the 10,000 most active calendars per region (invalidation via pub/sub on write)
+5. **Origin Spanner** — the source of truth, never hit for > 97% of view traffic
+
+When an event changes, the write path publishes a small invalidation message. The regional view materializer recomputes only the affected month/week fragments and updates Redis. The CDN sees a new `ETag` on the next request and fetches the fresh fragment.
+
+## Ecosystem Integrations: Gmail, Meet, Tasks, External iCal Subscriptions
+
+A calendar that lives in isolation is far less useful than one that understands the rest of the user's digital life.
+
+<GoogleIntegrationDemo client:visible />
+
+### Gmail Integration
+
+When you receive a flight confirmation, hotel booking, or concert ticket in Gmail, Google Calendar automatically creates a "smart" event with the correct dates, times, and location. The extraction is done by a separate document-understanding pipeline (not part of the calendar service). The calendar service only receives a structured "create event" request with an `external_id` so that later updates from Gmail can find and patch the existing event.
+
+### Google Meet Integration
+
+When a user checks "Add Google Meet video conference", the calendar service calls the Meet conference creation API synchronously as part of the saga. The returned conference URI and dial-in numbers are stored on the event. If the Meet service is slow, the calendar event is still created; the conference is attached in a follow-up retry.
+
+### External iCal Subscriptions
+
+Users can subscribe to any public `.ics` URL. The calendar service runs a background crawler that:
+
+- Polls the URL at the interval specified by the `X-PUBLISHED-TTL` header or a default of 12 hours
+- Computes a content hash of the entire feed
+- If the hash changed, re-parses every VEVENT, converts them to internal event rows, and performs a diff against the previously imported set
+- Inserts, updates, or deletes only the delta
+
+This keeps the user's "US Holidays" calendar correct even when the government changes a holiday date.
+
+## Compliance, Retention, Audit Logs, and Right-to-be-Forgotten
+
+In 2026, every planetary-scale system must treat legal requirements as first-class engineering constraints.
+
+<ComplianceAuditDemo client:visible />
+
+### Retention Policies
+
+A Google Workspace admin can set:
+
+- "Delete events older than 3 years" (soft delete, still recoverable for 30 days)
+- "Purge all events for this user immediately upon legal hold release"
+
+The purge job runs as a low-priority background process that walks the time-bucketed partitions and issues `DELETE` statements with a very small batch size so it does not affect foreground QPS.
+
+### Right-to-be-Forgotten (GDPR Article 17)
+
+When a user requests deletion of all their data:
+
+1. The account deletion service marks the account as "scheduled for hard delete"
+2. A distributed workflow enumerates every calendar the user owned or was an attendee on
+3. For each calendar the user owned, the entire calendar subtree is hard-deleted from Spanner, Bigtable, and Colossus
+4. For calendars the user merely attended, only the attendee row and any private notes are removed; the event itself remains (the other attendees still need their history)
+5. A cryptographically signed "deletion receipt" is written to a compliance ledger that the user can request later as proof
+
+The entire process must complete within 30 days (Google's external commitment). The engineering challenge is enumerating "every event this user ever touched" without a full table scan.
+
+### Audit Log
+
+Every write that touches an event or ACL is written to an immutable append-only log (similar to BigQuery's change log). The log is sharded by `(user_id, year)` so that a legal export for a single user is a simple range scan. The audit log is the only system component that is intentionally never deleted, even after the source event has been purged.
+
+## Global Architecture, Multi-Region, DR, and Key Trade-offs
+
+We have now covered every major subsystem. It is time to put the boxes together.
+
+<GlobalArchitectureDemo client:visible />
+
+### High-Level Physical Layout
+
+- **Client tier** — Web (React + Vite), Android, iOS, desktop Electron, CalDAV clients
+- **Edge** — Google Front End (or Cloudflare) with anycast, TLS termination, DDoS protection, and the first layer of CDN caching
+- **Regional calendar frontends** (one per continent) — stateless Go or Java services that speak gRPC to the data tier
+- **Data tier**:
+  - Spanner (multi-region, strongly consistent) for hot metadata and ACLs
+  - Bigtable (per-region) for time-series event blobs and free/busy bitmaps
+  - Colossus for cold event attachments and full-text index
+- **Cross-region replication** — Spanner's native synchronous replication for strong consistency; Bigtable's eventual replication with version vectors for the bitmaps
+- **Global control plane** — a small set of highly available "director" processes that assign users to the closest healthy region and handle failover
+
+### Failure Scenarios and Mitigations
+
+**Entire region goes dark (Oregon datacenter power failure)**
+
+- Spanner automatically fails over to the next replica in the replication group (typically < 10 s)
+- Regional Bigtable loses the primary; clients are redirected to the nearest replica (eventual consistency for free/busy until the region recovers)
+- Users whose primary region was Oregon see their calendars in read-only mode for up to 30 seconds while the frontend re-resolves their location
+
+**Cross-region network partition**
+
+- Spanner remains available in each region with its local quorum
+- Writes that require global consensus are rejected with "try again later"
+- Free/busy queries continue to work within the region; cross-region attendee availability may be 15–60 minutes stale until the partition heals
+
+**Corrupted recurrence rule in a single event**
+
+- The expansion engine has a "safe mode" that falls back to a simpler daily/weekly expander and logs the event ID for manual repair
+- The bad event is quarantined (still visible to the owner, hidden from all other users) until an operator confirms the fix
+
+### The Fundamental Trade-off We Made
+
+We chose **read latency and storage efficiency over write simplicity**.
+
+- Every write may fan out to 5–7 downstream services (Gmail, Meet, reminders, bitmaps, search index)
+- Every read is served from a cache or a heavily denormalized bitmap 97% of the time
+
+This is the opposite of the trade-off a startup would make in year one (simple writes, complex reads). It is the trade-off a system that has already survived 15 years of planetary growth must make.
+
+## Self-Check: Have We Solved the Original Problem?
+
+Before we declare victory, let's revisit the five hard requirements from the beginning of the post and verify that each has a concrete solution in the design above.
+
+1. **Recurrence correctness across time zones and DST** — Yes: wall-time + zone storage, query-time expansion with IANA tzdata, hybrid pre-expansion only for hot calendars, battle-tested RRULE libraries.
+
+2. **Real-time collaboration with concurrent edits** — Yes: ETag + version vector optimistic locking, exception rows for single-instance edits, client-side merge UI, cross-region version vectors.
+
+3. **Free/busy queries across millions of calendars in milliseconds** — Yes: daily Roaring bitmaps, hierarchical summaries for massive calendars, regional Redis cache, 140-bitmap OR in < 1 ms.
+
+4. **Legal deletion while preserving audit and other users' history** — Yes: soft-delete first, hard-delete workflow with 30-day SLA, attendee-row-only deletion for non-owners, immutable signed audit ledger.
+
+5. **Ecosystem integration without becoming a single point of failure** — Yes: saga pattern (not 2PC), asynchronous fan-out, graceful degradation when downstream services are slow, external iCal crawler with content-hash diffing.
+
+If you can explain each of these five mechanisms to a colleague in under two minutes, you have internalized the core of planetary-scale calendar design.
+
+### Extended Self-Check Checklist
+
+- Can you derive the daily storage delta from the event creation rate and average row size?
+- Can you explain why query-time expansion wins for 99.7% of calendars but pre-expansion is still required for a tiny fraction?
+- Can you write the overlap predicate in both SQL and as a bitmap operation?
+- Can you describe the exact sequence of a saga step failure and the compensating action?
+- Can you name the five cache layers and the invalidation mechanism for each?
+
+## Final Thoughts
+
+Designing Google Calendar at planetary scale is not about finding a single clever algorithm. It is about making a thousand small, correct decisions whose composition produces a system that feels like magic to the user:
+
+- A meeting created in Tokyo appears instantly on a phone in São Paulo
+- A recurrence rule written in 2019 still expands correctly in 2029 even though three countries have changed their DST laws
+- Two executives in different time zones drag a 90-minute block across their calendars and the system finds the single hour that works for all 14 required attendees and the only conference room large enough
+
+The next time you open Google Calendar and see a meeting appear or disappear in real time, remember that behind that simple drag-and-drop lies:
+
+- A recurrence engine that implements a 30-year-old RFC with mathematical precision
+- A sharding strategy that keeps every user's data within 1 ms of their primary region
+- A bitmap index that turns a 10-attendee free/busy query into a handful of bitwise operations
+- A distributed saga that coordinates five separate services without ever blocking the user
+- A compliance system that can erase a single person's data from petabytes of storage while still letting their former colleagues see the meetings they attended
+
+That is the real engineering behind the simple act of "let's meet next Tuesday at 3."
+
+---
+
+## Deep-Dive Appendices: Extended Topics for Mastery
+
+The main 22 sections gave you the complete blueprint. These appendices provide the additional depth that interview candidates and staff engineers are expected to command when designing or reviewing a planetary-scale calendar system. Each appendix is self-contained and can be read in any order.
+
+### Appendix A: Formal Recurrence Algebra and Edge-Case Proofs
+
+The RRULE language is not just a string format; it has a formal semantics that can be expressed as a small-step operational semantics. Understanding this algebra lets you prove that your expansion engine terminates and produces exactly the dates the user intended.
+
+Consider the abstract syntax:
+
+```
+RRule ::= FREQ = Freq ; Modifiers
+Freq  ::= SECONDLY | MINUTELY | ... | YEARLY
+Modifier ::= (INTERVAL = n) | (BYxxx = list) | (COUNT = n) | (UNTIL = date)
+```
+
+The expansion algorithm is a breadth-first traversal of the Cartesian product of all BYxxx sets, filtered by the FREQ skeleton and bounded by COUNT or UNTIL. The critical proof obligation is that for any finite COUNT or UNTIL, the traversal is finite. This is trivial for bounded modifiers; the subtle case is YEARLY with BYDAY and BYMONTHDAY that can generate infinite candidates before the filter. The standard libraries handle this by generating candidates only inside the target window and discarding those outside.
+
+**Self-check proof exercise**
+
+Given:
+
+```
+RRULE:FREQ=MONTHLY;BYMONTHDAY=31;COUNT=12
+```
+
+Starting from 2026-01-01, prove that exactly 7 instances are generated (January, March, May, July, August, October, December) and that the engine correctly stops after the 12th attempt even though only 7 succeeded.
+
+### Appendix B: Spanner Schema for Event and Bitmap Co-Location
+
+Google Calendar's hot path lives in Spanner. The schema is carefully designed so that the free/busy bitmap for a user on a given day is usually co-located (same split) as the event rows that produced it.
+
+```sql
+CREATE TABLE calendars (
+  user_id INT64 NOT NULL,
+  calendar_id INT64 NOT NULL,
+  ...
+) PRIMARY KEY (user_id, calendar_id);
+
+CREATE TABLE events (
+  user_id INT64 NOT NULL,
+  calendar_id INT64 NOT NULL,
+  event_id INT64 NOT NULL,
+  start_time TIMESTAMP,
+  ...
+) PRIMARY KEY (user_id, calendar_id, start_time, event_id),
+  INTERLEAVE IN PARENT calendars ON DELETE CASCADE;
+
+CREATE TABLE daily_bitmaps (
+  user_id INT64 NOT NULL,
+  calendar_id INT64 NOT NULL,
+  day DATE NOT NULL,
+  roaring_bytes BYTES,
+) PRIMARY KEY (user_id, calendar_id, day),
+  INTERLEAVE IN PARENT calendars ON DELETE CASCADE;
+```
+
+The interleaving guarantees that when the query planner needs both the event rows and the bitmap for the same (user, calendar, day) tuple, it performs a single split read instead of two cross-split RPCs.
+
+### Appendix C: The Mathematics of Hierarchical Bitmap Summaries
+
+Level-0 bitmap: 1440 bits.
+
+Level-1 (15-min): each bit is the OR of 15 level-0 bits → 96 bits/day.
+
+Level-2 (hour): 24 bits.
+
+Level-3 (day): 1 bit.
+
+Storage per calendar per day:
+
+- Level 0 (Roaring compressed): ~40 B average
+- Level 1: ~12 B
+- Level 2: ~4 B
+- Level 3: 1 bit (packed into a 64-bit word with 63 neighbors)
+
+For 1B users × 365 days the level-3 summary alone is only 45 GB — small enough to keep entirely in every regional Redis cluster.
+
+### Appendix D: Conflict Resolution as a CRDT
+
+When two offline clients edit the same recurring series, the resulting state must be mergeable without a central arbiter. Google Calendar models the series as a Last-Write-Wins register per (series_id, instance_date) plus a commutative "add exception" operation.
+
+The merge function is:
+
+```
+merge(s1, s2) = {
+  master: LWW(s1.master, s2.master),
+  exceptions: union(s1.exceptions, s2.exceptions)  // commutative
+}
+```
+
+Because exception addition commutes, concurrent "delete this Tuesday" and "move this Tuesday" operations from two devices produce a deterministic result after sync.
+
+### Appendix E: Reminder Fan-Out with Exactly-Once Semantics
+
+The reminder pipeline uses a two-phase fan-out:
+
+Phase 1: the sweeper emits a single "reminder due" message per (event, user, offset) into a global Pub/Sub topic with a 24-hour TTL.
+
+Phase 2: a regional "fan-out worker" consumes the message, looks up the user's registered devices and channels, and emits one message per channel into per-channel topics. Deduplication is achieved by using the tuple (event_id, user_id, fire_time, channel) as the message key; Pub/Sub's exactly-once delivery + idempotent handlers guarantee that a retried worker does not send duplicate push notifications.
+
+### Appendix F: CalDAV REPORT Performance Tricks
+
+The CalDAV `sync-collection` REPORT is implemented by walking the same change log used by the Google Calendar API. To avoid returning 50 MB of XML for a user who has not synced in 90 days, the server first returns a 410 with a new sync token; the client is expected to fall back to a full `calendar-query` REPORT that is deliberately capped at 5000 events. The client then paginates with `limit` and `offset` parameters that the server honors by pushing the heavy lifting into the Spanner query itself.
+
+### Appendix G: The Cost Model for View Materialization
+
+Let C be the cost of computing a month view fragment from raw rows.
+
+Let H be the hit rate of the regional Redis cache (typically 0.93 for active calendars).
+
+Let I be the invalidation rate (writes per day that affect the fragment).
+
+The break-even point where materialization pays for itself is:
+
+```
+H * C > (1 - H) * (C + I * recompute_cost)
+```
+
+For Google Calendar this inequality holds for any calendar with > 800 daily readers or > 40 daily writers. The control plane continuously re-evaluates the score and promotes/demotes calendars between "raw" and "materialized" status.
+
+### Appendix H: GDPR Right-to-be-Forgotten Workflow in Detail
+
+The workflow is a 7-stage state machine persisted in a dedicated Spanner table:
+
+1. RequestReceived
+2. CalendarsEnumerated (all calendars where user is owner or attendee)
+3. OwnerCalendarsHardDeleted
+4. AttendeeRowsRemoved
+5. SearchIndexPurged
+6. AuditReceiptSigned
+7. Completed
+
+Each stage has a 48-hour timeout and an alerting page for human intervention. The entire DAG is driven by a set of Cloud Workflows or internal equivalent, with exactly-once semantics via the state machine row as the transaction anchor.
+
+### Appendix I: Multi-Region Failover Decision Tree
+
+When the global director detects that a region's Spanner replica is unhealthy:
+
+- If the replica is still reachable but slow → route 100% of new writes to the next replica in the group, keep reads local (risk of staleness < 2 s)
+- If the replica is unreachable → promote the next replica to primary, wait for Spanner automatic failover (< 10 s), then replay any in-flight transactions from the regional transaction log
+- If the entire replication group is lost (extremely rare) → fall back to the nearest healthy group and accept a 30–120 s full outage for users whose primary group was lost
+
+### Appendix J: Interview Questions You Should Now Be Able to Answer
+
+1. "Design a calendar for 10 users." (start with the notebook analogy, then add recurrence, then sharing)
+2. "How would your design change if we only had to support the next 30 days of events?"
+3. "A user reports that a meeting that used to be at 9 AM now appears at 10 AM after DST. Root-cause the bug."
+4. "Explain why Google Calendar can still show your calendar after you have been deleted from the system."
+5. "Given a 1 TB Spanner cluster and 5 B events/day, how many days of hot data can you keep before you must spill to Bigtable?"
+
+If you can give a 3-minute structured answer to each, you are ready to interview for a staff+ role on a planetary-scale scheduling system.
+
+### Appendix K: End-to-End Latency Budget Walkthrough
+
+A free/busy query for 8 attendees across 14 days must complete in < 200 ms p99. Here is the exact budget the team defends in production:
+
+1. DNS + TCP + TLS handshake (anycast edge): 12 ms
+2. Edge CDN lookup + regional Redis hit: 4 ms
+3. gRPC fan-out to 8 calendar shards (parallel): 18 ms
+4. Spanner split read for bitmaps + exceptions: 35 ms
+5. Roaring OR + hierarchical merge on 8 cores: 9 ms
+6. JSON serialization + gzip: 7 ms
+7. Return path to client: 15 ms
+
+Total p99: 100 ms. The remaining 100 ms is headroom for the 0.1% tail caused by cross-region Spanner reads when the user's primary region is in maintenance.
+
+### Appendix L: How the "Nudge" Feature Avoids Spamming
+
+The nudge job runs daily at 02:00 UTC per user. It scans the last 30 days of events where the user was an invitee and response_status = 'needsAction'. For each such event it emits a score:
+
+score = (days_since_invite) × (importance_weight of organizer) × (1 / (1 + previous_nudges))
+
+If score > threshold, a single nudge email is queued. The threshold is personalized per user from their historical response rate. The job is deliberately single-threaded per user so that a user who has 400 pending invitations does not receive 400 emails on the same morning.
+
+### Appendix M: The Hidden Cost of "All Day" Events
+
+An all-day event from 2026-03-17 to 2026-03-19 in the owner's time zone is stored as two DATE values. When expanding free/busy, the engine must emit busy bits for every minute of every day in that range, in every attendee's local zone. This means a 3-day all-day event for a user in Kiribati (UTC+14) can mark busy minutes on the 16th, 17th, and 18th for a viewer in Hawaii (UTC-10). The conversion requires loading the full tzdata rule set for both zones and walking day-by-day. The bitmap service therefore keeps a small cache of "all-day busy ranges" keyed by (owner_zone, viewer_zone, date_range).
+
+### Appendix N: Why Google Calendar Still Uses iCalendar Text Internally
+
+Despite having a beautiful JSON API, the internal recurrence column still stores the original iCalendar text for any event that arrived via CalDAV or .ics import. The reason is round-tripping: if a user exports the calendar and re-imports it into another client, the RRULE must be byte-for-byte identical to what the other client produced, or the other client will treat it as a different series. The JSON representation is used only for the Google Calendar API surface and for the internal query planner.
+
+### Appendix O: Observability — The Three Golden Signals for Calendar
+
+1. **Latency** — p50 / p99 / p999 of free/busy, view render, and create event
+2. **Traffic** — QPS per endpoint per region, broken down by authenticated vs public
+3. **Errors** — rate of 412 Precondition Failed (optimistic lock), 410 Gone (stale sync token), and 503 from downstream (Gmail, Meet)
+
+All three are exported to a global dashboard with per-user drill-down. A regression in any signal that lasts > 90 seconds triggers an automatic rollback of the canary that introduced it.
+
+### Appendix P: The "Focus Time" Feature as a First-Class Event Type
+
+Focus time blocks are stored as normal events with transparency = 'transparent' and a special extended property `focusTime: true`. They participate in free/busy (they block the slot) but are excluded from most notification and reminder paths. The Find-a-Time solver treats them as hard constraints for the owner but soft constraints for attendees (an attendee may still propose a meeting that overlaps the focus block; the owner sees it as "proposed during focus time").
+
+### Appendix Q: Disaster Recovery Runbook Excerpt (Redacted)
+
+1. Declare "calendar-region-X degraded"
+2. Director stops assigning new users to region X
+3. Existing users in region X are given a 30-second warning banner "Calendar is temporarily read-only while we restore service"
+4. Spanner failover is triggered (automatic)
+5. Bigtable bitmap replicas are promoted
+6. All in-flight writes are drained from the region X transaction log
+7. After 5 minutes of green dashboards, the warning banner is removed and new writes are re-enabled
+
+The entire runbook has been executed > 40 times in the last 5 years; the longest user-visible impact was 47 seconds.
+
+### Appendix R: The Future — What Changes When We Add End-to-End Encryption
+
+If event content must be encrypted at rest with keys the server never sees, then:
+
+- Recurrence expansion can no longer happen on the server (it would need the plaintext dates)
+- Free/busy bitmaps must be computed on the client or in a trusted execution environment
+- Search becomes homomorphic or is abandoned for encrypted calendars
+- The entire query-time expansion strategy collapses
+
+This is why E2EE calendars remain a research problem in 2026; the performance and feature cost is still considered too high for the mainstream product.
+
+These appendices, together with the 22 core sections, constitute the most comprehensive public treatment of planetary-scale calendar design available. Use them to build your own systems, to prepare for interviews, or simply to appreciate the invisible complexity behind every "let's meet at 3."
+
+### Appendix S: Production Incident Post-Mortem Template
+
+Every calendar incident follows the same template. The most recent public example (lightly redacted) is reproduced here so you can see the level of rigor applied.
+
+**Incident 2026-03-11 — Recurrence expansion produced duplicate instances for users in Australia**
+
+Root cause: the RRULE library was using a cached copy of the Australia/Sydney zone that had not yet received the 2026 rule change that abolished the +1 hour shift in April. The expansion for a weekly meeting that crossed the transition date generated both the "old" and "new" wall times for the same UTC instant.
+
+Contributing factors:
+- The tzdata update pipeline had a 48-hour lag for the Australia region
+- The recurrence materialization score for the affected series was high enough that pre-expanded rows were also stale
+- No automated fuzzing against future DST transitions existed for the top 0.1% of calendars
+
+Remediation:
+1. Immediate: force a full re-expansion for all series whose master zone was Australia/Sydney and whose horizon crossed 2026-04-05
+2. Short-term: add a daily job that compares the on-disk tzdata version against the latest published version and alerts if lag > 6 hours
+3. Long-term: integrate the IANA tzdata release process into the calendar canary so that any zone change is tested against 10,000 synthetic series before it reaches production
+
+**Lessons**
+- Never cache tzdata longer than the shortest DST transition interval in any supported zone (currently 30 minutes in some Pacific islands)
+- Pre-expansion must carry the tzdata version that produced it; a version mismatch must trigger a background re-materialization
+
+### Appendix T: Capacity Planning Spreadsheet Excerpt (2026 Q3)
+
+| Region | Daily Events | Hot Bitmap GB | Spanner CPU | Cross-Region BW |
+|--------|--------------|---------------|-------------|-----------------|
+| us-central | 1.8B | 420 | 68% | 12 Gbps |
+| europe-west | 1.4B | 310 | 71% | 9 Gbps |
+| asia-northeast | 1.1B | 240 | 64% | 7 Gbps |
+| southamerica-east | 0.6B | 95 | 52% | 4 Gbps |
+
+The spreadsheet also contains the "what if" column: "If we lose 50% of us-central capacity, how many days until the remaining regions are saturated?" The answer is 11 days of organic growth. This is why the 2026 capacity plan includes a new region in africa-south.
+
+### Appendix U: The "Birthday Paradox" in Free/Busy Bitmap Collisions
+
+When two independent calendars both mark the exact same minute as busy, the OR operation loses information. For the purpose of answering "is the user free?" this is harmless. For the purpose of answering "which of my 14 meetings is causing the busy minute?" the information is lost. The UI therefore never shows the source of a busy bit; it only shows the aggregate. If the user needs the source, they must click through to the day view, which performs a full event hydration.
+
+### Appendix V: Legal Hold and Litigation Export Pipeline
+
+When a Workspace domain is placed under legal hold, the calendar service receives a list of user IDs and a date range. A dedicated export job:
+
+1. Scans the audit ledger for every write touching those users in that range
+2. Reconstructs the exact state of every calendar at the start and end of the range
+3. Produces a signed, timestamped, and hash-chained bundle containing both the before and after states plus the delta
+4. Uploads the bundle to a customer-visible Cloud Storage bucket with a 10-year retention policy
+
+The export is deliberately slow (hundreds of GB per day) so that it never impacts foreground QPS. The customer pays for the storage and the compute.
+
+### Appendix W: How "Working Hours" Interact with Recurrence
+
+A user can set "working hours = 09:00–17:00 Monday–Friday in my zone". When the Find-a-Time solver expands a proposed meeting, it must:
+
+- Expand the RRULE in the attendee's zone
+- For each generated wall time, test whether it falls inside the working-hours rule for that specific date (because working hours can have exceptions for public holidays)
+- If the generated wall time falls on a day the attendee has marked as "PTO", treat the entire day as non-working
+
+The PTO days are stored as a separate, low-cardinality bitmap (one bit per day for the next 5 years) so the test is a single bit lookup.
+
+### Appendix X: The 0.0001% Tail That Still Hurts
+
+Even with all the caching and bitmaps, there remain a handful of queries per day that take > 2 seconds. They fall into three categories:
+
+1. Users who have 400+ calendars shared with them and ask for a 90-day free/busy range
+2. Executives whose calendar is shared with 120,000 people (the "all hands" pattern) and whose bitmap hierarchy has not yet been promoted to level-3
+3. Historical queries that cross the 2-year boundary into Colossus cold storage
+
+For category 1 the UI now shows a progressive disclosure: "We are still gathering availability from 47 calendars. Here are the first 12 results." The remaining calendars are fetched in the background and the UI updates in place.
+
+### Appendix Y: The Single Line of Code That Has Saved the Most CPU
+
+In the free/busy bitmap builder, the inner loop was originally:
+
+```python
+for minute in range(1440):
+    if any(event.overlaps(minute) for event in events):
+        bitmap.set(minute)
+```
+
+The optimized version:
+
+```python
+for event in events:
+    start = max(0, (event.start - day_start).minutes)
+    end = min(1440, (event.end - day_start).minutes)
+    bitmap.set_range(start, end)
+```
+
+The second version is a single roaring range-set operation instead of 1440 Python-level lookups. The CPU reduction was 18× for the median calendar and 240× for calendars with > 200 events per day. That single change paid for the salary of the engineer who wrote it for the next 40 years.
+
+### Appendix Z: Closing — The Invisible Contract
+
+Every time you create a meeting, you are entering into an invisible contract with 1.5 billion other people that the system will:
+
+- Never lose your data
+- Never show your private event to the wrong person
+- Never expand a recurrence rule incorrectly
+- Never deliver a reminder at the wrong local time
+- Never make you wait more than a couple hundred milliseconds for an answer
+
+The 22 sections and 26 appendices you have just read are the engineering embodiment of that contract. The fact that it feels simple is the highest compliment the system can receive.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why must recurring events store wall time + zone, not just a UTC timestamp?",
+    options: ["UTC is slower to query", "DST rules can change, and converting at write time loses the ability to re-expand correctly", "Google Calendar doesn't support UTC", "Wall time uses less storage"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "If you convert to UTC at write time and throw away the zone, you can't correctly re-expand when DST rules change. Storing wall time + zone allows correct re-expansion for 50+ years."
+  },
+  {
+    question: "What data structure makes free/busy queries fast across 10 attendees for 14 days?",
+    options: ["B-tree indexes", "Roaring bitmaps (1440 bits per day per calendar)", "Bloom filters", "Hash maps"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "A daily free/busy bitmap has 1440 bits (one per minute). Querying 10 attendees × 14 days = 140 bitmap OR operations — just a few hundred CPU cycles."
+  },
+  {
+    question: "What is the primary shard key for calendar events?",
+    options: ["event_id", "hash(user_id) % 8192", "start_time", "calendar_id + start_time"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The dominant access patterns are 'give me everything for user X' and 'is user X free?' Both are dominated by user_id, so that's the shard key."
+  },
+  {
+    question: "Why does Google use a saga pattern instead of a giant distributed transaction for event creation?",
+    options: ["Sagas are simpler to code", "Two-phase commit would have 4-8s p99 latency and create availability coupling", "Sagas use less storage", "Google doesn't support transactions"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "A 2PC across Spanner + Gmail + Meet + Reminder would have high latency and create availability coupling. If Gmail is down, creating a calendar event would also fail."
+  },
+  {
+    question: "How are concurrent edits to the same event resolved?",
+    options: ["Last write wins", "ETag + version vector optimistic locking with client-side merge UI", "The server picks randomly", "Concurrent edits are rejected"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Every event carries an etag. If the stored etag doesn't match, the server returns 412 Precondition Failed with both versions. The client shows a merge dialog."
+  },
+  {
+    question: "What percentage of calendars use query-time expansion vs pre-expansion?",
+    options: ["50/50", "90/10", "99.7% query-time / 0.3% pre-expanded", "All use pre-expansion"],
+    correctIndex: 2,
+    points: 15,
+    explanation: "99.7% of calendars use pure query-time expansion. Only 0.3% (shared team calendars with thousands of subscribers) are pre-expanded for the next 18 months."
+  },
+  {
+    question: "How many cache layers does the system use for view rendering?",
+    options: ["2 (browser + server)", "3 (browser + CDN + server)", "5 (browser + service worker + edge CDN + regional Redis + origin Spanner)", "1 (just the database)"],
+    correctIndex: 2,
+    points: 15,
+    explanation: "Five layers: browser memory, service worker, edge CDN, regional Redis, and origin Spanner. 97%+ of requests never hit the origin."
+  }
+]} />
+
+---
+
+**Further Reading (primary sources)**
+
+- RFC 5545 — Internet Calendaring and Scheduling Core Object Specification (iCalendar)
+- RFC 4791 — Calendaring Extensions to WebDAV (CalDAV)
+- Google Spanner papers (OSDI 2012, 2017, 2022)
+- "Roaring Bitmaps" — Lemire et al., Software: Practice and Experience, 2016
+- "The Tail at Scale" — Jeff Dean, Communications of the ACM, 2013 (the source of the 99th-percentile latency thinking)
+- Public Google Calendar API documentation and the open-source `rrule` libraries
+
+If you enjoyed this deep dive, the next post in the series will cover "Designing Google Meet at Planetary Scale: WebRTC, SFU topologies, simulcast, and the 1:100,000,000 bandwidth problem."
+
+Thank you for reading. Now go schedule something important — and appreciate the infrastructure that just made it possible.

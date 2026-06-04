@@ -13,6 +13,7 @@ import UploadPipelineDemo from '../../components/demos/UploadPipelineDemo'
 import DownloadSyncDemo from '../../components/demos/DownloadSyncDemo'
 import FileMetadataDbDemo from '../../components/demos/FileMetadataDbDemo'
 import FileStorageArchitectureDemo from '../../components/demos/FileStorageArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Think about your Dropbox folder right now. Every file you drop in it appears on your laptop, your phone, your work computer, and the web. Make an edit on one device and the change propagates everywhere in seconds. Share a folder with a colleague and they see updates in real time. Accidentally delete something and you have 30 days to restore it.
 
@@ -444,6 +445,60 @@ A single-region deployment risks data loss and high latency for remote users. We
 - DNS-based routing (geo-LB) sends users to the nearest region
 
 The trade-off is that cross-region replication introduces a few seconds of delay before a file uploaded in US-East appears in EU-West. For most users this is acceptable.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why is 4 MB a common chunk size for cloud file storage?",
+    options: ["It matches the OS page size perfectly", "It balances dedup/delta sync granularity against metadata overhead", "It is the maximum S3 object size", "It ensures all files divide evenly"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "4 MB balances the trade-off between granularity (smaller chunks enable better dedup and delta sync) and overhead (more chunks means more metadata rows to manage)."
+  },
+  {
+    question: "How does content-addressable storage enable deduplication?",
+    options: ["Files are stored by their path on disk", "Chunks are stored at a path derived from their SHA-256 hash, so identical chunks share the same physical storage", "Deduplication requires a central database lookup", "Content addressing only works for text files"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Each chunk is stored at a path derived from its hash (e.g., s3://chunks/a7/ff/c6/f8/...). If two files have identical chunks (same hash), they reference the same physical storage. No separate deduplication step is needed."
+  },
+  {
+    question: "What does delta sync transfer when a 100 MB file has one line changed?",
+    options: ["The entire 100 MB file", "Only the changed chunks (typically 1-2 chunks out of dozens)", "A diff of the two file versions", "Nothing — delta sync only works on new files"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Delta sync detects which chunks changed by comparing new hashes against stored hashes. Only chunks with new hashes are uploaded. For a text file with a single-line change, typically 1-2 chunks change."
+  },
+  {
+    question: "When two devices simultaneously edit the same file and edits overlap, what does Dropbox do?",
+    options: ["It silently overwrites one version", "It creates a conflict copy for the second version and keeps the first version as latest", "It locks the file and asks the user to choose", "It merges the edits automatically using CRDTs"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Dropbox uses 'first version wins' — the first version the server sees becomes the latest. The second version becomes a conflict copy named 'file (Device X's conflicted copy date).pdf'. The user must manually resolve."
+  },
+  {
+    question: "What is the three-tier key hierarchy for encryption at rest?",
+    options: ["Public key, private key, session key", "Master key, file key, chunk key", "AES key, RSA key, HMAC key", "Encryption key, decryption key, signing key"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The hierarchy is: (1) Master key stored in HSM, rotated annually; (2) File key per file, encrypted with master key; (3) Each chunk encrypted with AES-256-GCM using the file key."
+  },
+  {
+    question: "How does the cursor-based sync protocol work?",
+    options: ["The client polls every 5 minutes for all files", "The client sends its last cursor, and the server returns all files that changed since that cursor", "The server pushes all file changes via WebSocket", "The client downloads the entire file tree on every sync"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The client sends an opaque cursor representing its last known state. The server returns all files changed since that cursor. The cursor is then updated to the latest state for the next sync."
+  },
+  {
+    question: "What triggers data movement between storage tiers (hot, warm, cold)?",
+    options: ["Manual operator intervention", "A lifecycle policy based on last-access timestamps", "The file's creation date only", "When the file size exceeds a threshold"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "A lifecycle policy automatically moves chunks between tiers based on last-access timestamps. Files accessed recently stay hot (SSD), files not accessed in 90 days move to warm (HDD), and files not accessed in a year move to cold (archive)."
+  }
+]} />
 
 ## Self-Check
 

@@ -17,6 +17,7 @@ import LayoutThrashDemo from '../../components/demos/LayoutThrashDemo'
 import AsyncDeferDemo from '../../components/demos/AsyncDeferDemo'
 import WillChangeDemo from '../../components/demos/WillChangeDemo'
 import FramePipelineDemo from '../../components/demos/FramePipelineDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## The Big Picture
 
@@ -267,6 +268,107 @@ If the total exceeds $16.67\text{ms}$, the frame is dropped — the user sees a 
 The 60fps target is a hard deadline. Tasks that cannot fit in the frame budget (like network responses) should be deferred to the next idle period via `requestIdleCallback` or a `setTimeout` with zero delay.
 
 <FramePipelineDemo client:visible />
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the six stages of the browser rendering pipeline, in order?",
+    options: [
+      "Parse, Compile, Execute, Optimize, Link, Run",
+      "DOM Construction, CSSOM Construction, Render Tree, Layout, Paint, Composite",
+      "Fetch, Decode, Cache, Render, Display, Buffer",
+      "HTML Parse, JavaScript Execute, Style Calculate, Reflow, Raster, Blend"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The six stages are: DOM Construction (HTML → DOM tree), CSSOM Construction (CSS → CSS tree), Render Tree (merge DOM + CSSOM, excluding hidden elements), Layout (compute geometry), Paint (fill pixels), and Composite (merge layers)."
+  },
+  {
+    question: "Why does a `<script>` tag without `async` or `defer` block HTML parsing?",
+    options: [
+      "Because the browser must wait for the script file to download from the network",
+      "Because JavaScript can modify the DOM and CSSOM, so the browser cannot safely continue parsing",
+      "Because scripts must be executed before any CSS is loaded",
+      "Because the browser only has one thread and cannot parse and execute simultaneously"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "JavaScript can modify the DOM (via document.write()) or read CSSOM properties (via getComputedStyle()). The browser cannot safely continue parsing HTML while a script might change the structure or styles. So it pauses DOM construction, fetches and executes the script, then resumes."
+  },
+  {
+    question: "Which CSS property change triggers only the Composite stage, skipping Layout and Paint?",
+    options: [
+      "Changing `width` from 100px to 200px",
+      "Changing `background-color` from red to blue",
+      "Changing `transform: translateX(100px)`",
+      "Changing `font-size` from 16px to 20px"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "The `transform` property only triggers compositing — the browser moves a pre-painted layer without recalculating layout or repainting. This is why `transform: translateX()` is the recommended way to animate movement. `width` triggers Layout, `background-color` triggers Paint, and `font-size` triggers both."
+  },
+  {
+    question: "What is layout thrashing, and how do you fix it?",
+    options: [
+      "When CSS animations conflict with JavaScript animations — fix by disabling one",
+      "When forced synchronous layout reads are interleaved with style writes in a loop — fix by batching all reads separately from writes",
+      "When too many elements have `position: fixed` — fix by using `position: absolute` instead",
+      "When the browser runs out of memory during layout — fix by reducing DOM depth"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Layout thrashing happens when you read a layout property (like offsetHeight) which forces a synchronous reflow, then write a style which invalidates layout, then read again. Each iteration forces another reflow. The fix is batching: do all reads first, then all writes."
+  },
+  {
+    question: "Why is `transform: translateX(100px)` faster than `left: 100px` for animations?",
+    options: [
+      "Transform uses GPU acceleration while left uses CPU",
+      "Transform only triggers the Composite stage, while left triggers Layout → Paint → Composite",
+      "Transform is a newer CSS property with better browser optimization",
+      "There is no meaningful performance difference — both move the element"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Changing `left` triggers Layout (recalculate geometry), then Paint (repaint), then Composite. Changing `transform` only triggers Composite — the browser moves the already-painted layer on the GPU. This skips the expensive Layout and Paint stages entirely."
+  },
+  {
+    question: "What is the Critical Rendering Path (CRP)?",
+    options: [
+      "The path CSS takes from the stylesheet to the computed style",
+      "The sequence of steps the browser must complete before painting the first frame: HTML parsing, CSSOM, Render Tree, Layout, Paint, Composite",
+      "The JavaScript event loop that processes user interactions",
+      "The network path from the CDN to the browser"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The CRP is the sequence of steps from receiving HTML to painting the first frame. Every render-blocking resource (CSS files, parser-blocking scripts) adds to the CRP length. Optimizing the CRP means inlining critical CSS, using async/defer on scripts, and removing unused CSS."
+  },
+  {
+    question: "At 60 frames per second, how much time does the browser have to complete each frame?",
+    options: [
+      "33.33ms",
+      "16.67ms",
+      "8.33ms",
+      "100ms"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "At 60fps, each frame has 1000ms / 60 = 16.67ms to complete the full pipeline: JavaScript execution, Style recalculation, Layout, Paint, and Composite. If the total exceeds 16.67ms, the frame is dropped and the user sees stutter."
+  },
+  {
+    question: "What happens to elements with `display: none` in the Render Tree?",
+    options: [
+      "They are included but painted with zero opacity",
+      "They are excluded entirely — the browser skips them during Layout and Paint",
+      "They are included but positioned off-screen",
+      "They are converted to `visibility: hidden` automatically"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Elements with `display: none` are excluded from the Render Tree. The browser treats them as if they don't exist — no Layout, no Paint, no Composite. This is different from `visibility: hidden`, which keeps the element in the Render Tree (it still occupies space) but skips painting it."
+  }
+]} />
 
 ## Self-Check
 

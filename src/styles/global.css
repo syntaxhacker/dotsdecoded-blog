@@ -233,6 +233,29 @@ pre code {
   flex-wrap: wrap;
 }
 
+.post-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: 6px;
+}
+
+.post-status-read {
+  background: var(--accent);
+}
+
+.post-status-completed {
+  background: var(--green);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+}
+
 .theme-toggle {
   background: none;
   border: 1px solid var(--border);

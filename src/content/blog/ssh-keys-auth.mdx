@@ -6,6 +6,7 @@ tags: ["ssh", "security", "devops"]
 ---
 
 import SshKeysDemo from '../../components/demos/SshKeysDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 SSH is something most developers use daily, but few understand how it actually works under the hood. You type `ssh user@server`, enter your password, and get a shell. It works, but it has real problems that compound fast as you manage more servers and more automation.
 
@@ -27,6 +28,107 @@ At no point does your private key leave your machine. The server never learns it
 Setting this up takes about two minutes. Generate a key pair with `ssh-keygen -t ed25519 -C "your-email@example.com"`. Ed25519 is the modern default -- faster, more secure, and shorter keys than RSA. Copy the public key to your server with `ssh-copy-id user@server`. That single command appends your public key to the server's `authorized_keys` file and sets the correct permissions. The next time you SSH in, you will not be asked for a password.
 
 A few practices that separate good setups from negligent ones. Always use a passphrase on your private key. Without one, anyone who gets a copy of your key file has full access to every server it unlocks. Use `ssh-agent` so you only type the passphrase once per session. Use different keys for different contexts -- a personal key for your servers, a separate key for work, another for CI/CD. Rotate keys that you no longer need and audit `authorized_keys` files on servers you manage. Finally, consider using `~/.ssh/config` to map hostnames, usernames, and key files so you can type `ssh prod` instead of `ssh -i ~/.ssh/work-key deploy@10.0.1.42`.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What type of cryptography does SSH key authentication rely on?",
+    options: [
+      "Symmetric cryptography — one key for encryption and decryption",
+      "Asymmetric (public-key) cryptography — a private key and a mathematically linked public key",
+      "Hash-based cryptography — only one-way hashes",
+      "Quantum cryptography — unbreakable encryption"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "SSH key authentication uses asymmetric cryptography. You generate a private key (never leaves your machine) and a public key (placed on servers). The mathematical relationship is one-way: anyone can encrypt with your public key, but only your private key can decrypt."
+  },
+  {
+    question: "During the SSH handshake, what does the server do with your public key?",
+    options: [
+      "It sends the public key back to your client",
+      "It generates a random challenge, encrypts it with your public key, and sends the encrypted challenge to your client",
+      "It stores the public key permanently in memory",
+      "It uses the public key to decrypt your password"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The server generates a random challenge string, encrypts it with your public key, and sends it to your client. Your client decrypts it with the private key and sends the result back. This proves you have the private key without ever transmitting it."
+  },
+  {
+    question: "Why is Ed25519 preferred over RSA for SSH key generation?",
+    options: [
+      "Ed25519 is older and more established",
+      "Ed25519 is faster, more secure, and produces shorter keys than RSA",
+      "Ed25519 uses symmetric encryption",
+      "RSA is no longer supported by SSH"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Ed25519 is the modern default. It's faster, more secure (resistant to side-channel attacks), and produces shorter keys (64 bytes vs 4096 bytes for equivalent RSA security). The command is `ssh-keygen -t ed25519`."
+  },
+  {
+    question: "Why should you always use a passphrase on your private key?",
+    options: [
+      "Passphrases make the key generate faster",
+      "Without a passphrase, anyone who gets a copy of your key file has full access to every server it unlocks",
+      "Passphrases are required by SSH protocol",
+      "Passphrases encrypt the public key"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A passphrase encrypts your private key at rest. Without one, if someone copies your key file (via theft, malware, or unauthorized access), they have full access to every server that key unlocks. Use ssh-agent so you only type the passphrase once per session."
+  },
+  {
+    question: "What command copies your public key to a remote server?",
+    options: [
+      "ssh-copy-key user@server",
+      "ssh-copy-id user@server",
+      "scp ~/.ssh/id_ed25519.pub user@server:~/.ssh/",
+      "ssh-keygen --copy user@server"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "`ssh-copy-id user@server` appends your public key to the server's `~/.ssh/authorized_keys` file and sets the correct permissions. The next time you SSH in, you won't be asked for a password."
+  },
+  {
+    question: "What happens if a client tries to SSH with a public key that is NOT in the server's authorized_keys file?",
+    options: [
+      "The server prompts for a password as a fallback",
+      "The handshake fails immediately — no password prompt, no second chance",
+      "The server generates a temporary key",
+      "The connection is established with read-only access"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If the public key is not in authorized_keys, the SSH handshake fails immediately. There is no password fallback (unless password authentication is also enabled). This is by design — the server only accepts pre-authorized keys."
+  },
+  {
+    question: "Why should you use different SSH keys for different contexts (personal, work, CI/CD)?",
+    options: [
+      "Different contexts require different encryption algorithms",
+      "Limiting blast radius — if one key is compromised, only the servers for that context are affected, not every server you access",
+      "SSH requires unique keys per server",
+      "Different keys generate faster than shared keys"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Using separate keys limits the blast radius of a compromise. If your CI/CD key leaks, only CI/CD servers are affected — your personal and work servers remain secure. It also makes auditing and rotation much simpler."
+  },
+  {
+    question: "What does ssh-agent do?",
+    options: [
+      "It generates SSH keys automatically",
+      "It caches your private key in memory so you only type the passphrase once per session instead of on every connection",
+      "It manages server-side authorized_keys files",
+      "It encrypts all network traffic"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "ssh-agent holds your decrypted private key in memory for the duration of a session. You type your passphrase once, and ssh-agent handles authentication for all subsequent SSH connections, eliminating the need to re-enter the passphrase."
+  }
+]} />
 
 ## Try It Yourself
 

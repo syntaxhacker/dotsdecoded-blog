@@ -12,6 +12,7 @@ import MonolithVsMicroDemo from '../../components/demos/MonolithVsMicroDemo'
 import ServiceDiscoveryDemo from '../../components/demos/ServiceDiscoveryDemo'
 import InterServiceCommDemo from '../../components/demos/InterServiceCommDemo'
 import CircuitBreakerDemo from '../../components/demos/CircuitBreakerDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Authentication vs Authorization
 
@@ -189,6 +190,107 @@ The **sidecar proxy pattern** is how most service meshes work. Every service ins
 - **Traffic management:** Canary deployments, A/B testing, traffic splitting, fault injection for chaos testing.
 
 **Istio** and **Linkerd** are the two major service mesh implementations. Istio is more feature-rich but more complex. Linkerd is lighter and simpler. Kubernetes has both as optional add-ons. In practice, adopt a service mesh when you have enough microservices (typically 10+) that managing inter-service communication manually becomes a burden. For smaller systems, a well-configured load balancer with circuit breakers in application code is usually sufficient.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the fundamental difference between authentication and authorization?",
+    options: [
+      "Authentication checks permissions; authorization verifies identity",
+      "Authentication verifies identity; authorization checks permissions",
+      "They are the same thing with different names",
+      "Authentication is for humans; authorization is for services"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Authentication answers 'who are you?' (verifying identity). Authorization answers 'what can you do?' (checking permissions). The flow is always: authenticate first, then authorize."
+  },
+  {
+    question: "Why does the OAuth 2.0 Authorization Code flow exchange the code on the backend instead of in the browser?",
+    options: [
+      "The browser cannot make HTTP requests",
+      "To keep the client secret hidden from the browser — code exchange happens server-to-server so the secret is never exposed to the client",
+      "The backend has a faster internet connection",
+      "Authorization codes only work in server-side languages"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The authorization code is exchanged on the backend so the client_secret is never exposed to the browser. If the code were exchanged client-side, the secret would be visible in network traffic or JavaScript, compromising security."
+  },
+  {
+    question: "When would you choose ABAC over RBAC?",
+    options: [
+      "When you have simple role-based org charts",
+      "When you need attribute-based policies like 'users in the EU can't access US-stored data' or 'only the document owner can edit during business hours'",
+      "When you want the simplest possible implementation",
+      "When you don't need any access control"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "ABAC evaluates policies based on user, resource, and environment attributes. It's more flexible than RBAC for complex rules like geographic restrictions, ownership-based access, or time-of-day constraints."
+  },
+  {
+    question: "What does the circuit breaker's Open state do?",
+    options: [
+      "All requests pass through normally",
+      "It allows a limited number of test requests through",
+      "All requests are immediately rejected with a fallback response — no network call is made to the downstream service",
+      "It restarts the failed service automatically"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "In the Open state, all requests are immediately rejected without making any network call. This protects the struggling downstream service and prevents the caller from wasting time on timeouts. After a timeout, it transitions to Half-Open."
+  },
+  {
+    question: "Why should you never hardcode secrets in source code?",
+    options: [
+      "It makes the code harder to read",
+      "Secrets in code end up in Git history, CI logs, and deployed artifacts — anyone with repository access can extract them",
+      "Hardcoded secrets run slower",
+      "Git automatically deletes files containing secrets"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Hardcoded secrets end up in Git history, CI logs, and deployed artifacts. Even if you remove them later, they persist in commit history. Use environment variables at minimum, or better yet, a secrets manager like HashiCorp Vault."
+  },
+  {
+    question: "What is the key advantage of microservices over a monolith when one service fails?",
+    options: [
+      "Microservices use less memory",
+      "Failure isolation — if one service crashes (e.g., notifications), other services (e.g., orders) continue operating normally",
+      "Microservices are easier to debug",
+      "Monoliths cannot be scaled"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Microservices provide failure isolation. If the notification service crashes, orders still process. In a monolith, a single failure can bring down the entire application."
+  },
+  {
+    question: "Why does TLS use asymmetric encryption for the handshake but symmetric encryption for data transfer?",
+    options: [
+      "Symmetric encryption is more secure",
+      "Asymmetric is slow but securely exchanges a key; symmetric is fast for bulk data — TLS combines both for the best of each",
+      "Asymmetric encryption does not work over HTTP",
+      "Symmetric keys can be shared publicly"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Asymmetric encryption is slow but solves the key exchange problem (the server's private key never leaves the server). Once a shared symmetric key is derived, symmetric encryption (AES) is used because it's much faster for bulk data."
+  },
+  {
+    question: "What is the sidecar proxy pattern in a service mesh?",
+    options: [
+      "A proxy that runs on a separate server from the service",
+      "Every service instance gets a proxy (like Envoy) deployed alongside it — all network traffic flows through the proxy transparently",
+      "A proxy that only handles incoming traffic",
+      "A backup proxy that activates only during failures"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "In the sidecar proxy pattern, every service instance has a proxy deployed alongside it. The service sends requests to localhost, and the proxy handles routing, encryption, retries, and circuit breaking transparently."
+  }
+]} />
 
 ## Self-Check
 

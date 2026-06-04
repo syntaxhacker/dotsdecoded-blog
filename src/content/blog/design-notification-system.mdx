@@ -11,6 +11,7 @@ import PushNotificationDemo from '../../components/demos/PushNotificationDemo'
 import TemplateEngineDemo from '../../components/demos/TemplateEngineDemo'
 import NotifPreferencesDemo from '../../components/demos/NotifPreferencesDemo'
 import NotifArchitectureDemo from '../../components/demos/NotifArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 You wake up at 3 AM. Your phone buzzes. Your server is on fire. A push notification tells you the news before your monitoring dashboard does. Across the world, a user resets their password and gets an email. Another user just got an SMS about a package delivery. All of these flow through a notification system — one of the most critical yet invisible infrastructure pieces in modern software.
 
@@ -612,6 +613,60 @@ async def record_push_open(notification_id: str, device_id: str):
 | Retry strategy | Exponential backoff with jitter | Fixed interval | Prevents thundering herd, faster recovery |
 | Push providers | FCM + APNS | Unified push API | Direct access to platform features |
 | Email providers | SendGrid + SES | Mailgun, Postmark | SendGrid for analytics, SES for cost |
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the three notification types and their key delivery differences?",
+    options: ["Push, pull, and broadcast — all delivered instantly", "Transactional (immediate, high reliability), Promotional (batched, off-peak), Alert (urgent, bypasses quiet hours)", "Email, SMS, and push — differentiated by cost only", "Read, unread, and archived — based on user interaction"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Transactional notifications (password resets) need <5s delivery with high reliability. Promotional (weekly digests) are batched during off-peak hours. Alerts (service outages) are urgent and must bypass quiet hours."
+  },
+  {
+    question: "What role does the idempotency key play in the notification pipeline?",
+    options: ["It encrypts the notification payload", "It prevents the same notification from being sent twice on network retries", "It authenticates the sender", "It determines which channel to use"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Every notification request carries an idempotency key stored in Redis/DDB with a TTL. Before processing, the server checks if the key was already processed and returns the cached result instead of resending."
+  },
+  {
+    question: "What happens when a push notification is sent to an invalid device token?",
+    options: ["The notification is retried indefinitely", "FCM/APNS returns a 410 status and the token is removed from the database", "The notification is silently dropped without logging", "The system sends the notification to all registered devices instead"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If FCM or APNS returns a 410 (Unregistered) or 400 (BadDeviceToken), the token is invalid (user likely uninstalled). The token is removed immediately to avoid wasting retries."
+  },
+  {
+    question: "Why use exponential backoff with jitter for retries instead of fixed intervals?",
+    options: ["It is simpler to implement", "It prevents the thundering herd problem when a provider recovers from an outage", "It ensures faster retries", "It reduces the total number of retries"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "When a provider recovers, fixed-interval retries from thousands of notifications would all hit the provider simultaneously (thundering herd). Exponential backoff with jitter spreads retries over time, allowing smoother recovery."
+  },
+  {
+    question: "Why should the notification system wrap external providers behind an abstraction layer?",
+    options: ["External providers cannot handle high throughput", "It allows swapping providers (SendGrid to SES) without changing business logic", "It reduces API latency", "It provides automatic load balancing across providers"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "An abstraction layer (EmailProvider interface) decouples business logic from provider-specific code. Swapping from SendGrid to SES requires only implementing the new provider class, not changing notification flow."
+  },
+  {
+    question: "What is the notification pipeline stage that prevents users from receiving unwanted messages?",
+    options: ["Validation", "Preference filtering", "Template rendering", "Rate limiting"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Preference filtering checks whether the user has opted in to this notification type on this channel. If the user disabled promotional emails, a promotional email is dropped silently before rendering."
+  },
+  {
+    question: "What happens to notifications that exhaust all retries?",
+    options: ["They are permanently lost", "They move to a Dead Letter Queue (DLQ) for manual operator intervention", "They are retried with a shorter backoff", "They are sent to the user via an alternative channel"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "After exhausting retries (typically 4 attempts with exponential backoff), notifications move to a DLQ. An operator dashboard alerts on DLQ depth. Operators can manually replay notifications after fixing the root cause."
+  }
+]} />
 
 ## Self-Check
 

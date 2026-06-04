@@ -10,6 +10,7 @@ import PaymentFlowDemo from '../../components/demos/PaymentFlowDemo'
 import DoubleEntryLedgerDemo from '../../components/demos/DoubleEntryLedgerDemo'
 import ReconciliationDemo from '../../components/demos/ReconciliationDemo'
 import PaymentArchitectureDemo from '../../components/demos/PaymentArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is a Payment System?
 
@@ -702,6 +703,95 @@ Here are questions to test your understanding. You should be able to answer each
 8. Why should amounts be stored in the smallest currency unit rather than as floats?
 9. What is the circuit breaker pattern and how does it protect downstream processors?
 10. How would you design the webhook retry mechanism to handle a 3-day outage of the merchant's server?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the difference between authorization, capture, and settlement in a payment?",
+    options: [
+      "Authorization moves money, capture confirms it, settlement records it",
+      "Authorization holds funds on the card, capture transfers them, settlement moves funds between banks in batch overnight",
+      "They are three names for the same process at different speeds",
+      "Authorization checks fraud, capture charges the card, settlement refunds if needed"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Authorization places a hold on the customer's card for a specific amount (no money moves yet). Capture actually transfers the authorized amount. Settlement is the final batch process where captured funds move from the customer's bank to the merchant's bank, typically overnight."
+  },
+  {
+    question: "Why is idempotency critical in a payment system?",
+    options: [
+      "It ensures payments are processed faster",
+      "It prevents double-charging when network retries occur after a timeout",
+      "It allows payments to be reversed automatically",
+      "It reduces the number of API calls needed"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "When a network timeout occurs after sending a charge request, the client doesn't know if the payment went through. Without idempotency, retrying risks double-charging. An idempotency key ensures the server returns the cached result instead of processing again."
+  },
+  {
+    question: "Why must amounts be stored in the smallest currency unit (cents) rather than as floats?",
+    options: [
+      "Floats use more memory than integers",
+      "Floating-point rounding errors cause accounting imbalances — $19.99 might become $19.9899999...",
+      "Banks require integer amounts for wire transfers",
+      "Database indexes work faster on integer columns"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Floating-point arithmetic cannot precisely represent decimal fractions like 0.01. Over millions of transactions, rounding errors accumulate and cause the ledger to go out of balance. Using integer cents eliminates this entirely."
+  },
+  {
+    question: "What is the purpose of an escrow account in a marketplace payment system?",
+    options: [
+      "To hold the platform's operating funds",
+      "To hold customer funds temporarily so the platform can refund if the merchant fails to deliver",
+      "To store payment method tokens for recurring billing",
+      "To calculate exchange rates for multi-currency transactions"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "In a marketplace, funds flow from customer to escrow, not directly to the merchant. The platform holds funds until service is delivered, then releases them to the merchant. This allows refunds if the merchant fails to deliver."
+  },
+  {
+    question: "How does 3D Secure shift fraud liability from merchant to issuer?",
+    options: [
+      "The merchant pays a higher processing fee in exchange for liability coverage",
+      "The bank authenticates the customer's identity, so if the transaction is fraudulent, the bank bears the loss instead of the merchant",
+      "3D Secure encrypts the card data so it cannot be intercepted",
+      "It requires the merchant to verify the customer's ID before processing"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "When a customer completes 3D Secure authentication (biometrics, SMS code, app notification), the bank takes responsibility for verifying the customer's identity. If the transaction turns out to be fraud, the issuer (bank) absorbs the loss, not the merchant."
+  },
+  {
+    question: "Why does reconciliation find discrepancies even when both sides think the system is correct?",
+    options: [
+      "Because one side always has a bug in their code",
+      "Because of webhook delivery failures, race conditions, manual adjustments, and fee mismatches between internal records and processor statements",
+      "Because banks intentionally round differently",
+      "Because the timezone differences cause timestamp mismatches"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Discrepancies arise from webhook delivery failures (event not received), race conditions (webhook arrives before API response), manual adjustments in processor dashboards, and fee mismatches where processor statements include interchange fees not recorded internally."
+  },
+  {
+    question: "What is the circuit breaker pattern and how does it protect downstream payment processors?",
+    options: [
+      "It automatically switches to a backup payment processor when one fails",
+      "It stops sending requests to a failing processor temporarily, preventing cascade failures and allowing recovery",
+      "It encrypts payment data to prevent interception",
+      "It queues payments for later processing when the network is restored"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When a processor's API starts returning 5xx errors, the circuit breaker 'trips' and stops sending requests, returning a temporary failure instead. After a cooldown, traffic is gradually restored. This prevents hammering a struggling service and allows it to recover."
+  }
+]} />
 
 ## Summary
 

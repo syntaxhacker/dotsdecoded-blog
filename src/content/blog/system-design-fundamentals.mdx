@@ -12,6 +12,7 @@ import ScalabilityCompareDemo from '../../components/demos/ScalabilityCompareDem
 import MetricsDashboardDemo from '../../components/demos/MetricsDashboardDemo'
 import CapacityEstimationDemo from '../../components/demos/CapacityEstimationDemo'
 import FaultToleranceDemo from '../../components/demos/FaultToleranceDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is System Design?
 
@@ -221,3 +222,92 @@ Answer these without looking back:
 | Reliability | Correctness | Error rate % | "error rate below 0.1%" |
 | Bandwidth | Network capacity | Mbps / Gbps | "10 Gbps backbone" |
 | Storage | Data volume | TB / PB | "500 TB per year" |
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the three components of client-server architecture?",
+    options: [
+      "Database, cache, and load balancer",
+      "Client, server, and network",
+      "Frontend, backend, and API",
+      "Request, response, and middleware"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The three core components are the client (makes requests), the server (processes requests), and the network (carries messages between them)."
+  },
+  {
+    question: "According to Little's Law (L = lambda * W), if your API has 200ms latency and handles 10,000 QPS, how many requests are in flight at any moment?",
+    options: [
+      "200",
+      "2,000",
+      "20,000",
+      "50"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "L = lambda * W = 10,000 * 0.2 = 2,000 requests in flight simultaneously. Your system needs capacity for all of them."
+  },
+  {
+    question: "What is the difference between 99.9% and 99.99% availability in terms of yearly downtime?",
+    options: [
+      "8.76 hours vs 52.6 minutes",
+      "3.65 days vs 8.76 hours",
+      "52.6 minutes vs 5.26 minutes",
+      "43.8 minutes vs 4.38 minutes"
+    ],
+    correctIndex: 0,
+    points: 12,
+    explanation: "99.9% allows 8.76 hours of downtime per year. 99.99% allows only 52.6 minutes. Each additional nine is exponentially harder and more expensive."
+  },
+  {
+    question: "What is the difference between vertical and horizontal scaling?",
+    options: [
+      "Vertical adds more machines; horizontal adds more resources to one machine",
+      "Vertical adds more resources to a single machine; horizontal adds more machines",
+      "Vertical is for databases; horizontal is for web servers",
+      "They are the same thing with different names"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Vertical scaling (scale up) adds CPU/RAM to one machine. Horizontal scaling (scale out) adds more machines and distributes load across them."
+  },
+  {
+    question: "Why are latency percentiles more useful than averages?",
+    options: [
+      "Percentiles are easier to calculate",
+      "Averages hide outliers — 99 requests at 50ms and 1 at 5000ms averages to 99.5ms but p99 reveals the 5000ms worst case",
+      "Percentiles always give lower numbers",
+      "Averages only work for small datasets"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Averages hide outliers. Percentiles reveal the worst-case experience: p99 shows what 1% of users see, which can be dramatically worse than the average."
+  },
+  {
+    question: "What is graceful degradation?",
+    options: [
+      "Shutting down the server before it crashes",
+      "Providing reduced functionality rather than failing completely when a component is unavailable",
+      "Returning HTTP 503 for all requests",
+      "Disabling features permanently"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Graceful degradation means the system provides a reduced but functional experience (like showing cached results) when a component fails, rather than showing nothing."
+  },
+  {
+    question: "What is the difference between an SLI, SLO, and SLA?",
+    options: [
+      "SLI is the metric you measure, SLO is the target you set, SLA is the contract with consequences",
+      "They are three names for the same concept",
+      "SLI is for uptime, SLO is for latency, SLA is for throughput",
+      "SLA is the metric, SLO is the contract, SLI is the measurement"
+    ],
+    correctIndex: 0,
+    points: 12,
+    explanation: "SLI (Service Level Indicator) is what you measure. SLO (Service Level Objective) is the target. SLA (Service Level Agreement) is the business contract with consequences for missing targets."
+  }
+]} />

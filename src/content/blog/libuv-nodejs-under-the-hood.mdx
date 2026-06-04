@@ -6,6 +6,7 @@ tags: ["nodejs", "systems", "concurrency"]
 ---
 
 import LibuvDemo from '../../components/demos/LibuvDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is libuv?
 
@@ -227,3 +228,80 @@ Worker threads have their own V8 isolate and event loop. They communicate via `M
 ## Try It Yourself
 
 <LibuvDemo client:visible />
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the three core components of Node.js?",
+    options: [
+      "V8, libuv, and a thin C++ binding layer",
+      "V8, libuv, and libev",
+      "JavaScript engine, HTTP parser, and event emitter",
+      "V8, libeio, and OpenSSL"
+    ],
+    correctIndex: 0,
+    points: 10,
+    explanation: "Node.js is essentially V8 (JavaScript execution), libuv (event loop and I/O), and a thin C++ binding layer between them."
+  },
+  {
+    question: "What operations use libuv's thread pool?",
+    options: [
+      "TCP connections, HTTP requests, and WebSocket communication",
+      "File I/O, DNS lookups (dns.lookup), and CPU-heavy operations like crypto.pbkdf2",
+      "Only DNS resolution and file watching",
+      "Timer callbacks and setImmediate"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "File I/O on most platforms, DNS lookups via dns.lookup (getaddrinfo), and CPU-bound operations like crypto.pbkdf2 use the thread pool of 4 workers (configurable via UV_THREADPOOL_SIZE)."
+  },
+  {
+    question: "What is the difference between dns.lookup() and dns.resolve4()?",
+    options: [
+      "dns.lookup() uses the c-ares library while dns.resolve4() uses getaddrinfo",
+      "dns.lookup() uses the thread pool (getaddrinfo) while dns.resolve4() uses libuv's non-blocking c-ares resolver, bypassing the thread pool",
+      "They are identical with different parameter formats",
+      "dns.lookup() is synchronous while dns.resolve4() is asynchronous"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "dns.lookup() calls getaddrinfo (blocking C function, runs on thread pool). dns.resolve4() uses c-ares for async DNS resolution, bypassing the thread pool entirely."
+  },
+  {
+    question: "Why does setImmediate always fire before setTimeout(fn, 0) when both are called inside an I/O callback?",
+    options: [
+      "setImmediate has higher priority in the V8 scheduler",
+      "The event loop processes the check phase (setImmediate) after the poll phase (I/O callbacks) but before the next timer phase (setTimeout)",
+      "setTimeout is throttled inside I/O callbacks",
+      "setImmediate bypasses the event loop entirely"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Inside an I/O callback, the check phase (setImmediate) runs after the current poll phase completes. The next timer phase (setTimeout) only runs on the next loop iteration, so setImmediate fires first."
+  },
+  {
+    question: "What is the thread pool size limit and how do you configure it?",
+    options: [
+      "2 threads, configured via NODE_THREAD_COUNT",
+      "4 threads by default, configured via UV_THREADPOOL_SIZE environment variable",
+      "Unlimited threads, auto-detected from CPU cores",
+      "8 threads, configured via --pool-size flag"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "libuv defaults to 4 thread pool workers. Set UV_THREADPOOL_SIZE=8 (up to 1024) before starting Node.js to increase it."
+  },
+  {
+    question: "Why do worker threads exist if libuv already provides a thread pool?",
+    options: [
+      "Worker threads are for I/O while the thread pool is for CPU work",
+      "Worker threads have their own V8 isolate and event loop for true parallelism, while the thread pool only handles I/O offloading",
+      "Worker threads are a deprecated alternative to the thread pool",
+      "They serve the same purpose with different APIs"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The thread pool offloads I/O and blocking operations but doesn't run JavaScript. Worker threads have their own V8 isolate and event loop, enabling true parallel JavaScript execution for CPU-bound work."
+  }
+]} />

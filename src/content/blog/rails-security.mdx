@@ -9,6 +9,7 @@ import CsrfAttackDemo from '../../components/demos/CsrfAttackDemo'
 import DeviseModulesDemo from '../../components/demos/DeviseModulesDemo'
 import SqlInjectionDemo from '../../components/demos/SqlInjectionDemo'
 import PasswordHashDemo from '../../components/demos/PasswordHashDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Rails' Security Philosophy
 
@@ -732,3 +733,104 @@ Before you ship a Rails application, verify every item on this list:
 Run `bundle audit` regularly to check your dependencies against the Ruby Advisory Database. Run `brakeman` to scan your application for known vulnerability patterns.
 
 Rails gives you a strong security foundation, but security is not a feature you implement once and forget. It is a practice — a habit of thinking like an attacker every time you write code that touches user input, authentication, or data.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "How does Rails protect against CSRF (Cross-Site Request Forgery) attacks?",
+    options: [
+      "By requiring CAPTCHA on every form submission",
+      "By embedding an authenticity token in forms that verifies the request came from your site, not a malicious third party",
+      "By encrypting all form data with AES-256",
+      "By blocking all cross-origin requests"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Rails embeds a cryptographically strong authenticity token in each form. When the form is submitted, Rails verifies the token matches. A malicious site cannot know the token because it's different per session."
+  },
+  {
+    question: "Why is User.where(\"email = '#{params[:email]}'\") vulnerable to SQL injection?",
+    options: [
+      "It uses the wrong database adapter",
+      "String interpolation puts user input directly into the SQL string, allowing attackers to inject malicious SQL",
+      "It should use find_by instead of where",
+      "Active Record automatically sanitizes all where clauses"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "String interpolation inserts user input directly into the SQL string. An attacker can enter ' OR '1'='1 to bypass conditions. Use parameterized queries: User.where('email = ?', params[:email])."
+  },
+  {
+    question: "What does has_secure_password provide in a Rails User model?",
+    options: [
+      "It stores passwords in plain text in the database",
+      "It hashes passwords with bcrypt, adds an authenticate method, and validates password confirmation",
+      "It generates API tokens for external services",
+      "It encrypts the entire database column"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "has_secure_password adds bcrypt password hashing, an authenticate method, password/password_confirmation virtual attributes, and ensures passwords are never stored in plain text."
+  },
+  {
+    question: "Why should you never use raw() or html_safe on user input in ERB?",
+    options: [
+      "It makes the page load slower",
+      "It disables HTML escaping, allowing attackers to inject malicious JavaScript (XSS attacks)",
+      "It only works with integer values",
+      "It's deprecated in Rails 7"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Rails escapes HTML output by default, turning <script> into &lt;script&gt;. Using raw or html_safe bypasses this protection, allowing cross-site scripting attacks."
+  },
+  {
+    question: "What makes bcrypt suitable for password hashing?",
+    options: [
+      "It's the fastest hashing algorithm available",
+      "It's slow by design (configurable cost factor), includes a built-in salt, and is adaptive to hardware improvements",
+      "It uses MD5 under the hood",
+      "It stores passwords in reversible encryption"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "bcrypt is slow (configurable cost factor), includes a unique random salt per hash, and can increase cost as hardware gets faster. This defeats brute-force and rainbow table attacks."
+  },
+  {
+    question: "What is the purpose of Rails' encrypted credentials system?",
+    options: [
+      "To encrypt database connections",
+      "To safely commit secrets (API keys, database passwords) to source control — the file is encrypted and only readable with the master key",
+      "To compress application assets",
+      "To encrypt SSL certificates"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Rails encrypts config/credentials.yml.enc with a master key. The encrypted file is safe to commit; only people with the master key can decrypt it. Never commit the master key itself."
+  },
+  {
+    question: "Why should you never store the master key in version control?",
+    options: [
+      "It makes the repository too large",
+      "Anyone with the key can decrypt all secrets in the credentials file, gaining access to database passwords, API keys, and other sensitive data",
+      "Git doesn't support binary files",
+      "The key expires after 24 hours"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The master key decrypts all encrypted credentials. If committed to Git (even private repos), anyone with repository access can decrypt every secret — database passwords, API keys, etc."
+  },
+  {
+    question: "What does the Content-Security-Policy (CSP) header do?",
+    options: [
+      "It forces all traffic to use HTTPS",
+      "It tells the browser which sources are allowed to load scripts, styles, images, and other resources, blocking unauthorized sources",
+      "It compresses HTTP responses",
+      "It sets cookie expiration times"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "CSP restricts which domains can load resources. If an attacker injects a script pointing to evil.com, CSP blocks it because evil.com isn't in the allowed sources list."
+  }
+]} />
