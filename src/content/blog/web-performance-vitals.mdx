@@ -10,6 +10,7 @@ import PerfClsDemo from '../../components/demos/PerfClsDemo'
 import PerfInpDemo from '../../components/demos/PerfInpDemo'
 import PerfMetricsDemo from '../../components/demos/PerfMetricsDemo'
 import PerfAuditDemo from '../../components/demos/PerfAuditDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Why Web Performance Matters
 
@@ -482,3 +483,92 @@ Core Web Vitals are not abstract metrics. They map directly to the browser rende
 Each vital has clear optimization strategies: preload and compress for LCP, reserve space for CLS, and avoid long tasks for INP. Lab data helps you catch issues before they ship. Field data (CrUX + RUM) tells you how real users experience your site.
 
 Performance is a competitive advantage. Sites that score well on Core Web Vitals rank higher in search, convert more visitors, and retain users longer. The tools and techniques in this post give you everything you need to build fast, stable, responsive web experiences.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What does LCP measure and what is the target threshold?",
+    options: [
+      "When the first pixel appears — under 1 second",
+      "How long it takes for the largest visible content element to appear — under 2.5 seconds",
+      "The total page load time — under 5 seconds",
+      "The time until JavaScript finishes executing — under 3 seconds"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "LCP (Largest Contentful Paint) measures when the largest visible element (hero image, heading) appears in the viewport. Google targets under 2.5 seconds."
+  },
+  {
+    question: "What causes cumulative layout shift (CLS) and why is it bad?",
+    options: [
+      "Slow server responses cause CLS — it makes pages feel sluggish",
+      "Elements change position between frames (images without dimensions, ads loading late, web fonts swapping) — it disorients users and makes content jump",
+      "Too much JavaScript causes CLS — it blocks the main thread",
+      "CLS is caused by CSS animations"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "CLS measures visual instability. Layout shifts happen when elements move unexpectedly — typically from images without dimensions, late-loading ads, or font swaps. It frustrates users who lose their place."
+  },
+  {
+    question: "Why did INP replace First Input Delay (FID)?",
+    options: [
+      "INP is easier to measure",
+      "FID only measured the first interaction; INP captures the longest interaction across the entire page lifetime",
+      "INP is less important than FID",
+      "FID only works with clicks, not taps"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "FID only measured the very first user interaction. INP measures all interactions throughout the page lifetime and reports the worst case, giving a more complete picture of responsiveness."
+  },
+  {
+    question: "What is the difference between lab data and field data?",
+    options: [
+      "Lab data is more accurate than field data",
+      "Lab data is collected in controlled environments (Lighthouse); field data comes from real users (CrUX, RUM)",
+      "They measure different metrics",
+      "Lab data requires a paid tool"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Lab data (Lighthouse) is reproducible and debuggable but does not reflect real conditions. Field data (CrUX, RUM) reflects actual user experiences but is noisier and harder to debug."
+  },
+  {
+    question: "How do you fix layout shifts caused by images?",
+    options: [
+      "Use CSS animations to smooth the shift",
+      "Set explicit width and height attributes on img tags so the browser reserves space before the image loads",
+      "Lazy load all images",
+      "Remove all images from the page"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Setting explicit width and height lets the browser reserve the correct space before the image loads, preventing content below from jumping when the image appears."
+  },
+  {
+    question: "What is a long task and how does it affect INP?",
+    options: [
+      "A task that takes over 100ms — it increases TTFB",
+      "A JavaScript task running over 50ms — it blocks the main thread, increasing input delay and preventing the next paint",
+      "A network request that times out",
+      "A CSS animation that runs too long"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A long task (50ms+) blocks the main thread. During this time, user interactions queue up waiting for the thread, increasing input delay and degrading INP."
+  },
+  {
+    question: "What is a performance budget?",
+    options: [
+      "A financial budget for cloud hosting costs",
+      "Agreed-upon limits on metrics like LCP, CLS, bundle size, and request count, enforced in CI/CD to prevent regressions",
+      "A list of features to optimize",
+      "A one-time optimization pass before launch"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A performance budget sets hard limits on metrics (LCP < 2.5s, CLS < 0.1, bundle < 300KB). Enforced in CI/CD, it prevents regressions by failing builds that exceed the limits."
+  }
+]} />

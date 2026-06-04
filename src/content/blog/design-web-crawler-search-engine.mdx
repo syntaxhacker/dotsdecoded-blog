@@ -12,6 +12,7 @@ import InvertedIndexDemo from '../../components/demos/InvertedIndexDemo'
 import PageRankDemo from '../../components/demos/PageRankDemo'
 import QueryServingDemo from '../../components/demos/QueryServingDemo'
 import SearchArchitectureDemo from '../../components/demos/SearchArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 You type a query into your search bar. Before you finish typing, suggestions populate. You press Enter, and in under 300 milliseconds, Google returns a list of pages ranked by relevance and authority, served from an index of over 60 trillion pages. How does that work? This is the single most ambitious system design question you can face in an interview: design a web crawler and search engine from scratch.
 
@@ -928,6 +929,107 @@ Personalization affects ranking in targeted ways:
 - **Device**: Mobile vs. desktop results are optimized for the device context
 
 Personalization is implemented at query time by modifying the ranking score with user-specific multipliers. The core index and PageRank are not personalized — only the final scoring step is.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the three phases of a search engine and what does each do?",
+    options: [
+      "Cache stores results, Query finds matches, Display renders pages",
+      "Crawling discovers and downloads pages, Indexing builds an inverted index from content, Serving queries the index and ranks results",
+      "Fetch downloads HTML, Parse extracts text, Store saves to disk",
+      "Search finds URLs, Rank sorts them, Return sends responses"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Crawling discovers pages by following links from a seed set. Indexing transforms downloaded content into an inverted index (term → document list). Serving parses user queries, looks up matching documents, scores them by relevance and authority, and returns ranked results in under 300ms."
+  },
+  {
+    question: "Why are Bloom filters used instead of hash sets for URL deduplication?",
+    options: [
+      "Bloom filters are faster than hash sets for all operations",
+      "A hash set for 60 trillion URLs would require hundreds of TB of RAM; a Bloom filter achieves the same with ~75 TB and zero false negatives",
+      "Bloom filters support deletion of elements",
+      "Hash sets cannot store URLs longer than 256 characters"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "A Bloom filter uses a bit array and multiple hash functions. It can answer 'have I seen this before?' with zero false negatives and a tunable false positive rate (~0.1%). Storing 60 trillion URL hashes in a hash set would require hundreds of terabytes of RAM."
+  },
+  {
+    question: "What is the URL frontier and why isn't a simple FIFO queue sufficient?",
+    options: [
+      "The frontier is a cache of recently crawled pages",
+      "A simple FIFO ignores priority (breaking news vs archived posts), politeness (per-domain delays), and breadth vs depth — the frontier uses a priority queue keyed by hostname",
+      "The frontier is the same as the inverted index",
+      "FIFO queues can't handle duplicate URLs"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The URL frontier is the crawler's work queue. A simple FIFO fails because: (1) priority matters — breaking news should be crawled before archived posts, (2) politeness requires per-domain delays, and (3) breadth should precede depth. The frontier uses a priority queue with per-domain sub-queues."
+  },
+  {
+    question: "How does PageRank determine a page's authority?",
+    options: [
+      "By counting the total number of pages on the website",
+      "By treating links as votes — a page's rank is the sum of incoming links' ranks divided by their outbound link count, with a damping factor for random jumps",
+      "By measuring the page's loading speed",
+      "By counting the number of images on the page"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "PageRank models a random surfer who either follows a random link (probability d=0.85) or jumps to a random page (probability 1-d). A page's rank is the probability the surfer is on that page. Links from high-rank pages with few outbound links are most valuable."
+  },
+  {
+    question: "Why is BM25 preferred over TF-IDF for search ranking?",
+    options: [
+      "BM25 is simpler to implement",
+      "BM25 handles document length normalization better — a 200-word page mentioning 'sourdough' twice is more relevant than a 10,000-word page mentioning it twice",
+      "TF-IDF doesn't support multiple query terms",
+      "BM25 uses less memory than TF-IDF"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "TF-IDF doesn't normalize for document length. BM25 adds a length normalization parameter (b) and a term frequency saturation parameter (k1) — the 100th mention of a term adds less marginal value than the first, preventing keyword stuffing."
+  },
+  {
+    question: "How does the politeness policy prevent a crawler from overwhelming a small website?",
+    options: [
+      "The crawler only visits sites listed in its seed set",
+      "It enforces per-domain delays (5-10 seconds between requests to the same host), reads robots.txt crawl-delay directives, and limits concurrent connections per domain",
+      "The crawler uses a VPN to distribute its load",
+      "Small websites are automatically excluded from crawling"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Polite crawlers enforce per-domain minimum delays (typically 5-10 seconds), respect robots.txt Crawl-delay directives, limit concurrent connections (1-2 for small sites), and exponentially back off on HTTP 429 responses."
+  },
+  {
+    question: "What is the purpose of SimHash in the deduplication pipeline?",
+    options: [
+      "It compresses HTML before storage",
+      "It generates 64-bit fingerprints where similar documents have similar fingerprints, enabling detection of near-duplicates that exact content hashing misses",
+      "It sorts search results by relevance",
+      "It normalizes URLs to their canonical form"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Exact content hashing misses near-duplicates — pages with the same article but different ads or layouts. SimHash generates fingerprints where similar documents differ by only a few bits (Hamming distance < 3), catching near-duplicates that SHA-256 would miss."
+  },
+  {
+    question: "How does Google achieve 300ms p99 latency at 100K queries per second?",
+    options: [
+      "By using a single powerful server",
+      "Through replicated index shards across data centers, two-tier lookup (early termination + full index), Redis result caching (30-40% hit rate), and precomputed top-10 for common queries",
+      "By returning cached results for all queries",
+      "By limiting the index to only 1 million pages"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The serving tier uses replicated index shards across data centers, a two-tier lookup (small fast index first, full index if needed), Redis caching for popular queries (30-40% hit rate), and precomputed top-10 lists for common single-term queries."
+  }
+]} />
 
 ## Self-Check
 

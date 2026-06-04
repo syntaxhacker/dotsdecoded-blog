@@ -18,6 +18,7 @@ import SseClientDemo from '../../components/demos/SseClientDemo'
 import SseErrorDemo from '../../components/demos/SseErrorDemo'
 import SseAdvancedDemo from '../../components/demos/SseAdvancedDemo'
 import SseRealWorldDemo from '../../components/demos/SseRealWorldDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine you are sitting at a restaurant. In the traditional HTTP model, you walk up to the counter, place your order, wait three minutes while they cook, and then they hand you your food. You eat it. If you want more food, you have to go back to the counter and order again. Every single time.
 
@@ -370,6 +371,107 @@ SSE is everywhere once you know what to look for:
 - **CDN Status Pages** — Cloudflare and others use SSE for real-time status updates.
 
 You might be using SSE right now without realizing it. Open your browser's network tab, filter for `text/event-stream`, and watch.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What HTTP header tells the server that the client wants an SSE stream?",
+    options: [
+      "Accept: application/json",
+      "Accept: text/event-stream",
+      "Content-Type: text/event-stream",
+      "Transfer-Encoding: chunked"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The client sends `Accept: text/event-stream` to signal it wants an SSE connection. The server responds with `Content-Type: text/event-stream` in the response headers."
+  },
+  {
+    question: "Why does SSE use `Transfer-Encoding: chunked` instead of `Content-Length`?",
+    options: [
+      "Chunked encoding is more secure",
+      "SSE sends data as it generates it without knowing the total size upfront — Content-Length requires knowing the exact byte count before sending",
+      "Chunked encoding compresses the data",
+      "Content-Length is not supported by HTTP/1.1"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "SSE streams data as it becomes available. Since the server doesn't know the total size upfront (the stream could be infinite), it uses chunked transfer encoding to send data piece by piece."
+  },
+  {
+    question: "What is the purpose of the `id:` field in SSE events?",
+    options: [
+      "It names the event type",
+      "It sets a unique ID so the browser can send `Last-Event-ID` on reconnection to resume from where it left off",
+      "It specifies the data format",
+      "It sets the retry interval"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The `id:` field sets a unique identifier for the event. When the connection drops, the browser sends `Last-Event-ID` on reconnection so the server knows where to resume, avoiding duplicate events."
+  },
+  {
+    question: "When should you use SSE instead of WebSocket?",
+    options: [
+      "When you need bidirectional communication like a chat app",
+      "When you only need server-to-client communication and want simplicity with automatic reconnection",
+      "When you need binary data transfer",
+      "When you need the lowest possible latency for gaming"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "SSE is ideal for one-way server-to-client streaming (live feeds, AI responses, notifications). It's simpler than WebSocket, has built-in reconnection, works through HTTP proxies, and uses standard HTTP infrastructure."
+  },
+  {
+    question: "What does the `retry:` field in SSE control?",
+    options: [
+      "How many times to retry sending an event",
+      "How long (in milliseconds) the client waits before reconnecting after a disconnection",
+      "The maximum number of concurrent connections",
+      "How often the server sends heartbeat comments"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The `retry:` field tells the client how many milliseconds to wait before attempting to reconnect. The default is 3000ms. The server can change this dynamically by sending a new retry value at any time."
+  },
+  {
+    question: "What is the heartbeat/keepalive pattern in SSE and why is it needed?",
+    options: [
+      "It sends user data to the server for authentication",
+      "The server sends periodic comment lines (starting with :) to keep the connection alive — without them, proxies and load balancers may close idle connections",
+      "It compresses the data stream for efficiency",
+      "It verifies the client is still on the same page"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If a server sends nothing for a while, proxies and load balancers may think the connection is dead and close it. Heartbeat comments (`: heartbeat\\n\\n`) keep the connection alive without triggering event handlers."
+  },
+  {
+    question: "Why can't you send custom headers with the EventSource API?",
+    options: [
+      "EventSource only supports GET requests",
+      "The EventSource API does not expose a way to set custom headers — if you need auth, use cookies or include the token in the URL",
+      "Custom headers break SSE streaming",
+      "Only WebSocket supports custom headers"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Unlike fetch, EventSource cannot send custom headers. For authentication, you must either include the token in the URL (with security implications) or use cookie-based sessions instead."
+  },
+  {
+    question: "What happens to an SSE connection when the server crashes?",
+    options: [
+      "The connection stays open indefinitely waiting for recovery",
+      "The browser detects the broken connection, fires onerror, and automatically tries to reconnect using the retry interval",
+      "The browser immediately closes the tab",
+      "The user must manually refresh the page"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When the server crashes, the browser detects the dropped connection, fires the onerror handler, and automatically attempts to reconnect after the configured retry interval, sending Last-Event-ID to resume."
+  }
+]} />
 
 ## The Self-Check
 

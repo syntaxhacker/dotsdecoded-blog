@@ -9,6 +9,7 @@ import WebhookRequirementsDemo from '../../components/demos/WebhookRequirementsD
 import WebhookDeliveryDemo from '../../components/demos/WebhookDeliveryDemo'
 import WebhookSigningDemo from '../../components/demos/WebhookSigningDemo'
 import WebhookArchitectureDemo from '../../components/demos/WebhookArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Are Webhooks?
 
@@ -389,5 +390,59 @@ Before deploying your webhook system, ask yourself:
 - How do you handle a compromised webhook secret?
 - Can an operator view, filter, and replay any failed delivery?
 - What is the TTL on your idempotency cache, and does it exceed the retry window?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What does a 4xx HTTP response from a webhook endpoint typically indicate, and how should the delivery system handle it?",
+    options: ["Server overload — retry with exponential backoff", "Client misconfiguration — do not retry", "Transient network error — retry immediately", "Rate limiting — wait and retry"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A 4xx response means the client's endpoint is misconfigured or rejecting the request. Retrying would be futile since the problem is on the client side, not a transient server issue."
+  },
+  {
+    question: "Why does the idempotency cache TTL need to exceed the total retry window?",
+    options: ["To allow more events to be processed", "To prevent duplicate events from being processed after retries exhaust", "To reduce database load", "To comply with GDPR requirements"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If the retry window spans 32.7 hours but the cache TTL is only 24 hours, a late retry arriving after 24 hours would not be recognized as a duplicate and would be processed again, causing a double-action."
+  },
+  {
+    question: "What problem does the queue-per-client design solve compared to a shared queue?",
+    options: ["Reduces total memory usage", "Prevents one slow client from blocking delivery to all other clients", "Simplifies the worker implementation", "Eliminates the need for retry logic"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A shared queue creates head-of-line blocking — if one client's endpoint is slow, all other clients' deliveries wait behind it. Per-client queues isolate each client's delivery throughput."
+  },
+  {
+    question: "In exponential backoff, what is the purpose of adding jitter to the delay calculation?",
+    options: ["To reduce total retry time", "To prevent the thundering herd problem where all clients retry simultaneously", "To increase the chance of successful delivery", "To comply with rate limit regulations"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Without jitter, all clients that fail at the same time would retry at exactly the same delay intervals, creating synchronized bursts of traffic (thundering herd). Jitter randomizes retry times to spread load."
+  },
+  {
+    question: "Why does exactly-once delivery fundamentally cannot be achieved with HTTP-based webhooks?",
+    options: ["HTTP is too slow", "The network is unreliable — responses can be lost, making it impossible to distinguish success from failure", "Webhooks do not support unique IDs", "PostgreSQL cannot handle duplicate inserts"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "HTTP operates over an unreliable network. If the server sends a request and the response is lost, the server cannot know if the client received and processed it. This ambiguity makes true exactly-once impossible — at-least-once with idempotency is the practical solution."
+  },
+  {
+    question: "What happens when a client's webhook endpoint consistently returns 500 errors and all retries are exhausted?",
+    options: ["The event is silently discarded", "The event moves to a dead letter queue for manual inspection and potential replay", "The client is automatically deregistered", "The system reverts to polling the client"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "After max retries (typically 6), the event is moved to the Dead Letter Queue (DLQ). Operators can inspect, replay, or forward the event to a fallback endpoint once the client's issues are resolved."
+  },
+  {
+    question: "In Stripe-style webhook signing, what does the timestamp 't' in the signature header prevent?",
+    options: ["Man-in-the-middle attacks", "Replay attacks where an attacker resends an old valid request", "SQL injection", "Buffer overflow attacks"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The timestamp is included in the HMAC signature and checked against an acceptable time window (e.g., 5 minutes). An attacker who captures a valid signed request cannot replay it later because the timestamp would be outside the tolerance window."
+  }
+]} />
 
 Building a reliable webhook system is not complicated at the component level, but the edge cases around retries, duplicates, and misbehaving clients make the difference between a system that is trusted and one that is constantly on fire.

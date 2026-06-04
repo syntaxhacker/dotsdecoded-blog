@@ -13,6 +13,7 @@ import SsdResultsDemo from '../../components/demos/SsdResultsDemo'
 import EffectiveTempDemo from '../../components/demos/EffectiveTempDemo'
 import BadDataDemo from '../../components/demos/BadDataDemo'
 import DistributionReshapeDemo from '../../components/demos/DistributionReshapeDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Can You Get Better at Something Without Anyone Telling You What You Did Wrong?
 
@@ -224,6 +225,95 @@ This is like having one volume knob for both the vocals and the bass in a song. 
 SSD escapes this limitation by modifying the model's internal probability distributions. After training, the model has different distributions at different positions — some sharp, some broad. The temperature dial then acts on these already-different distributions, producing a better overall result than any single temperature could achieve on the unmodified model.
 
 The model is no longer using one temperature for everything. It has effectively given itself different temperatures at different positions, built into its own weights.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why does training a model on its own outputs at the same temperature teach it nothing?",
+    options: [
+      "The model cannot read its own outputs",
+      "It creates a closed loop — no new information enters the system, so the model just confirms what it already does",
+      "The training process is too slow",
+      "Models cannot be fine-tuned on their own data"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If the model generates outputs at its normal temperature and trains on them, it's just copying its own homework. The distribution doesn't change because no new information enters the system. SSD avoids this by using different temperatures for generation and evaluation."
+  },
+  {
+    question: "What is the difference between a 'fork' and a 'lock' position in code generation?",
+    options: [
+      "Forks are in JavaScript; locks are in Python",
+      "Locks have one clearly correct answer (e.g., arr.length); forks are genuine choices where multiple valid approaches exist (e.g., which sorting algorithm to use)",
+      "Forks are faster to generate than locks",
+      "Locks require higher temperature than forks"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Locks are positions where one answer is clearly correct (like arr.length — nothing else makes sense). Forks are positions where the model must choose between multiple valid approaches, like which sorting algorithm to implement."
+  },
+  {
+    question: "How does SSD improve the model differently at lock positions vs fork positions?",
+    options: [
+      "It makes locks noisier and forks narrower",
+      "It sharpens locks (suppressing distractors) while preserving forks (keeping multiple valid options alive)",
+      "It treats both positions identically",
+      "It only improves fork positions"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "At lock positions, SSD aggressively suppresses wrong alternatives, making the correct answer more dominant. At fork positions, it keeps multiple reasonable options alive, preserving diversity. This is the core mechanism that makes SSD work."
+  },
+  {
+    question: "What is the 'effective temperature' formula in SSD?",
+    options: [
+      "T_eff = T_train + T_eval",
+      "T_eff = T_train × T_eval",
+      "T_eff = T_train / T_eval",
+      "T_eff = (T_train + T_eval) / 2"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Training temperature and test temperature combine through multiplication: T_eff = T_train × T_eval. Performance peaks around T_eff ≈ 1.2, meaning you can tune either knob to reach optimal results."
+  },
+  {
+    question: "Why does SSD still improve models even when the training data is mostly garbage (unrecognizable code)?",
+    options: [
+      "The garbage data is actually correct code the model couldn't read",
+      "SSD learns from the structure of token sequences — which tokens follow which — regardless of whether the overall program makes sense",
+      "The evaluation benchmark has bugs",
+      "The model ignores garbage data entirely"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "SSD is not learning from whether programs are correct. It's learning structural patterns — which tokens tend to follow which other tokens. Even gibberish code contains valid syntax fragments and plausible structures that improve the model's token-level predictions."
+  },
+  {
+    question: "Why can't you achieve SSD's results just by tuning the temperature at test time without training?",
+    options: [
+      "Temperature settings only work on trained models",
+      "Temperature is one global dial affecting every position the same way — you can't have precision at locks and creativity at forks simultaneously without modifying the model",
+      "Test-time temperature is always lower than training temperature",
+      "Temperature has no effect on code quality"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Temperature is a global dial — you can't tell the model 'be creative at forks but precise at locks.' SSD modifies the model's internal distributions so different positions respond differently, effectively giving itself different temperatures at different positions."
+  },
+  {
+    question: "What happens at lock positions during Step 1 (high temperature practice) of SSD?",
+    options: [
+      "The model always picks the correct answer",
+      "The model occasionally produces wrong tokens at these positions — it writes size instead of length, or push instead of length",
+      "Locks are skipped entirely during practice",
+      "The model generates only correct tokens at locks"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "During high-temperature practice, the model sometimes produces wrong tokens at lock positions (e.g., size instead of length). When it later trains on these wrong outputs, it learns that those distractors are bad, which sharpens the lock distribution."
+  }
+]} />
 
 ## Self-Check
 

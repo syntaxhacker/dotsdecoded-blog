@@ -12,6 +12,7 @@ import MediaPipelineDemo from '../../components/demos/MediaPipelineDemo'
 import FanOutDemo from '../../components/demos/FanOutDemo'
 import NewsFeedDemo from '../../components/demos/NewsFeedDemo'
 import SearchIndexDemo from '../../components/demos/SearchIndexDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Designing Instagram or YouTube in a system design interview means solving one of the hardest problems in distributed systems: handling massive amounts of user-generated media while keeping feeds fast, storage cheap, and discovery accurate. This walkthrough covers every layer of the problem, from requirements to scaling trade-offs, with interactive demos at each step.
 
@@ -377,6 +378,53 @@ YouTube uses Content ID: a fingerprinting system where copyright holders upload 
 | Feed model | Pre-computed + pull hybrid | Recommendation-driven |
 | Caching | Aggressive (photos are static) | Moderate (multiple quality variants) |
 | Real-time needs | Stories (24h TTL) | Live streaming (ultra-low latency) |
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why use cursor-based pagination instead of offset-based for feeds?",
+    options: ["Cursor pagination is faster to implement", "Offsets break when new posts are inserted between pages; cursors encode sort position for stable results", "Cursor pagination uses less bandwidth", "Offset-based pagination cannot handle large datasets"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When new posts are inserted, offset-based pagination can skip or duplicate items. A cursor encodes the sort position (e.g., base64 of created_at + post_id) so results remain stable even as new content arrives."
+  },
+  {
+    question: "What is the fan-out problem in news feed generation?",
+    options: ["Too many users trying to log in simultaneously", "A celebrity post must be written to millions of followers' feed caches", "The database cannot handle concurrent reads", "Feed data is too large to cache in Redis"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When a user with 1 million followers posts, fan-out-on-write requires writing that post to 1 million feed caches. This creates a write storm that can overwhelm the system."
+  },
+  {
+    question: "Why use presigned URLs for media uploads instead of proxying through API servers?",
+    options: ["Presigned URLs are more secure", "They allow direct client-to-S3 uploads, avoiding the API server as a bandwidth bottleneck for large files", "They automatically compress the file", "They require authentication at the API layer"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Presigned URLs let clients upload directly to S3, bypassing the API server. This prevents large media files (50+ MB videos) from consuming API server bandwidth and memory."
+  },
+  {
+    question: "What is TF-IDF and why does it improve search relevance?",
+    options: ["It counts total word frequency across all documents", "It ranks documents by term frequency weighted by how rare the term is across the corpus", "It uses machine learning to predict user clicks", "It sorts results alphabetically by relevance score"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "TF-IDF scores documents by how often a term appears (TF) multiplied by how rare the term is across all documents (IDF). Rare terms like 'astrophotography' are more valuable than common terms like 'photo' for distinguishing relevant documents."
+  },
+  {
+    question: "What is the hybrid fan-out approach for news feeds?",
+    options: ["Always fan out on write, never on read", "Fan out on write for normal users, pull on read for celebrity accounts", "Fan out on read for all users", "Use a single fan-out strategy based on account age"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Users with fewer than ~10K followers get fan-out-on-write (fast reads). Celebrity accounts use fan-out-on-read (pull when feed is opened). This limits the write storm while keeping feed latency acceptable for 99% of posts."
+  },
+  {
+    question: "Why is adaptive bitrate streaming important for video delivery?",
+    options: ["It reduces storage costs", "It lets the player switch quality levels in real time based on available bandwidth", "It eliminates the need for transcoding", "It compresses video more efficiently than standard encoding"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "ABR splits video into short segments at multiple quality levels. The player downloads segments from the appropriate level based on real-time bandwidth, preventing buffering while maximizing quality."
+  }
+]} />
 
 ## Self-Check
 

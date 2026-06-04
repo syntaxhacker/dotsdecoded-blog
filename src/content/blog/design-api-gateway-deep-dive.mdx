@@ -9,6 +9,7 @@ import GatewayRequirementsDemo from '../../components/demos/GatewayRequirementsD
 import GatewayPluginChainDemo from '../../components/demos/GatewayPluginChainDemo'
 import GatewayRoutingDemo from '../../components/demos/GatewayRoutingDemo'
 import GatewayArchitectureDemo from '../../components/demos/GatewayArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is an API Gateway?
 
@@ -727,3 +728,104 @@ Configuration management is the operational challenge. Every route, service, and
 | Test plugin chains in isolation | Each plugin adds latency and failure modes |
 | Use sticky config (DB-backed or xDS) | Config must survive instance restarts |
 | Plan for 3x peak traffic | Graceful degradation under load spikes |
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the primary difference between an API gateway and a load balancer?",
+    options: [
+      "They are the same thing with different names",
+      "A load balancer distributes traffic across instances of the same service; a gateway manages API access across different services with auth, rate limiting, and transformation",
+      "A load balancer handles auth; a gateway handles routing",
+      "A gateway is always deployed as a sidecar"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A load balancer spreads traffic across instances of one service. A gateway sits at the boundary between clients and all internal services, handling authentication, rate limiting, request transformation, and routing to different services."
+  },
+  {
+    question: "What are the four gateway deployment patterns?",
+    options: [
+      "Proxy, router, aggregator, mesh",
+      "Reverse proxy, router, gateway aggregation, Backend for Frontend (BFF)",
+      "Single, clustered, mirrored, sharded",
+      "Sync, async, streaming, batch"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Reverse proxy (simple pass-through), router (sophisticated matching), gateway aggregation (merge multiple upstream responses), and BFF (dedicated gateway per client type). Most systems start with reverse proxy and evolve toward BFFs."
+  },
+  {
+    question: "What happens in the plugin pipeline when the auth plugin fails?",
+    options: [
+      "The request is forwarded to the upstream anyway",
+      "The pipeline continues to the next plugin",
+      "The pipeline short-circuits and returns a 401 error without reaching the upstream service",
+      "The gateway retries the request with a different token"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Plugins can short-circuit the pipeline. If auth fails, the plugin returns 401 immediately — the request never reaches rate limiting, routing, or the upstream service. This is efficient and secure."
+  },
+  {
+    question: "How does the gateway handle JWT authentication?",
+    options: [
+      "It forwards the JWT to the upstream for validation",
+      "It decodes the JWT, verifies the signature, checks expiry and issuer, extracts claims, and injects X-User-Id and X-User-Role headers downstream",
+      "It stores the JWT in a database",
+      "It converts the JWT to a session cookie"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The gateway validates the JWT (signature, exp, nbf, iss), extracts claims like user_id and role, and injects them as headers. Upstream services trust these headers because they came from the gateway on the internal network."
+  },
+  {
+    question: "What are the three routing strategies for API gateways?",
+    options: [
+      "TCP, UDP, HTTP",
+      "Path-based, host-based, and header-based routing",
+      "GET, POST, PUT",
+      "Sync, async, batch"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Path-based routing uses URL paths, host-based uses the Host header for virtual hosts, and header-based enables fine-grained traffic splitting for canary deployments and A/B testing."
+  },
+  {
+    question: "What are the three states of a circuit breaker?",
+    options: [
+      "On, off, standby",
+      "Closed (normal), Open (all requests rejected), Half-open (probe mode)",
+      "Active, passive, hybrid",
+      "Running, stopped, paused"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Closed = normal operation. Open = circuit tripped, all requests rejected immediately. Half-open = probe mode, a few requests test if the upstream has recovered. This prevents cascading failures to failing services."
+  },
+  {
+    question: "What is the difference between north-south and east-west traffic?",
+    options: [
+      "North-south is internal; east-west is external",
+      "North-south is external-to-internal traffic (handled by gateway); east-west is internal-to-internal traffic (handled by service mesh)",
+      "They refer to data center geography",
+      "North-south uses HTTP; east-west uses gRPC"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "North-south traffic flows between external clients and internal services (gateway handles this). East-west traffic flows between internal services (service mesh with mTLS handles this). Both may coexist in production."
+  },
+  {
+    question: "Why should gateway instances themselves be stateless?",
+    options: [
+      "Because gateways never process requests",
+      "So they can be scaled horizontally by adding more instances behind a load balancer without sticky sessions or shared state",
+      "Because stateless code is easier to write",
+      "Because gateways do not support persistence"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "Stateful data (rate limits, cache, config) lives in external stores like Redis or etcd. Gateway instances handle requests purely from in-memory state, allowing horizontal scaling with no sticky sessions needed."
+  }
+]} />

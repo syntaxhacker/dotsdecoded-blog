@@ -17,6 +17,7 @@ import ContainingBlockDemo from '../../components/demos/ContainingBlockDemo'
 import BFCDemo from '../../components/demos/BFCDemo'
 import StackingContextDemo from '../../components/demos/StackingContextDemo'
 import OverflowClipDemo from '../../components/demos/OverflowClipDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## How Browsers Turn CSS Into Pixels
 
@@ -194,6 +195,107 @@ Without `white-space: nowrap`, the text wraps to the next line and no truncation
 For multi-line truncation, use `-webkit-line-clamp` with `display: -webkit-box` and `-webkit-box-orient: vertical` — note this is a non-standard but widely supported approach.
 
 <OverflowClipDemo client:visible />
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "An element has `width: 200px`, `padding: 20px`, and `border: 5px`. What is its total width with the default `content-box` model?",
+    options: [
+      "200px",
+      "220px",
+      "250px",
+      "245px"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "With `content-box`, `width` only sets the content area. Total width = content (200) + padding-left (20) + padding-right (20) + border-left (5) + border-right (5) = 250px. This is why `border-box` is preferred — it makes the width include padding and border."
+  },
+  {
+    question: "What does `box-sizing: border-box` do?",
+    options: [
+      "It adds padding and border to the element's total width",
+      "It makes the `width` property include content + padding + border",
+      "It removes the border from the box model calculation",
+      "It switches the element to inline display"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "With `border-box`, `width: 300px` means the total box (content + padding + border) is 300px. The content area shrinks to accommodate padding and border. This makes layout predictable — `width: 33.33%` stays at one-third regardless of padding."
+  },
+  {
+    question: "Which CSS properties inherit from parent to child by default?",
+    options: [
+      "margin, padding, border, width, height",
+      "color, font-family, font-size, line-height, text-align",
+      "display, position, float, overflow",
+      "background, box-shadow, outline, cursor"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Properties related to text appearance inherit: color, font-family, font-size, line-height, text-align, letter-spacing. Properties related to box model and layout do NOT inherit: margin, padding, border, width, height, display, position."
+  },
+  {
+    question: "When two block elements with `margin-bottom: 30px` and `margin-top: 20px` are stacked vertically, what is the space between them?",
+    options: [
+      "50px (the margins add up)",
+      "30px (the larger margin wins — margin collapsing)",
+      "20px (the smaller margin wins)",
+      "0px (margins don't apply between block elements)"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Vertical margin collapsing: when two adjacent block elements have margins, the browser uses the larger of the two, not the sum. So 30px and 20px result in 30px between them. Only vertical margins collapse, and only between block-level siblings or parent/child."
+  },
+  {
+    question: "What is the difference between `display: none` and `visibility: hidden`?",
+    options: [
+      "`display: none` hides the element but keeps its space; `visibility: hidden` removes it entirely",
+      "`display: none` removes the element from the layout entirely; `visibility: hidden` hides it but preserves its space",
+      "They are identical — both remove the element from layout",
+      "`display: none` only works on block elements; `visibility: hidden` works on all elements"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "`display: none` removes the element from the Render Tree — it's as if it doesn't exist, and other elements reflow to fill the gap. `visibility: hidden` keeps the element in the layout (it still occupies space) but doesn't paint it."
+  },
+  {
+    question: "An absolutely positioned element looks for its containing block by searching up the DOM tree. What is it looking for?",
+    options: [
+      "The nearest ancestor with `display: flex`",
+      "The nearest ancestor with a `position` value other than `static`",
+      "The nearest `<body>` element",
+      "The nearest ancestor with `overflow: hidden`"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Absolutely positioned elements use the nearest positioned ancestor (any ancestor with position set to relative, absolute, fixed, or sticky) as their containing block. If none exists, the initial containing block (viewport) is used. This is why `position: relative` on a parent is a common pattern."
+  },
+  {
+    question: "Why does `height: 50%` sometimes have no effect on an element?",
+    options: [
+      "Because percentages only work with `em` units",
+      "Because percentage heights resolve against the containing block's height, and if the parent has no explicit height, the percentage resolves to nothing",
+      "Because `height` doesn't support percentage values",
+      "Because block elements always use `auto` height"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Percentage heights resolve against the containing block's height. If the parent doesn't have an explicit height (height: auto), the percentage has nothing to resolve against and becomes meaningless. Width percentages work because block elements always fill their parent's width."
+  },
+  {
+    question: "What creates a Block Formatting Context (BFC), and why does it matter?",
+    options: [
+      "A BFC is created by `display: inline` — it prevents text from wrapping",
+      "A BFC is created by `overflow: hidden`, `float`, `display: flow-root`, or `position: absolute` — it creates an isolated layout region that contains floats and prevents margin collapsing",
+      "A BFC is created by `z-index` — it determines stacking order",
+      "A BFC is created by `border-radius` — it clips content to the box"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "A BFC is an isolated layout region. It contains floats (solving the clearfix problem), prevents margin collapsing between parent and child, and isolates layout from outside elements. Modern way to create one: `display: flow-root`."
+  }
+]} />
 
 ## Self-Check
 

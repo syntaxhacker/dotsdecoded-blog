@@ -14,6 +14,7 @@ import FlexVsGridDemo from '../../components/demos/FlexVsGridDemo'
 import ViewportUnitsDemo from '../../components/demos/ViewportUnitsDemo'
 import CustomPropertiesDemo from '../../components/demos/CustomPropertiesDemo'
 import PaintOrderDemo from '../../components/demos/PaintOrderDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Why Flexbox and Grid Exist
 
@@ -231,6 +232,107 @@ cheap     transform: translateX(200px) → composite only
 The rule: only use `will-change` on elements that will actually animate, and remove it after the animation completes. Overusing it causes more harm than good.
 
 <PaintOrderDemo client:visible />
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What does `flex: 1` actually set on a flex item?",
+    options: [
+      "flex-grow: 0, flex-shrink: 1, flex-basis: auto",
+      "flex-grow: 1, flex-shrink: 1, flex-basis: 0%",
+      "flex-grow: 1, flex-shrink: 0, flex-basis: 100%",
+      "flex-grow: auto, flex-shrink: auto, flex-basis: 0"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "`flex: 1` is shorthand for `flex: 1 1 0%` — grow by 1, shrink by 1, start at zero width. This makes the item fill remaining space equally with siblings. The `0%` basis means the item starts at zero and grows to fill available space."
+  },
+  {
+    question: "When should you use CSS Grid instead of Flexbox?",
+    options: [
+      "When you need to align items in a single row",
+      "When you need to control both rows AND columns simultaneously — like page layouts, dashboards, or image galleries",
+      "When you need to center content in a container",
+      "When you need responsive navigation bars"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Grid is two-dimensional — it controls rows and columns at the same time. Use it for page skeletons, dashboards, forms with labels and inputs, and image galleries. Flexbox is one-dimensional — use it for components like nav bars, button groups, and card rows."
+  },
+  {
+    question: "What does `repeat(auto-fit, minmax(250px, 1fr))` do, and why does it eliminate media queries?",
+    options: [
+      "It creates exactly 4 columns each 250px wide",
+      "It creates as many columns as fit in the container, each at least 250px wide, sharing extra space equally — the browser automatically adjusts column count based on available width",
+      "It creates a single column that resizes between 250px and 1fr",
+      "It forces all items into a single row with minimum 250px width"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "`auto-fit` creates as many tracks as can fit. `minmax(250px, 1fr)` says each track is at least 250px but grows to fill remaining space. As the viewport shrinks, columns wrap. No media queries needed — the layout adapts automatically."
+  },
+  {
+    question: "What is the difference between `1fr` and `1%` in a CSS Grid template?",
+    options: [
+      "They are identical — both mean 1% of the container",
+      "`1fr` is a fraction of remaining space after gaps and fixed tracks are accounted for; `1%` is a percentage of the container's inner width",
+      "`1fr` only works in Flexbox; `1%` only works in Grid",
+      "`1fr` is larger than `1%` on all screen sizes"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "`1fr` distributes remaining space after gaps and fixed-width tracks are subtracted. `1%` is always a percentage of the container's inner width, ignoring gaps. In `grid-template-columns: 100px 1fr 1fr`, each `1fr` gets half of (container - 100px - gap)."
+  },
+  {
+    question: "Why is `transform: translateX()` faster than `left` for animations?",
+    options: [
+      "Because `transform` uses hardware acceleration while `left` uses software rendering",
+      "Because `transform` only triggers the Composite stage (GPU layer movement), while `left` triggers Layout → Paint → Composite",
+      "Because `transform` is parsed faster by the CSS engine",
+      "Because `left` requires a re-calculation of the cascade"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Changing `left` triggers Layout (recalculate geometry), then Paint (repaint pixels), then Composite. Changing `transform` only triggers Composite — the GPU moves the already-painted layer. This skips the two most expensive stages."
+  },
+  {
+    question: "If you set `--accent: red` on a child element, does it affect its siblings?",
+    options: [
+      "Yes — CSS custom properties cascade to all siblings",
+      "No — custom properties inherit downward through children, not sideways to siblings",
+      "Only if the sibling has `inherit` set on that property",
+      "Only if the parent has `--accent` defined"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "CSS custom properties follow normal inheritance — they pass from parent to child, not sideways to siblings. Setting `--accent: red` on a child affects that child and its descendants, not its siblings. Siblings would only see the value defined on their common parent."
+  },
+  {
+    question: "What does `clamp(1.5rem, 5vw, 3rem)` do for a heading's font size?",
+    options: [
+      "It always uses 5vw regardless of viewport size",
+      "It uses 5vw for fluid scaling but clamps the result so it never goes below 1.5rem or above 3rem",
+      "It picks the largest of the three values",
+      "It picks the middle value of the three"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "`clamp(min, preferred, max)` keeps the value between bounds. The preferred value (`5vw`) scales fluidly with the viewport, but the result never drops below `1.5rem` (on tiny screens) or exceeds `3rem` (on large screens). This replaces most responsive typography breakpoints."
+  },
+  {
+    question: "When should you use `will-change` on an element, and when should you avoid it?",
+    options: [
+      "Use it on every element for maximum performance",
+      "Use it on elements you know will animate (like transform or opacity) to promote them to a compositing layer; avoid overusing it because each layer consumes GPU memory",
+      "Use it only on elements with `position: fixed`",
+      "Avoid it entirely — it causes more problems than it solves"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "`will-change: transform` tells the browser to pre-allocate a compositing layer for an element. This eliminates jank during animations. But each layer consumes GPU memory — promoting hundreds of elements can exhaust mobile GPU memory. Use it deliberately on elements that will actually animate."
+  }
+]} />
 
 ## Self-Check
 

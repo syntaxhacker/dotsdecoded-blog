@@ -16,6 +16,7 @@ import NatSimulationDemo from '../../components/demos/NatSimulationDemo'
 import JourneyDemo from '../../components/demos/JourneyDemo'
 import AttackDemo from '../../components/demos/AttackDemo'
 import TraceDemo from '../../components/demos/TraceDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is an IP Address?
 
@@ -504,4 +505,79 @@ The pattern is consistent: **anonymity is broken by mistakes, not by breaking en
 
 <TraceDemo client:visible />
 
+## Test Your Knowledge
 
+<QuizDemo client:visible questions={[
+  {
+    question: "How many unique addresses does the IPv4 32-bit address space provide?",
+    options: [
+      "65,536",
+      "16.7 million",
+      "4.3 billion",
+      "340 undecillion"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "IPv4 uses 32 bits, yielding 2^32 = approximately 4.3 billion unique addresses. This seemed infinite in the 1980s but ran out as billions of devices came online."
+  },
+  {
+    question: "What are the three RFC 1918 private IP address ranges?",
+    options: [
+      "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16",
+      "10.0.0.0/8, 192.168.0.0/16, 127.0.0.0/8",
+      "172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16",
+      "10.0.0.0/8, 172.16.0.0/12, 224.0.0.0/4"
+    ],
+    correctIndex: 0,
+    points: 10,
+    explanation: "RFC 1918 defines 10.0.0.0/8 (16.7M addresses), 172.16.0.0/12 (1M addresses), and 192.168.0.0/16 (65,536 addresses) as private ranges not routed on the public internet."
+  },
+  {
+    question: "What is the difference between a /24 and a /28 subnet?",
+    options: [
+      "A /24 has 256 usable host addresses while a /28 has 14 usable host addresses",
+      "They are the same size with different naming conventions",
+      "A /28 is larger than a /24",
+      "A /24 uses IPv6 while a /28 uses IPv4"
+    ],
+    correctIndex: 0,
+    points: 15,
+    explanation: "A /24 mask (255.255.255.0) leaves 8 host bits = 256 addresses (254 usable after subtracting network and broadcast). A /28 mask (255.255.255.240) leaves 4 host bits = 16 addresses (14 usable)."
+  },
+  {
+    question: "How does NAT allow many private devices to share one public IP?",
+    options: [
+      "NAT encrypts all traffic so the ISP cannot distinguish devices",
+      "NAT rewrites the source address to its public IP and tracks mappings by port number, so responses are routed back to the correct device",
+      "NAT assigns a unique VLAN tag to each device",
+      "NAT converts IPv4 packets to IPv6 automatically"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "NAT rewrites the source IP/port of outgoing packets to the router's public IP and a unique port. It records the mapping and rewrites the destination on return traffic back to the original private IP/port."
+  },
+  {
+    question: "What is the DNS resolution chain from browser to authoritative nameserver?",
+    options: [
+      "Authoritative nameserver, root, TLD, recursive resolver",
+      "Recursive resolver, TLD, root, authoritative nameserver",
+      "Root, recursive resolver, TLD, authoritative nameserver",
+      "Recursive resolver, root, TLD, authoritative nameserver"
+    ],
+    correctIndex: 3,
+    points: 10,
+    explanation: "The browser first queries a recursive resolver (ISP or public like 1.1.1.1), which asks root servers, then TLD servers (.com), then the authoritative nameserver for the domain, then caches and returns the result."
+  },
+  {
+    question: "Why does IP spoofing only work with UDP-based protocols and not TCP?",
+    options: [
+      "UDP packets are larger than TCP packets",
+      "TCP requires a three-way handshake -- the SYN-ACK goes to the spoofed address, not the attacker, so the connection cannot be established",
+      "UDP uses encryption while TCP does not",
+      "Firewalls block spoofed TCP packets but allow spoofed UDP"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "TCP requires both sides to complete a handshake. If the attacker spoofs the source IP, the SYN-ACK goes to the victim, not the attacker. UDP has no handshake, so the attacker can send spoofed packets and the server responds to the victim."
+  }
+]} />

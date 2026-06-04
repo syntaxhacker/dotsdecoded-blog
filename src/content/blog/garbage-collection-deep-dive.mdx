@@ -10,6 +10,7 @@ import GcGenerationalDemo from '../../components/demos/GcGenerationalDemo'
 import GcTriColorDemo from '../../components/demos/GcTriColorDemo'
 import GcReferenceCountingDemo from '../../components/demos/GcReferenceCountingDemo'
 import GcComparisonDemo from '../../components/demos/GcComparisonDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## The Memory Kitchen: Stack vs Heap
 
@@ -309,5 +310,59 @@ The generational hypothesis exists for a reason: the GC is optimized for the com
 5. Why does Go choose non-generational GC despite the generational hypothesis?
 
 ---
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why does reference counting alone fail to collect unreachable cycles?",
+    options: ["Reference counting is too slow", "Two objects referencing each other each have a refcount of 1 — neither reaches zero even with no external references", "Reference counting cannot track heap objects", "Cycles are impossible in reference-counted systems"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "In a cycle (A references B, B references A), both objects have a refcount of at least 1 from each other. Even when all external references are removed, the mutual references keep both refcounts above zero, so neither is freed — a memory leak."
+  },
+  {
+    question: "What problem does mark-compact solve that mark-sweep does not?",
+    options: ["Mark-sweep cannot identify garbage", "Mark-sweep leaves fragmentation (gaps) in the heap; mark-compact slides live objects together to eliminate gaps", "Mark-compact is faster than mark-sweep", "Mark-sweep cannot handle large objects"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "After mark-sweep frees unmarked objects, the heap has scattered free blocks (fragmentation). Allocating a large object may fail even with enough total free space. Mark-compact slides all live objects together, consolidating free space at the end."
+  },
+  {
+    question: "Why do generational GCs use two survivor spaces instead of one?",
+    options: ["To use less memory", "To alternate between them during minor GC — live objects are copied from one to the other, avoiding the need to shift objects in place", "One is for young objects, one is for old objects", "Two survivor spaces are required by the JVM specification"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Two survivor spaces (S0, S1) enable copying collection: live objects are copied from Eden to the empty survivor space. The other survivor space (with older objects) is also copied. This alternation avoids compaction — objects are always copied to a contiguous region."
+  },
+  {
+    question: "How does the write barrier prevent the GC from collecting a live object during concurrent marking?",
+    options: ["It pauses the mutator whenever a pointer is written", "It ensures that when a black object references a new white object, the white object is marked gray to be rescanned", "It prevents all pointer writes during GC", "It logs all writes to a file for later analysis"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The tri-color invariant says no black object may point to a white object. When the mutator writes a reference from a black object to a white object, the write barrier shades the white object gray (or the black object gray), ensuring it will be rescanned and not prematurely freed."
+  },
+  {
+    question: "Why does Go choose a non-generational GC despite the generational hypothesis?",
+    options: ["Go objects are always long-lived", "Go prioritizes low, predictable latency over throughput — a non-generational concurrent GC with sub-millisecond pauses fits Go's design goals", "Generational GC is not possible with Go's type system", "Go's GC cannot handle cycles"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Go's GC is designed for low-latency server workloads. A non-generational concurrent tri-color mark-sweep achieves sub-500-microsecond pauses. The trade-off is more frequent GC cycles as the heap grows, but the consistent pause times are more valuable for Go's target use cases."
+  },
+  {
+    question: "What is the key difference between stop-the-world and concurrent GC?",
+    options: ["Stop-the-world is more accurate", "Stop-the-world pauses the entire program while collecting; concurrent GC runs alongside application code with shorter pauses", "Concurrent GC uses less memory", "Stop-the-world is always faster"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Stop-the-world GC halts all application threads until collection completes (10-100ms+ pauses). Concurrent GC runs collection on separate threads or during safe points, reducing pauses to 1-5ms at the cost of some throughput overhead from write barriers."
+  },
+  {
+    question: "Why are pointer-heavy data structures more expensive for the GC to collect than flat arrays?",
+    options: ["They take more memory", "The GC must trace every pointer to determine reachability; flat arrays of values contain no inter-object references to trace", "They cause more fragmentation", "They trigger more minor GCs"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "During the mark phase, the GC traverses every pointer from each live object to find all reachable objects. A pointer-heavy graph (trees, linked lists) has many edges to traverse. A flat array of primitive values has no inter-object pointers, so marking is near-instant."
+  }
+]} />
 
 Garbage collection is one of the most impactful runtime features ever invented. It eliminates entire categories of bugs (use-after-free, double-free, memory leaks from forgotten frees) at the cost of some CPU and memory overhead. Understanding how GCs work -- mark-sweep, generational collection, tri-color marking, write barriers -- lets you write code that works with the GC rather than against it.

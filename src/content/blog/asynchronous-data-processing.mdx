@@ -11,6 +11,7 @@ import PubSubDemo from '../../components/demos/PubSubDemo'
 import EventFlowDemo from '../../components/demos/EventFlowDemo'
 import BatchVsStreamDemo from '../../components/demos/BatchVsStreamDemo'
 import StorageTypeDemo from '../../components/demos/StorageTypeDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine you walk into a restaurant. There are two ways you can get your food. In the first, you stand at the counter, place your order, and wait exactly where you are until the chef finishes cooking. You cannot do anything else. Your entire evening is paused. In the second, you place your order, the host hands you a buzzer, and you go sit down. You check your phone, chat with friends, order a drink. When the food is ready, the buzzer lights up. You walk over and grab it.
 
@@ -164,6 +165,107 @@ Object storage is the default for anything that does not need low-latency random
 | Cost | High | Medium | Low |
 | Scalability | Limited per volume | Medium | Virtually unlimited |
 | Best for | Databases, VMs | Shared code, configs | Media, backups, logs |
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "A user signs up and you send a welcome email. The email takes 2 seconds to send. Should this be synchronous or asynchronous?",
+    options: [
+      "Synchronous — the user should see the email sent confirmation",
+      "Asynchronous — the user does not need to wait for the email to finish sending",
+      "Synchronous — emails must be sent before the response returns",
+      "Either works — there is no meaningful difference"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Email sending is a classic async use case. The user does not need to see the email sent before continuing. By making it async, the response returns instantly and a background worker handles the 2-second send, keeping the system responsive."
+  },
+  {
+    question: "What is the key difference between at-least-once and exactly-once delivery in message queues?",
+    options: [
+      "At-least-once guarantees ordering, exactly-once does not",
+      "At-least-once may deliver duplicates, exactly-once delivers each message precisely once",
+      "At-least-once is faster, exactly-once is slower",
+      "At-least-once uses UDP, exactly-once uses TCP"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "With at-least-once delivery, if a consumer crashes after processing but before acknowledging, the queue re-delivers the message — creating duplicates. Exactly-once requires coordination (transactions, deduplication) to ensure each message is processed precisely once, at the cost of performance."
+  },
+  {
+    question: "In a pub/sub system, a message is published to a topic with 5 subscribers. How many subscribers receive the message?",
+    options: [
+      "Exactly 1 (the first available subscriber)",
+      "All 5 subscribers",
+      "The number configured by the broker's load balancer",
+      "Depends on whether the message is durable"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Pub/sub is fan-out communication — every subscriber registered to a topic receives a copy of every message published to it. This is the fundamental difference from message queues, where each message goes to exactly one consumer."
+  },
+  {
+    question: "In event-driven architecture, what is the difference between an event and a command?",
+    options: [
+      "Events are synchronous, commands are asynchronous",
+      "Events are facts about something that happened, commands are requests to do something",
+      "Events are sent to queues, commands are sent to topics",
+      "There is no meaningful difference — they are used interchangeably"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "An event (like OrderPlaced) is a passive fact — it says something happened. A command (like ProcessPayment) is an active request — it says do something. Events are easier to replay and reason about because they are immutable records."
+  },
+  {
+    question: "Why is idempotency important in systems with at-least-once delivery?",
+    options: [
+      "It ensures messages are delivered in order",
+      "It ensures processing the same message twice produces the same result, preventing duplicate side effects",
+      "It reduces network latency",
+      "It eliminates the need for a dead letter queue"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Since at-least-once delivery can deliver the same message twice, your consumer must be idempotent — processing it a second time should produce the same result as the first time. Without idempotency, duplicates cause double charges, duplicate emails, or corrupted state."
+  },
+  {
+    question: "Which storage type is best suited for a database that needs sub-millisecond random read access?",
+    options: [
+      "Object storage (like S3)",
+      "File storage (like NFS)",
+      "Block storage (like EBS)",
+      "All three perform equally for databases"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Block storage provides raw byte-level access with sub-millisecond latency — no filesystem overhead, no HTTP layer, no path traversal. Databases need this for reading specific pages at specific offsets. Object storage (S3) and file storage (NFS) add overhead layers that databases cannot afford."
+  },
+  {
+    question: "What is the Lambda architecture in data processing?",
+    options: [
+      "A serverless computing framework for running ETL jobs",
+      "A combination of a batch layer for accurate historical results and a speed layer for real-time approximations",
+      "A message queue pattern that supports both FIFO and priority ordering",
+      "A storage architecture that combines block and object storage"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Lambda architecture combines two processing paths: a batch layer that computes accurate results from all historical data (high latency, high accuracy), and a speed layer that provides real-time approximations (low latency, approximate). The final result merges both."
+  },
+  {
+    question: "When should you choose stream processing over batch processing?",
+    options: [
+      "When you need to process 10 million records once a night",
+      "When you need near real-time results like fraud detection or live dashboards",
+      "When your data is too large to fit in memory",
+      "When you need exactly-once delivery guarantees"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Stream processing handles data the instant it arrives, providing near real-time results. This makes it ideal for fraud detection, live dashboards, alerting systems, and IoT sensors where latency matters. Batch processing is better for nightly reports, billing cycles, and model training."
+  }
+]} />
 
 ## Self-Check
 

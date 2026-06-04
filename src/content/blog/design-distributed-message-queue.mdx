@@ -11,6 +11,7 @@ import ConsumerGroupDemo from '../../components/demos/ConsumerGroupDemo'
 import OffsetManagementDemo from '../../components/demos/OffsetManagementDemo'
 import KafkaReplicationDemo from '../../components/demos/KafkaReplicationDemo'
 import KafkaArchitectureDemo from '../../components/demos/KafkaArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is a Distributed Message Queue?
 
@@ -430,6 +431,60 @@ kafka-producer-perf-test.sh \
 A distributed message queue ties every piece we have discussed into a coherent whole. Producers write to topics. Topics are split into partitions for parallelism. Partitions are replicated across brokers for fault tolerance. Consumer groups coordinate to divide the work of reading. Offsets track progress and enable replay. KRaft manages metadata without external dependencies.
 
 <KafkaArchitectureDemo client:visible />
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the partition assignment formula for routing messages to specific partitions?",
+    options: ["partition = key % num_partitions", "partition = hash(key) % num_partitions", "partition = random() % num_partitions", "partition = crc32(key) / num_partitions"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Kafka computes hash(key) % num_partitions to determine which partition receives a message. This ensures all messages with the same key land in the same partition, preserving ordering for that key."
+  },
+  {
+    question: "How does a consumer group recover when a consumer crashes?",
+    options: ["The topic is permanently partitioned with fewer consumers", "The group coordinator triggers a rebalance, redistributing the crashed consumer's partitions to remaining consumers", "All consumers restart from offset 0", "The partitions are reassigned to a different consumer group"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When a consumer crashes, the group coordinator detects the failure (via heartbeat timeout) and triggers a rebalance. The crashed consumer's partitions are reassigned to the remaining healthy consumers in the group."
+  },
+  {
+    question: "Why does Kafka guarantee ordering within a partition but not across partitions?",
+    options: ["The network cannot handle cross-partition messages", "Each partition has a single leader that appends messages sequentially, but different partitions operate independently", "Messages from different partitions use different serialization formats", "The consumer cannot read from multiple partitions simultaneously"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Each partition has one leader that appends messages sequentially, ensuring total order within it. But different partitions are written by different leaders in parallel with no coordination between them, so there is no defined order across partitions."
+  },
+  {
+    question: "What happens to a follower in the ISR set if it loses network connectivity for 60 seconds?",
+    options: ["It is promoted to leader", "It is removed from the ISR set after the lag time threshold (default 30s)", "It automatically becomes a leader", "Nothing — it remains in the ISR indefinitely"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A follower is removed from the ISR set if it falls behind the leader by more than replica.lag.time.max.ms (default 30 seconds). After 60 seconds of disconnect, it would be removed from the ISR."
+  },
+  {
+    question: "What does enabling compression on the producer reduce?",
+    options: ["Only network bandwidth", "Only disk usage", "Both network bandwidth and disk usage", "Neither — it only reduces CPU usage"],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Compression reduces both network bandwidth (smaller messages in transit) and disk usage (smaller data written to partition logs). The trade-off is increased CPU usage for compression and decompression."
+  },
+  {
+    question: "When would a single-partition topic be preferable to a multi-partition topic?",
+    options: ["When you need maximum throughput", "When you need global ordering across all messages", "When you have many consumers", "When you need high availability"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "A single-partition topic provides global ordering across all messages since there is only one sequential log. The trade-off is no parallelism — all writes and reads go through one leader."
+  },
+  {
+    question: "What are the three mechanisms that work together for Kafka's exactly-once semantics?",
+    options: ["Replication, partitioning, and caching", "Idempotent producer, transactional API, and idempotent consumer", "Compression, batching, and zero-copy", "Leader election, ISR management, and log compaction"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Exactly-once requires: (1) idempotent producer to prevent duplicates on write, (2) transactional API to atomically write output and commit offset, and (3) idempotent consumer to handle seeing the same message twice after a crash."
+  }
+]} />
 
 ### Self-Check
 

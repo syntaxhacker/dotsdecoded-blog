@@ -10,6 +10,7 @@ import EsAnalysisDemo from '../../components/demos/EsAnalysisDemo'
 import EsScoringDemo from '../../components/demos/EsScoringDemo'
 import EsQueryDemo from '../../components/demos/EsQueryDemo'
 import EsArchitectureDemo from '../../components/demos/EsArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Every developer has run `SELECT * FROM articles WHERE title LIKE '%search%'` at least once. It works on a small database. On a million rows, it grinds to a halt. Elasticsearch was built to solve this problem — and it does so with an elegant combination of data structures, information retrieval math, and distributed systems.
 
@@ -439,6 +440,60 @@ Segment merge (background) → consolidate → reclaim deletes
 ```
 
 If a node crashes before a flush, the translog replays the operations. If a node crashes after a flush, the committed segments on disk are complete. The translog is the bridge between performance (in-memory buffering) and durability (fsynced writes).
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why does a LIKE '%term%' query in a relational database perform poorly on large tables?",
+    options: ["The database locks the table during the scan", "It cannot use a B-tree index and must scan every row, checking every character", "LIKE queries are not supported on large tables", "The result set is always returned in full"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A leading wildcard (%term%) prevents the B-tree index from being used because the database cannot determine a starting point. It must perform a full table scan, comparing every character in every row — turning search into an O(n) operation."
+  },
+  {
+    question: "What is the key difference between a 'text' field and a 'keyword' field in Elasticsearch mappings?",
+    options: ["text fields are faster; keyword fields are slower", "text fields are analyzed through the analysis chain for full-text search; keyword fields are stored as-is for exact matching", "text fields support aggregations; keyword fields do not", "keyword fields support fuzzy matching; text fields do not"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A text field goes through tokenization, lowercasing, stemming, and other analysis steps before indexing, enabling full-text search. A keyword field stores the raw value as a single token, supporting exact-match queries, aggregations, and sorting."
+  },
+  {
+    question: "In the BM25 scoring formula, what does the term saturation parameter k1 control?",
+    options: ["How much document length affects the score", "How quickly the term frequency contribution plateaus with repeated occurrences", "The maximum number of terms in a query", "The IDF weight of rare terms"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "k1 controls how much term frequency (TF) contributes to the score. Higher k1 means TF contributes more before saturating. With default k1=1.2, the 10th occurrence of a term adds far less score than the 1st — diminishing returns prevent a single repeated term from dominating."
+  },
+  {
+    question: "Why is filter context preferred over must for non-scoring conditions in a bool query?",
+    options: ["Filter clauses execute faster due to query optimization", "Filter results are cached in the filter cache and reused across queries, while must clauses are not cached", "Filter clauses use less memory", "Must clauses cannot handle date ranges"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Filter context queries produce a bitset per segment that is cached and reused across queries. Since filters are binary (yes/no, no scoring), the cache avoids re-executing the same filter. Must clauses contribute to scoring and are not cached."
+  },
+  {
+    question: "What is the purpose of the translog (transaction log) in Elasticsearch indexing?",
+    options: ["It stores the inverted index for fast lookups", "It is a write-ahead log that ensures durability between Lucene commits, preventing data loss on crash", "It records query performance metrics", "It stores cluster state changes"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The translog records every indexing operation before acknowledging it. If a node crashes before the in-memory buffer is flushed to a Lucene segment on disk, the translog is replayed on recovery to prevent data loss."
+  },
+  {
+    question: "In a distributed search, what happens during the 'gather' phase?",
+    options: ["Each shard independently returns results to the client", "The coordinating node merges top-N results from all shards, then fetches the full documents", "The master node redistributes shards", "All shards exchange data with each other"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "During scatter-gather, each shard returns only doc IDs and scores for its top-N results. The coordinating node merges these, then issues a fetch phase to retrieve the full documents from the winning shards before returning to the client."
+  },
+  {
+    question: "What makes Elasticsearch 'near-real-time' rather than real-time?",
+    options: ["Network latency between client and cluster", "Indexed documents become searchable only after the refresh interval (default 1 second), not immediately", "The translog writes asynchronously", "Replication introduces delay"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Documents go into an in-memory buffer and translog upon indexing. They only become visible to search after a refresh (default every 1 second) writes the buffer to a new Lucene segment. This ~1 second delay is why Elasticsearch is 'near' real-time."
+  }
+]} />
 
 ## Self-Check
 

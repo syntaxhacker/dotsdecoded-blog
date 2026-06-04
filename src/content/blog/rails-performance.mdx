@@ -10,6 +10,7 @@ import BackgroundJobDemo from '../../components/demos/BackgroundJobDemo'
 import EagerLoadingDemo from '../../components/demos/EagerLoadingDemo'
 import DatabaseIndexDemo from '../../components/demos/DatabaseIndexDemo'
 import ConnectionPoolDemo from '../../components/demos/ConnectionPoolDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Why Performance Matters
 
@@ -657,3 +658,104 @@ Before moving on, verify you can answer these:
 - [ ] Why is `<link rel="preload">` generally preferred over HTTP/2 Server Push?
 
 If you can answer all of these, you have a solid foundation in Rails performance optimization. The next step is applying these techniques to your own application — profile first, optimize second, and measure the results.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the difference between fragment caching and Russian doll caching?",
+    options: [
+      "Fragment caching is faster; Russian doll caching is slower",
+      "Russian doll caching nests fragment caches inside each other, so only the changed inner fragment is re-rendered",
+      "There is no difference — they are the same thing",
+      "Fragment caching stores entire pages; Russian doll caching stores only CSS"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Russian doll caching nests fragments. If a single comment changes, only that comment's fragment is re-rendered. The outer post cache remains valid because its cache key hasn't changed."
+  },
+  {
+    question: "Why should you use background jobs instead of doing work synchronously in a controller?",
+    options: [
+      "Background jobs use less memory",
+      "The web request finishes quickly and tasks like email sending or image processing run in a separate process",
+      "Background jobs are guaranteed to never fail",
+      "Synchronous work is not allowed in Rails"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Background jobs (via Sidekiq, etc.) let the web request finish in ~200ms while time-consuming tasks run separately. Users don't wait for emails, thumbnails, or data imports."
+  },
+  {
+    question: "What does the Bullet gem do during development?",
+    options: [
+      "It compiles assets faster",
+      "It detects N+1 queries and unused eager loading, alerting you to fix them before deployment",
+      "It generates test factories automatically",
+      "It monitors production server performance"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Bullet watches every request and alerts you when it detects N+1 query patterns or unnecessary eager loading, catching performance issues before they reach production."
+  },
+  {
+    question: "What is the tradeoff when adding a database index?",
+    options: [
+      "There is no tradeoff — indexes only improve performance",
+      "Indexes make reads faster but make writes slower — every INSERT/UPDATE/DELETE must also update every index",
+      "Indexes use more memory but have no effect on speed",
+      "Indexes only work on primary keys"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Indexes speed up reads by avoiding full table scans, but every write operation must update not just the table but also every index on that table. A table with 10 indexes pays the write penalty 10 times."
+  },
+  {
+    question: "What happens when a connection pool is exhausted in Rails?",
+    options: [
+      "The application continues running normally",
+      "Rails raises ActiveRecord::ConnectionTimeoutError after waiting for the configured timeout period",
+      "Rails automatically creates more connections",
+      "The database restarts automatically"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When all connections are busy, a thread waits up to timeout milliseconds. If no connection becomes available, Rails raises ConnectionTimeoutError — usually indicating the pool is too small or a slow query is holding connections."
+  },
+  {
+    question: "Why is <link rel='preload'> generally preferred over HTTP/2 Server Push?",
+    options: [
+      "Preload is faster than Server Push in every case",
+      "Preload lets the browser check its cache first and skip the download if the resource is already cached, avoiding wasted bandwidth",
+      "Server Push is not supported by any browsers",
+      "Preload sends the resource before the browser requests it"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Server Push sends resources before the browser asks, which wastes bandwidth if the resource is already cached. Preload hints the browser to fetch with high priority but lets it check its cache first."
+  },
+  {
+    question: "What is the recommended relationship between Puma thread count and connection pool size?",
+    options: [
+      "Pool size should be half the thread count",
+      "Pool size should be at least as large as the Puma thread count per worker",
+      "Pool size should always be 5",
+      "They are unrelated settings"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Each Puma thread needs its own database connection. Pool size >= threads per worker ensures every thread gets a connection immediately without waiting."
+  },
+  {
+    question: "Which caching store is most commonly used in production Rails applications?",
+    options: [
+      "MemoryStore",
+      "FileStore",
+      "RedisStore",
+      "DiskStore"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Redis is the most popular production cache store because it's fast, supports eviction policies, and can be shared across multiple application servers."
+  }
+]} />

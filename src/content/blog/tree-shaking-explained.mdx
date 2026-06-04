@@ -11,6 +11,7 @@ import ImportGraphDemo from '../../components/demos/ImportGraphDemo'
 import SideEffectDemo from '../../components/demos/SideEffectDemo'
 import ShakePatternsDemo from '../../components/demos/ShakePatternsDemo'
 import BundleImpactDemo from '../../components/demos/BundleImpactDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine you are packing for a weekend trip. You walk into your closet, which has 200 shirts, 50 pairs of pants, and 30 jackets. You need exactly three shirts and one pair of pants. But instead of picking those four items, you dump the entire closet into your suitcase and lug it to the airport.
 
@@ -218,5 +219,94 @@ Before shipping your application, run through this checklist to verify your tree
 - Are you using named imports instead of default imports where possible?
 - Have you run `vite build` and inspected the output for unexpected bundle sizes?
 - Have you used a bundle analyzer (like `rollup-plugin-visualizer`) to identify which libraries are contributing the most to your bundle?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why can ES modules be tree-shaken but CommonJS cannot?",
+    options: [
+      "ES modules are faster to execute",
+      "ES module imports are static declarations the bundler can analyze without running code; CommonJS require() is a dynamic function call",
+      "CommonJS does not support export statements",
+      "ES modules do not allow side effects"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "ES module import/export are static syntax the bundler can parse at build time. CommonJS require() is a function call that can do anything (conditional requires, dynamic paths), so the bundler cannot safely determine what is used."
+  },
+  {
+    question: "What does the sideEffects field in package.json tell the bundler?",
+    options: [
+      "The package contains no JavaScript",
+      "Importing files in this package does not execute observable side effects beyond exporting values, so unused exports can be safely removed",
+      "The package uses only ES modules",
+      "The package is already optimized"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "sideEffects: false is a promise that module files are pure — they only export values and do not set up listeners, modify globals, or perform other observable actions. This lets the bundler safely remove unused exports."
+  },
+  {
+    question: "What is the reachability analysis algorithm that bundlers use for tree shaking?",
+    options: [
+      "Check every export in every file",
+      "Start at the entry point, follow imports, mark reached exports as live, and remove everything else as dead code",
+      "Randomly sample exports and keep the ones that are used",
+      "Parse the AST and remove all functions without callers"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Reachability analysis starts at the entry point, traces every import recursively, marks all reached exports as live, and removes everything unreachable — the same algorithm used in compilers for dead code elimination."
+  },
+  {
+    question: "Why do side effects prevent tree shaking?",
+    options: [
+      "They make the bundle larger by definition",
+      "The bundler cannot tell if side-effect code is safe to remove by looking at syntax alone, so it conservatively keeps the entire module",
+      "Side effects require CommonJS",
+      "Bundlers do not support side effects"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A side effect like window.addEventListener runs on import regardless of which exports are used. The bundler cannot distinguish safe-to-remove code from critical side effects, so it keeps everything."
+  },
+  {
+    question: "What happens when you import from a library that uses CommonJS instead of ES modules?",
+    options: [
+      "Tree shaking works normally",
+      "The bundler falls back to CommonJS and includes the entire package because it cannot determine what is used",
+      "The build fails immediately",
+      "Only named exports are included"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Without ES module syntax, the bundler cannot statically analyze imports and must include the entire package to be safe, defeating tree shaking."
+  },
+  {
+    question: "Which import pattern is most tree-shakeable?",
+    options: [
+      "import _ from 'lodash'",
+      "import { debounce } from 'lodash-es'",
+      "const debounce = require('lodash').debounce",
+      "import * as utils from './utils'"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Named imports from ES module packages are most tree-shakeable. The bundler knows exactly which export is used and can remove everything else."
+  },
+  {
+    question: "How much can tree shaking reduce a library like lodash-es when you only use a few utilities?",
+    options: [
+      "About 10-20%",
+      "Up to 95% — from 72KB down to 3KB",
+      "Tree shaking does not work on lodash",
+      "About 50%"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "lodash-es with sideEffects: false and named imports can drop from 72KB to around 3KB — a 95% reduction — because only the imported utilities are included."
+  }
+]} />
 
 Tree shaking is one of the most impactful optimizations available to frontend developers. It costs nothing — no code changes, no architectural shifts, no new tools. You just need ES modules, a modern bundler, and libraries that declare themselves side-effect-free. The result is smaller bundles, faster page loads, and happier users.

@@ -11,6 +11,7 @@ import CacheShardingDemo from '../../components/demos/CacheShardingDemo'
 import CacheReplicationDemo from '../../components/demos/CacheReplicationDemo'
 import EvictionPolicyDemo from '../../components/demos/EvictionPolicyDemo'
 import CacheArchitectureDemo from '../../components/demos/CacheArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Is a Cache?
 
@@ -415,6 +416,107 @@ profile = json.loads(rc.get("user:profile:42"))
 ```
 
 <CacheArchitectureDemo client:visible />
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the fundamental speed advantage of a cache over a database?",
+    options: [
+      "Caches use faster network connections",
+      "Reading from RAM is ~1000x faster than reading from disk — a Redis read takes ~0.5ms vs 10-50ms for a database query",
+      "Caches use compression to reduce latency",
+      "Caches bypass the operating system entirely"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "RAM access is ~100ns vs ~100us for SSD and ~10ms for HDD. A cached Redis read takes ~0.5ms while a database query over the network takes 10-50ms. At 100K req/s, this saves 1000+ seconds of cumulative latency per second."
+  },
+  {
+    question: "In the cache-aside pattern, what happens on a cache miss?",
+    options: [
+      "The cache automatically fetches the data",
+      "The application reads from the database, writes the result into the cache, and returns it",
+      "The application returns an error",
+      "The cache is invalidated entirely"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Cache-aside puts the application in control: check cache → if miss, read DB → write to cache → return. The cache is a passive key-value store; the application decides when to populate it."
+  },
+  {
+    question: "Why does consistent hashing solve the problem of adding/removing cache nodes?",
+    options: [
+      "It prevents all cache misses",
+      "When a node is added or removed, only ~1/N of keys are affected (those between the old and new node positions), instead of every key being reassigned",
+      "It uses a random assignment strategy",
+      "It replicates all data to every node"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Simple modulo reassignment (hash % N) moves every key when N changes. Consistent hashing places both keys and nodes on a ring — only keys in the affected arc move, preventing a cache miss storm."
+  },
+  {
+    question: "What is the difference between LRU and LFU eviction policies?",
+    options: [
+      "LRU is faster; LFU is slower",
+      "LRU evicts the item accessed longest ago; LFU evicts the item accessed fewest times — LRU is better for general workloads, LFU for stable popularity distributions",
+      "They are the same policy with different names",
+      "LRU is for databases; LFU is for caches"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "LRU (Least Recently Used) assumes recently-used items are more valuable. LFU (Least Frequently Used) tracks access counts. LRU is simpler and better for general use; LFU excels when a few items get 90% of traffic."
+  },
+  {
+    question: "What is a cache stampede and how do you prevent it?",
+    options: [
+      "When too many clients connect simultaneously",
+      "When a popular key expires and thousands of concurrent requests all miss and hit the database — prevent with a mutex lock or probabilistic early expiry",
+      "When the cache runs out of memory",
+      "When replication lag causes stale reads"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A cache stampede overwhelms the database when a hot key expires. Mutex locks allow only one thread to recompute. Probabilistic early expiry recomputes before the TTL expires based on access patterns."
+  },
+  {
+    question: "Why is Redis replication asynchronous by default?",
+    options: [
+      "Synchronous replication is not supported",
+      "Async replication lets the master respond immediately without waiting for replicas — faster writes, but replicas may lag with stale data",
+      "Async replication uses less memory",
+      "Synchronous replication is slower to implement"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Async replication trades consistency for speed. The master acknowledges writes immediately without waiting for replica confirmation. Replicas may have stale data during lag. Use WAIT for synchronous replication at a latency cost."
+  },
+  {
+    question: "What is write-behind caching and what is its main risk?",
+    options: [
+      "Writing to both cache and database simultaneously",
+      "The application writes to Redis and immediately ACKs; a background worker batch-persists to the database — the main risk is data loss if Redis crashes before the worker persists",
+      "Writing to the database first, then the cache",
+      "Writing only to cache and never to the database"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "Write-behind gives the fastest write latency by ACKing immediately from Redis. A background worker drains a queue and batch-persists to the DB. Risk: if Redis crashes before the worker persists, data is lost."
+  },
+  {
+    question: "Why does Redis use approximate LRU instead of exact LRU?",
+    options: [
+      "Approximate LRU is more accurate",
+      "Exact LRU requires tracking every access with O(1) overhead; approximate LRU samples ~5 keys and evicts the oldest, producing near-identical results with much less memory",
+      "Approximate LRU is faster to implement",
+      "Redis does not support LRU at all"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "Exact LRU needs a doubly-linked list updated on every access — expensive at Redis's throughput. Approximate LRU samples 5 random keys and evicts the oldest, achieving similar hit rates with a fraction of the overhead."
+  }
+]} />
 
 ## Self-Check Questions
 

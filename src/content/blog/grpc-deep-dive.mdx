@@ -10,6 +10,7 @@ import GrpcUnaryDemo from '../../components/demos/GrpcUnaryDemo'
 import GrpcStreamingDemo from '../../components/demos/GrpcStreamingDemo'
 import GrpcInterceptorDemo from '../../components/demos/GrpcInterceptorDemo'
 import GrpcVsRestDemo from '../../components/demos/GrpcVsRestDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What is RPC?
 
@@ -481,3 +482,80 @@ The key takeaways:
 - **gRPC is not a REST replacement** -- it is a complementary tool optimized for internal services and streaming workloads
 
 When you need to move data between services efficiently, with strong contracts and native streaming, gRPC is the tool that gets out of your way and lets you focus on what matters: the business logic.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the four streaming patterns supported by gRPC?",
+    options: [
+      "Request, Response, Batch, Stream",
+      "Unary, Server-streaming, Client-streaming, Bidirectional streaming",
+      "Sync, Async, Queue, Push",
+      "Pull, Push, Poll, Subscribe"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "gRPC supports four patterns: unary (1 request, 1 response), server-streaming (1 request, many responses), client-streaming (many requests, 1 response), and bidirectional streaming (many requests, many responses)."
+  },
+  {
+    question: "In Protocol Buffers, why must you never reuse a field number after deleting a field?",
+    options: [
+      "The compiler will reject the schema change",
+      "Old code might interpret new data in that slot using the old type, causing silent data corruption",
+      "Field numbers are used as encryption keys",
+      "The wire format requires sequential field numbers"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Reusing a field number means old clients reading new data will decode it using the old field's type. This causes silent corruption. Mark deleted numbers as `reserved` to prevent accidental reuse."
+  },
+  {
+    question: "What does gRPC use for transport instead of HTTP/1.1?",
+    options: [
+      "WebSocket",
+      "HTTP/2 with multiplexed streams",
+      "Raw TCP sockets",
+      "UDP with custom framing"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "gRPC uses HTTP/2 as its transport, which provides multiplexed streams, binary framing, flow control, and header compression via HPACK."
+  },
+  {
+    question: "What is the purpose of gRPC deadlines and how do they propagate?",
+    options: [
+      "Deadlines set a maximum response size; they don't propagate across services",
+      "Deadlines set a client-side timeout that propagates through the call chain, with remaining time automatically forwarded to downstream services",
+      "Deadlines are server-side only and cannot be set by clients",
+      "Deadlines define how long a server can hold a connection open"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Deadlines propagate through the call chain. If service A calls B with a 5s deadline and B calls C after 1s, C receives a 4s deadline. This prevents cascading failures."
+  },
+  {
+    question: "How does gRPC handle schema evolution compared to JSON?",
+    options: [
+      "Both handle evolution identically through field-level default values",
+      "Protobuf uses field numbers for wire identification, allowing new fields to be added without breaking old clients that simply skip unknown fields",
+      "JSON is inherently backward compatible while protobuf is not",
+      "gRPC requires versioned URLs for schema changes"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Protobuf encodes fields by number, not name. Old clients skip unrecognized field numbers and get defaults for missing ones. JSON lacks this mechanism, making every new field a potential breaking change."
+  },
+  {
+    question: "Why is load balancing gRPC different from HTTP load balancing?",
+    options: [
+      "gRPC uses a different port range than HTTP",
+      "gRPC connections are long-lived HTTP/2 connections with multiplexed RPCs, so L4 load balancing sends all RPCs to the same server",
+      "gRPC requires DNS-based load balancing only",
+      "gRPC does not support load balancing"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A gRPC client opens one HTTP/2 connection and multiplexes many RPCs over it. L4 load balancing distributes at the connection level, so all RPCs go to one server. You need L4 RPC-level or client-side load balancing."
+  }
+]} />

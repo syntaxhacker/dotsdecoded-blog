@@ -17,6 +17,7 @@ import LoadBalancerDemo from '../../components/demos/LoadBalancerDemo'
 import CacheStrategyDemo from '../../components/demos/CacheStrategyDemo'
 import FirewallRulesDemo from '../../components/demos/FirewallRulesDemo'
 import MiddlewarePipelineDemo from '../../components/demos/MiddlewarePipelineDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## The Big Picture
 
@@ -256,3 +257,64 @@ When your API is slow, check each layer in order:
 **Idempotency cheat sheet:** GET and PUT are idempotent. POST is not. DELETE is idempotent. PATCH depends on implementation. If your payment API uses POST, add an idempotency key header so retrying a failed payment doesn't double-charge.
 
 **Timeout defaults you should set:** DNS: 5s, TCP connect: 10s, TLS: 10s, HTTP request: 30s (API), 300s (file upload). Always set timeouts. A connection without a timeout is a connection that hangs forever.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "At which OSI layer does your application code (HTTP, DNS) operate?",
+    options: ["Layer 4 (Transport)", "Layer 3 (Network)", "Layer 7 (Application)", "Layer 2 (Data Link)"],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Layer 7 (Application) is where HTTP, DNS, SSH, and your application code live. Layer 4 is TCP/UDP, Layer 3 is IP routing, and Layer 2 is Ethernet/MAC addresses."
+  },
+  {
+    question: "Why is TCP used for REST APIs but UDP for video streaming?",
+    options: ["TCP is faster than UDP", "APIs need every response intact while a dropped video frame is acceptable", "UDP cannot handle large payloads", "REST requires ordered delivery but video does not"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "TCP guarantees delivery, ordering, and error correction — essential for API responses where every byte matters. UDP sacrifices reliability for speed, which is acceptable for video where a dropped frame is better than lag."
+  },
+  {
+    question: "What does the TCP 3-way handshake accomplish?",
+    options: ["Encrypts the connection with TLS", "Establishes a reliable connection with SYN, SYN-ACK, ACK", "Assigns an IP address to the client", "Resolves the domain name to an IP"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The 3-way handshake (SYN, SYN-ACK, ACK) establishes a reliable TCP connection before any data is sent. It costs roughly one round trip (20-100ms) before the first HTTP request can be made."
+  },
+  {
+    question: "An HTTP POST to create a resource is sent twice. What happens?",
+    options: ["One resource is created (POST is idempotent)", "Two resources are created (POST is not idempotent)", "The second request returns a 409 conflict", "The server deduplicates based on the request body"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "POST is not idempotent — sending the same POST request twice creates two resources. GET, PUT, and DELETE are idempotent. If your payment API uses POST, add an idempotency key header to prevent double-charging on retries."
+  },
+  {
+    question: "Your staging API resolves in 5ms but production takes 180ms. What is the likely cause?",
+    options: ["The production server is slower", "DNS TTL is set to 0, forcing a lookup at the authoritative nameserver every time", "The production SSL certificate is expired", "The production load balancer is misconfigured"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A TTL of 0 means every DNS lookup must go all the way to the authoritative nameserver instead of using cached results. Increasing TTL to 300 (5 minutes) and adding a local DNS resolver fixes the issue."
+  },
+  {
+    question: "Why does TLS prevent man-in-the-middle attacks?",
+    options: ["It encrypts data with a shared password", "The server's certificate is verified against trusted CAs, preventing impersonation", "It uses a VPN tunnel between client and server", "It requires two-factor authentication"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "TLS certificates are signed by trusted Certificate Authorities. The client verifies the server's certificate against its trust store, ensuring the server is who it claims to be. An attacker cannot impersonate the server without a valid certificate from a trusted CA."
+  },
+  {
+    question: "What is the cache hierarchy from closest to farthest from the user?",
+    options: ["Redis -> Browser -> CDN -> Database", "Browser -> CDN -> Redis -> Database", "CDN -> Browser -> Redis -> Database", "Database -> Redis -> CDN -> Browser"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The cache hierarchy is: Browser cache (zero server cost) -> CDN (5-20ms at edge) -> Application cache like Redis (sub-millisecond) -> Database (slowest). Each cache miss falls through to the next layer."
+  },
+  {
+    question: "In a middleware pipeline, why must CORS run before authentication?",
+    options: ["CORS is faster than auth", "Preflight OPTIONS requests have no auth headers, so auth would reject them", "CORS needs to modify the response before auth sees it", "It does not matter — order is irrelevant"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "CORS preflight requests (OPTIONS method) are sent by the browser before the actual request and do not include authentication headers. If auth middleware ran first, it would reject the preflight, blocking the entire cross-origin request."
+  }
+]} />

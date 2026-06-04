@@ -10,6 +10,7 @@ import TestDoublesDemo from '../../components/demos/TestDoublesDemo'
 import TestCoverageDemo from '../../components/demos/TestCoverageDemo'
 import TestPropertyDemo from '../../components/demos/TestPropertyDemo'
 import TestCiDemo from '../../components/demos/TestCiDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Why Test?
 
@@ -598,3 +599,92 @@ Testing is not optional. It is the engineering practice that transforms software
 - Manage flaky tests systematically: quarantine, fix root cause, return to suite
 
 The best test suite is the one that gives you confidence to ship. Start where you are, add tests for the most critical paths first, and build up from there. Testing is a practice, not a project. It never ends -- and that is a good thing.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the key difference between a stub and a mock?",
+    options: [
+      "Stubs are for async code, mocks are for sync code",
+      "Stubs return canned responses; mocks return canned data AND verify that specific methods were called",
+      "There is no difference — they are interchangeable",
+      "Mocks are built into test frameworks, stubs require third-party libraries"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Stubs provide predetermined return values. Mocks add expectations — they verify that specific interactions happened (method called with specific arguments), failing the test if they did not."
+  },
+  {
+    question: "What is the testing trophy vs the testing pyramid?",
+    options: [
+      "The trophy has more E2E tests, the pyramid has more unit tests",
+      "The trophy adds static analysis as a layer and rebalances toward integration tests; the pyramid emphasizes many unit tests at the base",
+      "They are the same concept with different names",
+      "The trophy is for TypeScript, the pyramid is for Python"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The testing trophy (Kent C. Dodds) adds static analysis and emphasizes integration tests over unit tests. The pyramid (Mike Cohn) emphasizes a wide base of fast unit tests with fewer integration and E2E tests."
+  },
+  {
+    question: "What does property-based testing do differently from example-based testing?",
+    options: [
+      "It runs tests faster",
+      "It specifies properties that should hold for all valid inputs and generates random inputs to check them",
+      "It only works with mathematical functions",
+      "It eliminates the need for assertions"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Property-based testing specifies invariants (like reverse(reverse(arr)) === arr) and generates hundreds of random inputs. If any fail, it shrinks the input to the minimal failing case."
+  },
+  {
+    question: "Why is 100% line coverage with weak assertions worse than 70% coverage with strong assertions?",
+    options: [
+      "100% coverage is always better",
+      "High coverage with weak assertions creates a false sense of security — the tests execute lines but do not verify correct behavior",
+      "Weak assertions run faster",
+      "70% coverage means fewer bugs"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Coverage measures quantity (which lines ran), not quality (whether tests verify correct behavior). Weak assertions execute code without catching bugs, giving a misleading green report."
+  },
+  {
+    question: "What is a flaky test and why is it dangerous?",
+    options: [
+      "A test that runs slowly — it wastes CI time",
+      "A test that passes and fails without code changes — it erodes trust in the entire test suite",
+      "A test that uses mocks — it does not test real behavior",
+      "A test that runs in parallel — it causes race conditions"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Flaky tests pass or fail inconsistently without code changes. They erode developer trust, waste time debugging test infrastructure instead of real bugs, and lead to ignoring all test failures."
+  },
+  {
+    question: "In a CI pipeline, why should lint and type checking run before tests?",
+    options: [
+      "They are more important than tests",
+      "They are the fastest checks and catch the broadest category of errors, giving quick feedback",
+      "Tests depend on lint output",
+      "Linting requires compiled code"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Lint and type checking are the fastest checks and catch entire categories of errors (syntax, type mismatches) before slower test suites run, providing the quickest feedback loop."
+  },
+  {
+    question: "What is the FIRST principle of unit testing that requires tests to not depend on each other?",
+    options: [
+      "Fast",
+      "Isolated",
+      "Repeatable",
+      "Self-verifying"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Isolated means tests should not depend on each other or share mutable state. Each test sets up its own data and tears down after, so test order does not matter."
+  }
+]} />

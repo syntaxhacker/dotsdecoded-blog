@@ -11,6 +11,7 @@ import DecoratorPatternDemo from '../../components/demos/DecoratorPatternDemo'
 import AntiPatternDemo from '../../components/demos/AntiPatternDemo'
 import StiPolymorphicDemo from '../../components/demos/StiPolymorphicDemo'
 import ConcernDemo from '../../components/demos/ConcernDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## The DRY Principle
 
@@ -528,3 +529,92 @@ Keep gems updated. Run `bundle outdated` regularly. Pin versions in `Gemfile`. R
 - [ ] Technical debt items are tracked and prioritized
 
 If you can check all of these, your codebase is in good shape. If not, pick one area to improve this sprint. The Rails community has a saying: "The best time to refactor was yesterday. The second best time is today."
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the primary difference between a service object and a concern in Rails?",
+    options: [
+      "Service objects are faster than concerns",
+      "Concerns are shared behavior across multiple classes; service objects are standalone operations with clear inputs and outputs",
+      "Service objects must inherit from ActiveRecord::Base",
+      "Concerns can only be used in models"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Concerns mix into classes and become part of them (like Searchable included in multiple models). Service objects are standalone classes with a single .call method that orchestrate workflows across models."
+  },
+  {
+    question: "What is the 'Rule of Three' in the context of DRY?",
+    options: [
+      "You should always have exactly three tests per method",
+      "Wait until you see the same pattern three times before abstracting it into a shared component",
+      "A model should never have more than three associations",
+      "Controllers should contain no more than three actions"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Premature abstraction is worse than duplication. Two similar methods might diverge next sprint. Wait for the pattern to prove itself stable before extracting it."
+  },
+  {
+    question: "Why does the article recommend against putting business logic in controllers?",
+    options: [
+      "Controllers are too slow to execute business logic",
+      "Controllers cannot access the database",
+      "Skinny controllers are testable, reusable, and readable — logic belongs in models or service objects",
+      "Rails will raise an error if controllers contain more than 5 lines"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Controllers should be thin dispatchers. Business logic in models or service objects can be unit tested without HTTP requests, reused from background jobs or console commands, and kept readable."
+  },
+  {
+    question: "A decorator wraps a model to add presentation methods. When would you use a presenter instead?",
+    options: [
+      "When you need to add a single formatting method to a model",
+      "When the view needs data combined from multiple models into a view-specific object",
+      "When you want to replace ActiveRecord entirely",
+      "When you need to add database validations"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A decorator wraps a single model and adds display methods. A presenter composes data from multiple models into a view-specific object, like a dashboard showing stats from users, orders, and comments."
+  },
+  {
+    question: "What problem does Single Table Inheritance (STI) solve?",
+    options: [
+      "It allows models to use multiple database tables simultaneously",
+    "It lets multiple model types share one table with a type column when they have similar data shapes",
+    "It encrypts sensitive columns in the database",
+    "It enables real-time WebSocket connections between models"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "STI uses one table with a type column for models that share most of their columns and behavior. Manager, Developer, and Designer can all share an employees table with minimal unique columns."
+  },
+  {
+    question: "Why can't polymorphic associations have database-level foreign key constraints?",
+    options: [
+      "It's a bug in Rails that will be fixed eventually",
+      "The *_type column is a string, so the database can't know which table the *_id refers to",
+      "Polymorphic associations don't use foreign keys at all",
+      "Foreign keys are only available in PostgreSQL"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The database sees a generic integer and string, not a reference to a specific table. Without knowing the target table, it can't enforce referential integrity at the database level."
+  },
+  {
+    question: "What is the key difference between a presenter and a decorator?",
+    options: [
+      "Presenters are faster; decorators are more secure",
+      "Decorators wrap a single model for presentation; presenters compose data from multiple models for a specific view",
+      "Presenters use ERB; decorators use HAML",
+      "There is no difference — they are synonyms"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Decorators (like UserDecorator) add methods to a single model. Presenters (like DashboardPresenter) gather data from multiple models and prepare it for a specific view."
+  }
+]} />

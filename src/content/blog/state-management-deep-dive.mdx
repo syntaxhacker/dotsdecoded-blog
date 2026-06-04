@@ -10,6 +10,7 @@ import StateReduxDemo from '../../components/demos/StateReduxDemo'
 import StateZustandDemo from '../../components/demos/StateZustandDemo'
 import StateSignalsDemo from '../../components/demos/StateSignalsDemo'
 import StateCompareDemo from '../../components/demos/StateCompareDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Every frontend application, from a simple to-do list to a real-time dashboard serving thousands of users, runs on state. State is what makes your UI reactive -- the data that changes over time and causes the screen to update. But as applications grow, managing that state becomes the central challenge of frontend architecture.
 
@@ -424,3 +425,92 @@ A pragmatic architecture often combines multiple approaches: `useState` for loca
 - When would you choose Zustand over Redux, and vice versa?
 - What is the purpose of state normalization?
 - How does a memoized selector differ from a plain function that computes derived data?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "In React, what does the expression UI = f(state) mean?",
+    options: [
+      "The state is a function of the UI",
+      "The rendered view is determined by the current state",
+      "State is derived from the DOM",
+      "UI components create state automatically"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "UI = f(state) means the component output is a pure function of its state. When state changes, the function re-executes and produces a new view."
+  },
+  {
+    question: "What problem does prop drilling cause?",
+    options: [
+      "It makes components render faster",
+      "Intermediate components must accept and forward props they do not use",
+      "It reduces the number of components in the tree",
+      "It eliminates the need for state management libraries"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Prop drilling forces intermediate components to accept and forward props they do not use, creating tight coupling and reducing reusability."
+  },
+  {
+    question: "Why must Redux reducers be pure functions?",
+    options: [
+      "To make them easier to debug with console.log",
+      "So they can be called multiple times with the same input and always return the same output, enabling time-travel debugging",
+      "To allow them to make API calls directly",
+      "So they can mutate the existing state object"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Pure reducers ensure deterministic output, which enables Redux time-travel debugging and predictable state transitions."
+  },
+  {
+    question: "How does signals-based reactivity avoid component re-rendering?",
+    options: [
+      "It uses React.memo on every component",
+      "It tracks dependencies at individual DOM node granularity and patches only affected nodes directly",
+      "It batches all state updates into a single render",
+      "It disables the virtual DOM diffing algorithm"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Signals track dependencies at the granularity of individual DOM nodes. When a signal changes, only the specific text or attribute nodes that depend on it are updated, skipping component re-rendering entirely."
+  },
+  {
+    question: "What is the key performance advantage of Zustand's selector function?",
+    options: [
+      "It compresses the state object",
+      "It tells Zustand which slice of state a component cares about, so only components whose selected slice changed re-render",
+      "It converts the store to use signals internally",
+      "It batches all updates into a single synchronous commit"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Selectors enable fine-grained re-render optimization. Zustand only re-renders components whose selected slice actually changed, avoiding unnecessary re-renders."
+  },
+  {
+    question: "What is state normalization?",
+    options: [
+      "Converting all state to strings",
+      "Flattening nested data into a relational structure with byId lookups and ID references",
+      "Removing all state from components",
+      "Converting Redux to Zustand"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Normalization flattens nested data into a relational structure (like a database), eliminating duplication and making updates efficient."
+  },
+  {
+    question: "When should you use Context API instead of a state management library?",
+    options: [
+      "For high-frequency updates like form inputs",
+      "For low-frequency global state like theme, locale, or auth status",
+      "For complex async workflows with sagas",
+      "When you need time-travel debugging"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Context API is best for low-frequency global state that rarely changes, like theme or locale. It is not suitable for high-frequency updates because it re-renders all consumers."
+  }
+]} />

@@ -11,6 +11,7 @@ import TsMappedDemo from '../../components/demos/TsMappedDemo'
 import TsTemplateLiteralDemo from '../../components/demos/TsTemplateLiteralDemo'
 import TsInferDemo from '../../components/demos/TsInferDemo'
 import TsCompilerDemo from '../../components/demos/TsCompilerDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine two people who look identical — same height, same hair color, same glasses. In JavaScript, they are the same person as long as they have the same properties. In Java or C#, they are only the same person if they share a family name (a class or interface declaration). This is the difference between **structural typing** and **nominal typing**.
 
@@ -815,3 +816,92 @@ The deeper your understanding of the type system, the more you can express in ty
 Start with solid fundamentals — structural typing and the type hierarchy. Add generics and constraints. Layer on conditional types for logic. Use mapped types for transformations. Reach for template literals and `infer` when you need pattern matching. And when the built-in types are not enough, you have the full power of type-level programming at your fingertips.
 
 Each concept reinforces the others. By mastering the type system, you do not just write better TypeScript — you write TypeScript that proves your programs are correct before they ever run.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the fundamental difference between structural typing and nominal typing?",
+    options: [
+      "Structural typing uses class names, nominal typing uses object shapes",
+      "Structural typing checks shape (duck typing at compile time); nominal typing requires shared declarations",
+      "They are the same thing with different syntax",
+      "Structural typing is only used in JavaScript"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "TypeScript uses structural typing: two types are compatible if they have the same shape, regardless of their names. Nominal typing (Java, C#) requires types to share an explicit declaration."
+  },
+  {
+    question: "What is the difference between any and unknown?",
+    options: [
+      "any is stricter than unknown",
+      "any disables type checking entirely; unknown forces you to validate before using",
+      "unknown is the same as never",
+      "any is for numbers, unknown is for strings"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "any allows anything — it disables type checking. unknown is the safe top type: you can assign anything to it, but you must narrow its type before using it."
+  },
+  {
+    question: "What happens when a conditional type acts on a naked type parameter like T extends string ? T[] : never?",
+    options: [
+      "It returns the same type for all inputs",
+      "TypeScript distributes the conditional over each member of a union independently",
+      "It only evaluates once for the entire union",
+      "It throws a compile error"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Distributive conditional types split the union, evaluate the condition for each member independently, and union the results. This is how Exclude, Extract, and NonNullable work."
+  },
+  {
+    question: "What does the infer keyword do inside a conditional type?",
+    options: [
+      "It declares a runtime variable",
+      "It declares a type variable that TypeScript fills in based on the structure being matched",
+      "It forces type inference to fail",
+      "It converts a type to a union"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "infer declares a type variable in a conditional type. TypeScript pattern-matches the structure and fills in the inferred type — used in ReturnType, Parameters, and custom inference patterns."
+  },
+  {
+    question: "How do mapped types transform properties?",
+    options: [
+      "They delete properties from a type",
+      "They iterate over each key with [K in keyof T] and apply transformations to every property",
+      "They only work with arrays",
+      "They require runtime code"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Mapped types use [K in keyof T] to iterate over every key in a type and apply a transformation — adding readonly, optional modifiers, or remapping keys with as."
+  },
+  {
+    question: "Why is the never type critical for exhaustive switch checks?",
+    options: [
+      "It represents null values",
+      "If all union members are handled, the default branch assigns a variable to never, producing a type error if a new member is added",
+      "It makes switches run faster",
+      "It is the return type of async functions"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "When every case in a switch handles a union member, the remaining type in the default is never. Assigning it to a never variable catches missed cases at compile time."
+  },
+  {
+    question: "What is type-level programming in TypeScript?",
+    options: [
+      "Writing JavaScript that runs in the type checker",
+      "Using conditional types, mapped types, template literals, and recursion to compute types at compile time",
+      "A feature that replaces runtime code",
+      "Another name for generics"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Type-level programming uses the type system as a language — variables (type parameters), control flow (conditionals), iteration (mapped types), recursion, and string manipulation (template literals) — all evaluated at compile time."
+  }
+]} />

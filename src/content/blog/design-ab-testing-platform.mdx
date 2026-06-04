@@ -9,6 +9,7 @@ import AbRequirementsDemo from '../../components/demos/AbRequirementsDemo'
 import TrafficSplitDemo from '../../components/demos/TrafficSplitDemo'
 import StatsSignificanceDemo from '../../components/demos/StatsSignificanceDemo'
 import AbArchitectureDemo from '../../components/demos/AbArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 A/B testing is the scientific method applied to product development. Every change — a new button color, a redesigned checkout flow, a different recommendation algorithm — gets tested against a control group before it ships to everyone. At scale, this means building a platform that assigns users to variants deterministically, collects metrics reliably, and analyzes results with statistical rigor.
 
@@ -383,6 +384,107 @@ Test your understanding with these questions:
 4. You need to detect a 0.5% absolute lift on a baseline of 2% conversion. Your platform has 10,000 daily active users. How long should the experiment run? Walk through the calculation.
 
 5. A treatment shows +5% overall but -2% on both mobile and desktop when segmented. What is happening? How do you investigate?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "A product manager peeks at their experiment every day and stops when the p-value hits 0.03 on day 3. What statistical problem have they introduced?",
+    options: [
+      "Simpson's Paradox",
+      "The peeking problem — repeated looks inflate the false positive rate far above 5%",
+      "Selection bias",
+      "Survivorship bias"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Peeking repeatedly and stopping early inflates the false positive rate. With 20 peeks, the effective alpha balloons from 5% to over 20%. Solutions include fixed-horizon tests or sequential testing with spending functions."
+  },
+  {
+    question: "What is the key difference between statistical significance and practical significance?",
+    options: [
+      "They are the same thing",
+      "Statistical significance means the p-value is low; practical significance means the effect size is large enough to be worth shipping",
+      "Practical significance is always higher than statistical significance",
+      "Statistical significance only applies to revenue metrics"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A result can be statistically significant with a tiny effect that is not worth shipping. Always look at the confidence interval and lift magnitude, not just the p-value."
+  },
+  {
+    question: "How does hash-based bucketing ensure consistent user assignment across sessions?",
+    options: [
+      "It stores the assignment in a database",
+      "It hashes user_id + experiment_id to produce a deterministic bucket, so the same user always gets the same variant",
+      "It uses a random number generator with a fixed seed",
+      "It assigns variants sequentially"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "hash(user_id + experiment_id) % 100 is deterministic — the same inputs always produce the same bucket. No per-user storage needed; the assignment is computed fresh each time with the same result."
+  },
+  {
+    question: "Why must power analysis be done BEFORE an experiment, not after?",
+    options: [
+      "Because power analysis requires the experiment to be completed",
+      "Post-hoc power calculations are circular — if the result is not significant, the observed effect is by definition smaller than what the study was powered for",
+      "Because power analysis changes the sample size",
+      "It does not matter — post-hoc and pre-hoc power analyses give the same result"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Post-hoc power uses the observed effect size to calculate power. If the effect was not significant, the observed effect is necessarily smaller than the true effect, making the power calculation meaningless."
+  },
+  {
+    question: "What causes Simpson's Paradox in A/B test results?",
+    options: [
+      "Too few users in the experiment",
+      "A confounding variable correlated with variant assignment causes the aggregate trend to reverse when stratified",
+      "Using the wrong statistical test",
+      "Measuring too many metrics"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "If treatment was accidentally sent to more users in high-converting countries, the aggregate looks positive while per-segment looks negative. Randomization should prevent this, but assignment bugs can break it."
+  },
+  {
+    question: "Why are feature flags and A/B testing assignments closely related?",
+    options: [
+      "They both use different infrastructure",
+      "An experiment is essentially a feature flag with a control group, automated metrics collection, and statistical analysis — both use hash-based bucketing",
+      "Feature flags are only for experiments",
+      "They are unrelated concepts"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Feature flags and experiment assignments use the same hash-based bucketing mechanism. An experiment is a feature flag with a control group, metrics tracking, and significance analysis added on top."
+  },
+  {
+    question: "How do you detect broken randomization in an experiment?",
+    options: [
+      "Check if the p-value is below 0.05",
+      "Compare balance tables showing observable characteristics (region, device, plan) across variants — differences indicate broken randomization",
+      "Look at the conversion rate difference",
+      "Check if the experiment ran long enough"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "Balance tables compare observables like region, device type, and plan tier across variants. If control and treatment differ on these, randomization is broken and results are unreliable."
+  },
+  {
+    question: "What is the SUTVA assumption and why do network effects violate it?",
+    options: [
+      "SUTVA assumes all users are identical",
+      "SUTVA assumes one user's assignment does not affect another's outcome — network effects violate this when treated users influence control group users",
+      "SUTVA requires synchronous replication",
+      "SUTVA is a database consistency guarantee"
+    ],
+    correctIndex: 1,
+    points: 13,
+    explanation: "SUTVA (Stable Unit Treatment Value Assumption) requires that one user's treatment does not affect another's outcome. Network effects — like treated users inviting control users — create cross-contamination that breaks this assumption."
+  }
+]} />
 
 ## Summary
 

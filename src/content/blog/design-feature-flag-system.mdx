@@ -10,6 +10,7 @@ import FlagRequirementsDemo from '../../components/demos/FlagRequirementsDemo'
 import FlagEvaluationDemo from '../../components/demos/FlagEvaluationDemo'
 import GradualRolloutDemo from '../../components/demos/GradualRolloutDemo'
 import FlagArchitectureDemo from '../../components/demos/FlagArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Are Feature Flags?
 
@@ -337,6 +338,60 @@ Here is a summary of the key design decisions:
 | User assignment | Deterministic hash `md5(flag_key + user_id) % 100` |
 | Audit logging | Append-only table, immutable, indexed by flag key |
 | Rollout safety | Gradual percentage increments, auto-rollback on error |
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the key difference between deployment and release in a feature flag system?",
+    options: ["Deployment happens on weekends, release on weekdays", "Deployment is pushing code to production; release is enabling it for users via a flag", "They are the same thing", "Release requires a full rollback if something goes wrong"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Deployment pushes code to production (wrapped in a flag check). Release is the act of enabling the flag for users. This decoupling lets you deploy code on Monday and release to users on Friday without risk."
+  },
+  {
+    question: "In the flag evaluation pipeline, what order are rules checked?",
+    options: ["Custom rules, individual targeting, off check, fallback", "Off check, individual targeting, percentage rollout, custom rules, fallback", "Fallback, custom rules, percentage rollout, individual targeting", "All rules are evaluated simultaneously"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The evaluation order is: (1) Off check, (2) Individual targeting, (3) Percentage rollout, (4) Custom rules in priority order, (5) Fallback. This guarantees predictable evaluation."
+  },
+  {
+    question: "How does a feature flag SDK avoid adding latency to production requests?",
+    options: ["It caches responses from the server on every request", "It evaluates flags locally in-memory using downloaded configurations", "It uses a separate microservice for flag evaluation", "It pre-fetches all flags during the build process"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The SDK downloads flag configurations at startup and evaluates flags locally. Evaluation is a purely in-memory operation with no network calls, so it adds zero latency to the request path."
+  },
+  {
+    question: "What ensures deterministic user assignment in gradual rollouts?",
+    options: ["Random assignment each time the flag is checked", "A hash of the user ID combined with the flag key modulo 100", "The user's IP address", "The order in which users open the application"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The system computes hash(flag_key + user_id) % 100 and compares against the rollout percentage. Using both the flag key and user ID ensures a user might be in the 50% for one flag but not another."
+  },
+  {
+    question: "What happens when a flag is deleted but application code still references it?",
+    options: ["The application crashes immediately", "The SDK returns the fallback value and logs a warning", "The flag is automatically recreated with default settings", "The SDK returns true for all evaluations"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When a flag is deleted, the SDK should return the fallback value (typically the control variation) and log a warning. This prevents crashes while alerting developers to clean up dead code."
+  },
+  {
+    question: "What is a stale flag and how should it be handled?",
+    options: ["A flag that changes too frequently", "A flag at 100% rollout for 30+ days with no plans to turn off — it should be removed as dead code", "A flag that has never been evaluated", "A flag with no targeting rules"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Stale flags are permanently on with no plans to turn off. They add complexity, cognitive load, and evaluation cost. A stale detection system should flag them for removal after 30 days at 100%."
+  },
+  {
+    question: "How does the SDK receive flag updates in real time?",
+    options: ["By polling the server every 30 seconds", "Through a long-lived SSE or WebSocket streaming connection", "By restarting the application", "By receiving a push notification from the server"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The SDK opens a long-lived SSE or WebSocket connection to the flag service. When a flag changes, the server pushes the updated config through this connection, and the SDK updates its in-memory cache instantly."
+  }
+]} />
 
 ### Self-Check Questions
 

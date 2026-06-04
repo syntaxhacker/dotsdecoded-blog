@@ -17,6 +17,7 @@ import MatrixMultiplyDemo from '../../components/demos/MatrixMultiplyDemo'
 import AttentionFlowDemo from '../../components/demos/AttentionFlowDemo'
 import TransposeAnimation from '../../components/demos/TransposeAnimation'
 import SoftmaxCurveDemo from '../../components/demos/SoftmaxCurveDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## The Library Analogy
 
@@ -424,6 +425,95 @@ $$
 <AttentionPipelineDemo client:visible />
 
 Step through the full pipeline above. Watch data flow from raw text through embeddings, projections, scoring, scaling, normalization, and final output. Every cell in the formula has a corresponding visual step.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "In the attention formula, what do Q, K, and V represent?",
+    options: [
+      "Q is the question, K is the key to unlock it, V is the value of the answer",
+      "Q is what a word is looking for, K is what a word advertises, V is the actual information a word provides",
+      "Q is the query to the database, K is the index, V is the stored record",
+      "Q, K, and V are three different weight matrices that are averaged together"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Q (Query) represents what a word is searching for — its information need. K (Key) represents what each word advertises about itself. V (Value) represents the actual content each word shares. The attention mechanism compares Q against K to determine how much of each V to collect."
+  },
+  {
+    question: "Why do we divide the attention scores by the square root of d_k before applying softmax?",
+    options: [
+      "To make the scores positive",
+      "To prevent softmax from producing extreme probability distributions when scores are large",
+      "To reduce the computational complexity from O(n²) to O(n)",
+      "To ensure the output vectors are the same dimension as the input"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Raw dot products can grow very large, especially with high-dimensional vectors. If scores are large, softmax exponentials (e^x) blow up — e^100 is astronomically larger than e^50 — pushing all probability onto the highest score. Dividing by sqrt(d_k) normalizes the variance back to approximately 1, keeping softmax outputs in a stable range."
+  },
+  {
+    question: "After applying softmax to the attention scores, what property must each row of the resulting matrix satisfy?",
+    options: [
+      "Each row must sum to the number of words in the sequence",
+      "Each row must sum to exactly 1.0",
+      "Each row must have at least one zero entry",
+      "Each row must be a permutation of the input embeddings"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Softmax converts each row into a probability distribution. Every value is between 0 and 1, and each row sums to exactly 1.0. This ensures the output is a proper weighted average of the Value vectors."
+  },
+  {
+    question: "In the example sentence \"I love AI\", why does the word \"I\" attend most strongly to \"love\" (score 5) rather than to itself (score 1)?",
+    options: [
+      "Because \"I\" appears first in the sentence and always attends to the next word",
+      "Because the Query of \"I\" and the Key of \"love\" have a strong dot product match, meaning \"love\" has information \"I\" needs",
+      "Because pronouns always attend to verbs in every sentence",
+      "Because the weight matrices were designed to penalize self-attention"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The attention score between two words is the dot product of one's Query and the other's Key. A high score means the Query of \"I\" (what it is looking for) matches well with the Key of \"love\" (what it advertises). Linguistically, a pronoun like \"I\" needs a verb like \"love\" for context — the attention mechanism discovers this automatically."
+  },
+  {
+    question: "What is the output of the attention mechanism — what does each word's output vector represent?",
+    options: [
+      "The original embedding with noise added",
+      "A one-hot vector indicating which word it attended to most",
+      "A weighted mixture of all Value vectors, where the weights come from attention scores",
+      "The softmax probability of each word in the vocabulary"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "The final output is computed as Weights × V. Each word's output vector is a weighted sum of all Value vectors, where the weights come from the softmax-normalized attention scores. This means each word's representation now contains information from other relevant words, not just itself."
+  },
+  {
+    question: "If all three words in a sentence had identical Keys, what would the attention weights look like?",
+    options: [
+      "One word would get 100% of the attention",
+      "Each word would get exactly 1/3 of the attention (uniform distribution)",
+      "The attention weights would be undefined",
+      "Only self-attention would have non-zero weights"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If all Keys are identical, then for any Query, the dot products with each Key would be equal. After softmax, equal inputs produce equal outputs — each word gets 1/3 attention. The output would be a uniform blend of all Value vectors."
+  },
+  {
+    question: "Why are the weight matrices W_Q, W_K, and W_V learned during training rather than set by hand?",
+    options: [
+      "Because hand-crafted matrices would be too slow to compute",
+      "Because the model needs to discover the optimal way to project inputs into query, key, and value spaces for the task",
+      "Because different languages require different weight values",
+      "Because random initialization produces better results than manual tuning"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The weight matrices project the input embeddings into different subspaces: what to look for (Q), what to advertise (K), and what to share (V). Learning them during training lets the model discover the optimal projections for the specific task — understanding context, resolving pronouns, capturing meaning — from billions of examples."
+  }
+]} />
 
 ## Self-Check
 

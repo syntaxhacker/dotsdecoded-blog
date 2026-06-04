@@ -9,6 +9,7 @@ import WebauthnRegisterDemo from '../../components/demos/WebauthnRegisterDemo'
 import WebauthnLoginDemo from '../../components/demos/WebauthnLoginDemo'
 import WebauthnTypesDemo from '../../components/demos/WebauthnTypesDemo'
 import WebauthnComparisonDemo from '../../components/demos/WebauthnComparisonDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## The Password Problem
 
@@ -272,3 +273,92 @@ Before deploying WebAuthn:
 - Do you support conditional UI for autofill-based login?
 - Do you have a recovery path for users who lose all authenticators?
 - Is attestation set appropriately for your threat model (usually `none`)?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the fundamental flaw with password-based authentication?",
+    options: [
+      "Passwords are too long to remember",
+      "A password is a shared secret — both the user and server know it, so either side can be compromised",
+      "Passwords do not work on mobile devices",
+      "Passwords are too slow to transmit"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The core flaw is structural: a password is a shared secret. If the server is breached, the secret is exposed. If the user types it into the wrong site, the attacker has it."
+  },
+  {
+    question: "In WebAuthn, what does the server store during registration?",
+    options: [
+      "The user's password hash",
+      "The credential ID and the public key — never the private key",
+      "A session token for the authenticator",
+      "The authenticator's manufacturer certificate"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The server stores the public key and credential ID. The private key stays on the device in secure hardware. A leaked database of public keys is worthless to an attacker."
+  },
+  {
+    question: "Why is WebAuthn phishing-resistant?",
+    options: [
+      "It uses CAPTCHA verification",
+      "The signed challenge is cryptographically bound to the origin — a signature for example.com cannot be used against attacker.com",
+      "It requires a VPN",
+      "It uses IP-based authentication"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The challenge-response protocol includes the origin in the signed data. A signature generated for one domain is cryptographically invalid for any other domain."
+  },
+  {
+    question: "What is the difference between platform and cross-platform authenticators?",
+    options: [
+      "Platform authenticators are cloud-based; cross-platform are local",
+      "Platform authenticators are built into the device (Touch ID, Face ID); cross-platform are external devices (YubiKey) connected via USB/NFC/BLE",
+      "They use different cryptographic algorithms",
+      "There is no difference"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Platform authenticators are embedded in the device (fingerprint, face recognition). Cross-platform authenticators are external tokens that work across multiple devices."
+  },
+  {
+    question: "What is the role of the magic GUID 258EAFA5-E914-47DA-95CA-C5AB0DC85B11 in WebAuthn?",
+    options: [
+      "It is the private key seed",
+      "It is used to compute the challenge signature — proving the authenticator understands the protocol",
+      "It identifies the authenticator manufacturer",
+      "It is a random nonce for session management"
+    ],
+    correctIndex: 1,
+    points: 12,
+    explanation: "In the WebAuthn protocol, the challenge is signed with the private key. The magic GUID is part of the protocol specification used in the challenge computation to prove protocol compliance."
+  },
+  {
+    question: "Why should you allow multiple credentials per account?",
+    options: [
+      "To increase the server's storage capacity",
+      "So users have a backup if they lose an authenticator — at least one backup passkey or recovery method prevents lockout",
+      "To enable faster login",
+      "Multiple credentials are required by the FIDO2 spec"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Allowing multiple credentials ensures users are not locked out if they lose a device. Best practice: register at least one backup passkey, recovery code, or fallback TOTP."
+  },
+  {
+    question: "What do iCloud Keychain and Google Password Manager do for passkeys?",
+    options: [
+      "They store passwords alongside passkeys",
+      "They sync passkeys across the user's devices via end-to-end encrypted cloud storage",
+      "They generate one-time codes",
+      "They replace the WebAuthn API"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "They sync passkeys across devices via encrypted cloud storage. A passkey created on one device appears on all trusted devices, solving the device lock-in problem."
+  }
+]} />

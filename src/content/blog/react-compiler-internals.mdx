@@ -13,6 +13,7 @@ import ReactiveScopeDemo from '../../components/demos/ReactiveScopeDemo'
 import AliasEffectDemo from '../../components/demos/AliasEffectDemo'
 import ValidationRulesDemo from '../../components/demos/ValidationRulesDemo'
 import MemoCacheDemo from '../../components/demos/MemoCacheDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine you write a React component that computes a greeting from a user's name. On the first render, it runs the computation. On the second render, the name has not changed, but React re-runs the computation anyway. You add `useMemo` to fix it. Then you add `useCallback` for a callback. Then `React.memo` for a child component. Your code is now littered with optimization annotations that make it harder to read.
 
@@ -217,6 +218,107 @@ function ExpensiveComponent() {
   return <div>{expensiveComputation()}</div>
 }
 ```
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What does HIR stand for in the React Compiler, and why is it called 'high-level'?",
+    options: [
+      "High-level Intermediate Representation — it preserves if-statements, loops, and other high-level constructs instead of flattening everything",
+      "High Impact Rendering — it focuses on performance-critical code paths",
+      "Hybrid Internal Runtime — it combines compile-time and runtime analysis",
+      "Hierarchical Instruction Register — it organizes instructions in a tree"
+    ],
+    correctIndex: 0,
+    points: 10,
+    explanation: "HIR stands for High-level Intermediate Representation. It is called 'high-level' because it preserves JavaScript control flow (if/else, loops, ternary) rather than flattening everything into a low-level form, making the compiler's analysis more accurate."
+  },
+  {
+    question: "Why does the React Compiler convert HIR into Static Single Assignment (SSA) form?",
+    options: [
+      "To make the code run faster in the browser",
+      "To enable easy data flow tracing — every variable is assigned once so each use maps to exactly one definition",
+      "To support class components",
+      "To reduce the number of React re-renders"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "In SSA form, every variable is assigned exactly once. This makes data flow analysis trivial: the compiler can trace every use of a variable back to exactly one definition, without tracking reassignments."
+  },
+  {
+    question: "What is a phi node in SSA form?",
+    options: [
+      "A node that deletes unused variables",
+      "A merge point that says 'at this point, the value came from either branch A or branch B'",
+      "A function call that must be memoized",
+      "A type annotation added by the compiler"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Phi nodes represent merge points in control flow. When a variable is assigned in different branches (e.g., if/else), the phi node at the merge point tells the compiler that the value came from one of those branches."
+  },
+  {
+    question: "What is a 'reactive scope' in the React Compiler?",
+    options: [
+      "A JavaScript closure that captures React state",
+      "A group of related computations with dependencies and declarations that becomes one memoization unit",
+      "The lifetime of a React component from mount to unmount",
+      "A CSS scope that applies only to specific elements"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Reactive scopes are contiguous blocks of code that produce values depending on reactive inputs. Each scope becomes one memoization unit in the compiled output, with its own set of dependencies and declarations."
+  },
+  {
+    question: "Why does the React Compiler flatten scopes inside loops?",
+    options: [
+      "Loops are not supported in JavaScript",
+      "The compiler cannot reconcile across loop iterations, so memoizing loop bodies is not safe",
+      "Loops always produce the same result, so memoization is unnecessary",
+      "Flattening loops makes the compiled output smaller"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The compiler cannot safely memoize inside loops because it cannot reconcile values across different iterations. If you need memoization inside a map callback, the recommendation is to extract a child component."
+  },
+  {
+    question: "What happens to manual useMemo and useCallback calls when the React Compiler is enabled?",
+    options: [
+      "They are removed and replaced by the compiler's own memoization",
+      "They are left intact — the compiler does not double-memoize",
+      "They cause compilation errors",
+      "They are converted to React.memo wrappers"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The compiler preserves any manual memoization you have already written. If you have useMemo or useCallback, the compiler leaves them intact and only memoizes the surrounding code."
+  },
+  {
+    question: "Which JavaScript feature causes the React Compiler to bail out entirely?",
+    options: [
+      "Arrow functions",
+      "Optional chaining",
+      "eval, with, or nested class declarations",
+      "Destructuring"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "eval, with, and nested class declarations make it impossible to statically analyze code. The compiler cannot safely analyze data flow in their presence, so it bails out on those components."
+  },
+  {
+    question: "What is the sentinel pattern used for in the compiled output?",
+    options: [
+      "Marking components as pure functions",
+      "Handling scopes with zero dependencies — computations that should only run once",
+      "Defining error boundaries",
+      "Enabling strict mode"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The sentinel pattern (Symbol.for('react.memo_cache_sentinel')) is used for scopes with zero dependencies. On the first render, the sentinel triggers the computation. On subsequent renders, the cached result is loaded directly."
+  }
+]} />
 
 ## The Architecture in One Diagram
 

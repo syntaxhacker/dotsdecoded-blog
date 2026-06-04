@@ -13,6 +13,7 @@ import EncodingDemo from '../../components/demos/EncodingDemo'
 import Base62Demo from '../../components/demos/Base62Demo'
 import HashCollisionDemo from '../../components/demos/HashCollisionDemo'
 import ArchitectureDemo from '../../components/demos/ArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 You are in a system design interview. The interviewer says: "Design a URL shortener like bit.ly." What do you do? You do not jump into databases and load balancers. You start by understanding what the thing actually is, what it needs to do, and how big it needs to get. This is the complete walkthrough — from the first question to the final follow-up.
 
@@ -289,6 +290,95 @@ Custom aliases are harder than random codes because you need to check for availa
 | Analytics | Async message queue | Synchronous write | Zero impact on redirect latency |
 | ID generation | Snowflake IDs | Single auto-increment | No single point of failure |
 | Redirect | 301 permanent | 307 temporary | Better caching at CDN |
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why is auto-increment ID + Base62 encoding preferred over hash truncation for short code generation?",
+    options: [
+      "Base62 codes are shorter than hash-based codes",
+      "Base62 guarantees no collisions since each ID is unique by definition, while hash truncation can produce collisions requiring retries",
+      "Base62 is faster to compute than MD5 or SHA-256",
+      "Hash-based codes are predictable and can be enumerated"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Auto-increment + Base62 gives each URL a unique numeric ID encoded in Base62, making collisions impossible. Hash truncation can produce collisions (birthday paradox) requiring database checks and retries on every write."
+  },
+  {
+    question: "Why does the system use 307 (Temporary Redirect) for some links and 301 (Moved Permanently) for others?",
+    options: [
+      "301 is more secure than 307",
+      "301 is cached by browsers forever (bad if the URL changes); 307 always hits the server (needed for expiring links)",
+      "307 works on mobile; 301 only works on desktop",
+      "There is no practical difference between them"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A 301 tells the browser to cache the redirect permanently — great for performance but bad if the destination changes. A 307 always hits the server, which is essential for links with expiration dates or dynamic destinations."
+  },
+  {
+    question: "Why does the URL shortener use a cache-aside pattern with CDN + Redis?",
+    options: [
+      "To reduce the cost of S3 storage",
+      "The 80/20 rule applies: 20% of URLs get 80% of traffic, so caching eliminates most database reads",
+      "Caching is required by the REST API specification",
+      "Redis is faster than CDN for edge caching"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "URL shorteners see extreme traffic skew. A viral link might get millions of clicks while most links get single-digit clicks. Caching the top 20% of URLs at the CDN and Redis layers eliminates 80%+ of database queries."
+  },
+  {
+    question: "What is the birthday paradox and why does it matter for hash-based short codes?",
+    options: [
+      "It explains why birthday celebrations are statistically rare",
+      "It shows that collisions become likely much sooner than expected — with 62^7 possible codes and 500M URLs, collision probability is low but not zero",
+      "It proves that random number generation is deterministic",
+      "It describes how databases handle concurrent writes"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The birthday paradox shows that in a pool of 365 people, only ~23 are needed for a 50% chance of a shared birthday. Similarly, with 3.5 trillion possible codes and 500M URLs, collisions are improbable but possible, making hash truncation risky."
+  },
+  {
+    question: "Why is database sharding by short_code effective for URL shorteners?",
+    options: [
+      "It ensures all URLs from the same user go to the same shard",
+      "The redirect query only needs one shard: hash(short_code) % N gives the shard ID, so every redirect touches exactly one shard",
+      "Sharding by short_code balances write load across all shards evenly",
+      "It allows cross-shard analytics queries"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Since every redirect queries by short_code, sharding by short_code ensures each redirect hits exactly one shard via hash(short_code) % N. This keeps latency low because no scatter-gather across shards is needed."
+  },
+  {
+    question: "Why should analytics be processed asynchronously via a message queue instead of synchronously?",
+    options: [
+      "Synchronous analytics are more accurate",
+      "Writing analytics on every redirect adds latency and database load — fire-and-forget to a queue lets the redirect return immediately",
+      "Message queues are cheaper than databases",
+      "Analytics data doesn't need to be durable"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The redirect path must be fast (under 50ms). Writing analytics synchronously would add latency on every click. Instead, the API server publishes a click event to Kafka/SQS and returns the redirect immediately. Workers process analytics in the background."
+  },
+  {
+    question: "Why is SQL better for the URL mapping table but NoSQL better for analytics?",
+    options: [
+      "SQL is always better than NoSQL for all use cases",
+      "URL mappings need strong consistency (two requests for the same custom alias must not both succeed), while analytics are write-heavy, append-only, and eventual consistency is fine",
+      "NoSQL doesn't support the short_code data type",
+      "SQL databases are faster for write-heavy workloads"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "The URL table needs ACID transactions to prevent two users from claiming the same custom alias. Analytics are append-only, write-heavy, and can tolerate eventual consistency — perfect for NoSQL time-series databases."
+  }
+]} />
 
 ## Self-Check
 

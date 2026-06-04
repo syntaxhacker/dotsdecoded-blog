@@ -9,6 +9,7 @@ import PasteRequirementsDemo from '../../components/demos/PasteRequirementsDemo'
 import PasteStorageDemo from '../../components/demos/PasteStorageDemo'
 import PasteExpirationDemo from '../../components/demos/PasteExpirationDemo'
 import PasteArchitectureDemo from '../../components/demos/PasteArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 You are in a system design interview. The interviewer says: "Design a pastebin / code snippet service." You have used these before — Pastebin, GitHub Gist, Hastebin, Glot.io. They let you paste text, get a shareable URL, and optionally set an expiration time. The problem sounds simple. The depth is in the details: how do you store millions of pastes efficiently, deduplicate content, handle syntax highlighting for 50+ languages, enforce expiration, and prevent abuse?
 
@@ -438,6 +439,95 @@ At enormous scale (billions of pastes), the `pastes` table is sharded by `slug` 
 ```
 
 The shard mapping is handled by the API gateway or a lightweight proxy. Each shard is an independent PostgreSQL instance, with its own read replicas.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why is paste content stored in object storage (S3) instead of directly in PostgreSQL?",
+    options: [
+      "S3 is faster than PostgreSQL for reads",
+      "Large blobs cause table bloat, slow backups, and expensive queries in SQL",
+      "PostgreSQL does not support text storage",
+      "S3 provides automatic syntax highlighting"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Storing large content blobs in PostgreSQL causes table bloat, slow backups, and expensive queries. Object storage like S3 costs pennies per GB and scales to multi-TB without manual sharding."
+  },
+  {
+    question: "How does content deduplication via SHA-256 work in a pastebin system?",
+    options: [
+      "Each paste is compressed with gzip and the compression ratio is used as a unique key",
+      "The SHA-256 hash of the content is checked against existing hashes — if found, the existing content_path is reused",
+      "Deduplication only works for exact file size matches",
+      "SHA-256 is used to encrypt the content before storage"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When a paste is created, its SHA-256 hash is computed. If a row with the same content_hash exists, the existing content_path is reused and only a reference counter is incremented, avoiding duplicate storage."
+  },
+  {
+    question: "What is the difference between a 301 and 307 redirect, and when would you use each in a URL shortener?",
+    options: [
+      "301 is permanent and cached by browsers; 307 is temporary and always hits the server",
+      "301 is faster; 307 is more secure",
+      "301 works for HTTP; 307 works for HTTPS",
+      "There is no practical difference"
+    ],
+    correctIndex: 0,
+    points: 10,
+    explanation: "A 301 (Moved Permanently) tells the browser to cache the redirect forever — great for performance but bad if the URL changes. A 307 (Temporary Redirect) always hits the server, which is needed for links with expiration dates."
+  },
+  {
+    question: "How does the burn-after-read mechanism work?",
+    options: [
+      "The paste is encrypted and the key is deleted after first view",
+      "On the first view the paste is returned normally; on any subsequent view it returns 410 Gone and is hard-deleted",
+      "The paste content is overwritten with random data after being read once",
+      "The paste is moved to a read-only archive after first access"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Burn-after-read pastes are designed for secrets. On the first view, the paste is returned and access_count becomes 1. On any subsequent request, the paste returns 410 Gone and is immediately hard-deleted from both the database and S3."
+  },
+  {
+    question: "Why does the cleanup worker use a 24-hour grace period before hard-deleting expired pastes?",
+    options: [
+      "To give search engines time to remove cached versions",
+      "To allow users to recover accidentally deleted pastes during a bug in the cleanup worker",
+      "To reduce S3 API costs by batching deletions",
+      "To comply with data retention regulations"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If a bug in the cleanup worker deletes 10,000 active pastes, the 24-hour grace period gives engineers time to catch it and restore. Without it, the data would be gone permanently."
+  },
+  {
+    question: "What problem does the slug keyspace of 62^7 (~3.5 trillion combinations) solve?",
+    options: [
+      "It ensures all slugs are human-readable words",
+      "It makes slug generation deterministic so the same URL always gets the same slug",
+      "It provides enough unique short codes to avoid collisions at scale while keeping URLs short",
+      "It allows slugs to be sorted alphabetically for efficient database queries"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "A 7-character slug from a 62-character alphabet gives ~3.5 trillion combinations. At 500M new URLs per year, this is enough for 7,000 years, making collisions extremely rare while keeping URLs short and shareable."
+  },
+  {
+    question: "How does the cache strategy handle the power-law distribution of paste views?",
+    options: [
+      "All pastes are cached equally regardless of popularity",
+      "The top 20% of pastes are cached at the CDN edge with a 5-minute TTL, eliminating 80% of origin hits",
+      "Only private pastes are cached to prevent unauthorized access",
+      "Caching is disabled for pastes with expiration dates"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Paste traffic follows an 80/20 rule: 80% of views hit 20% of pastes. The CDN edge cache with a 5-minute TTL means even a massive viral spike hits the origin only once per 5 minutes per edge location."
+  }
+]} />
 
 ## Self-Check Questions
 

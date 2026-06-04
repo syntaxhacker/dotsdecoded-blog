@@ -10,6 +10,7 @@ import L4L7Demo from '../../components/demos/L4L7Demo'
 import LoadBalanceAlgoDemo from '../../components/demos/LoadBalanceAlgoDemo'
 import HealthCheckDemo from '../../components/demos/HealthCheckDemo'
 import ApiGatewayDemo from '../../components/demos/ApiGatewayDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Why Do We Need Load Balancing?
 
@@ -171,3 +172,80 @@ The typical architecture: `Client -> LB (L4) -> Gateway replicas (L7) -> Backend
 - Name 3 things an API gateway does that a load balancer typically does not.
 - Why would you put a load balancer in front of your API gateway instances?
 - What HTTP status code does a gateway return when a client exceeds the rate limit?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is the primary difference between an L4 and an L7 load balancer?",
+    options: [
+      "L4 is for HTTP traffic while L7 is for TCP traffic",
+      "L4 routes based on IP and port (TCP level); L7 routes based on HTTP path, headers, and cookies",
+      "L4 is software-based while L7 is hardware-based",
+      "L4 supports more concurrent connections than L7"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "L4 load balancers make routing decisions based on IP address and port number at the transport layer. L7 load balancers understand HTTP and can route based on method, path, headers, cookies, and more."
+  },
+  {
+    question: "Which load balancing algorithm should you use for servers with different CPU capacities?",
+    options: [
+      "Round Robin",
+      "IP Hash",
+      "Weighted Round Robin",
+      "Least Connections"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Weighted Round Robin assigns weights proportional to server capacity. A server with 4 cores gets weight 4, receiving roughly 40% of traffic. Round Robin treats all servers equally regardless of capacity."
+  },
+  {
+    question: "What is the difference between active and passive health checks?",
+    options: [
+      "Active checks run during business hours; passive checks run at night",
+      "Active checks are explicit pings (GET /health) the LB sends periodically; passive checks monitor real traffic for failed responses",
+      "Active checks require authentication; passive checks do not",
+      "Active checks are faster than passive checks"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Active health checks are periodic requests the LB sends to each server's /health endpoint. Passive health checks monitor real traffic patterns for failed responses (e.g., 5 consecutive 500s) without sending extra requests."
+  },
+  {
+    question: "What does an API gateway do that a load balancer typically does not?",
+    options: [
+      "Distribute traffic across multiple server instances",
+      "Perform health checks on backend servers",
+      "Authenticate requests, enforce rate limits, and transform request/response payloads",
+      "Terminate TCP connections"
+    ],
+    correctIndex: 2,
+    points: 15,
+    explanation: "API gateways handle application-level concerns: JWT validation, API key checking, rate limiting, request transformation, API versioning, and logging. Load balancers primarily distribute traffic and check health."
+  },
+  {
+    question: "Why would you put a load balancer in front of your API gateway instances?",
+    options: [
+      "To add encryption between the LB and the gateway",
+      "To distribute traffic across multiple gateway replicas for high availability and scale",
+      "The gateway cannot handle direct client connections",
+      "The LB provides caching that the gateway lacks"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The typical architecture is Client -> LB -> Gateway replicas -> Backend services. The LB distributes traffic across multiple gateway instances for HA. The gateway then routes to the appropriate backend service."
+  },
+  {
+    question: "What happens when a server fails and is removed from the load balancer pool?",
+    options: [
+      "All traffic stops until the server is replaced",
+      "The LB redistributes its traffic to remaining healthy servers, which may see increased load",
+      "The LB spawns a new server automatically",
+      "Clients are notified and must reconnect"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "When a server fails, the LB detects it via health checks and removes it from the pool. Traffic is redistributed to remaining servers. This is why capacity headroom matters -- running at 100% causes cascading overload on failure."
+  }
+]} />

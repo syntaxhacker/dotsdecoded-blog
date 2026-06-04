@@ -11,6 +11,7 @@ import K8sServiceDemo from '../../components/demos/K8sServiceDemo'
 import K8sDeploymentDemo from '../../components/demos/K8sDeploymentDemo'
 import K8sConfigDemo from '../../components/demos/K8sConfigDemo'
 import K8sArchitectureDemo from '../../components/demos/K8sArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Imagine you manage a fleet of delivery trucks. Each truck carries packages (containers) that need to reach specific destinations. A single truck can carry multiple packages, but the packages are stacked together -- they share the same route, the same fuel, and the same driver.
 
@@ -976,3 +977,92 @@ Make sure you can answer these questions before closing this page:
 - [ ] **Challenge**: A user reports that their pod stays in Pending state with the event "0/5 nodes are available: 3 Insufficient cpu, 2 node(s) didn't match pod anti-affinity." What is happening, and what commands would you run to debug this?
 
 If you got them all, you understand the core of Kubernetes orchestration. If not, revisit the demos above -- each one illustrates a specific concept that builds on the previous ones.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What is a Pod in Kubernetes and how do containers within it communicate?",
+    options: [
+      "A Pod is a single container that communicates via external network addresses",
+      "A Pod is one or more containers sharing the same network namespace, storage, and lifecycle, communicating via localhost",
+      "A Pod is a virtual machine running multiple containers",
+      "A Pod is a Docker Compose file converted to YAML"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A Pod is the smallest deployable unit. All containers in a pod share the same IP address, port space, storage volumes, and lifecycle. They communicate via localhost."
+  },
+  {
+    question: "What is the difference between a liveness probe and a readiness probe?",
+    options: [
+      "Liveness checks if the container is ready for traffic; readiness checks if it is alive",
+      "Liveness determines if the container should be restarted; readiness determines if the pod should receive traffic",
+      "Both probes serve the same purpose with different timeouts",
+      "Liveness probes run once at startup; readiness probes run continuously"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "A liveness probe tells Kubernetes if the container is alive -- if it fails, the container is restarted. A readiness probe tells Kubernetes if the pod is ready to serve traffic -- if it fails, the pod is removed from Service endpoints."
+  },
+  {
+    question: "How does kube-proxy implement Service networking using iptables?",
+    options: [
+      "It creates a DNS record for each Service and resolves it on every request",
+      "It creates DNAT rules that match traffic to the Service ClusterIP and rewrite the destination to a pod IP with probability-based distribution",
+      "It uses a reverse proxy process that terminates connections and forwards them",
+      "It configures BGP routes to distribute traffic across nodes"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "kube-proxy creates iptables DNAT rules. A statistic module distributes traffic across endpoints with random probability (achieving round-robin). The packet's destination IP is rewritten to a pod IP and forwarded."
+  },
+  {
+    question: "What happens during a Kubernetes rolling update with maxSurge=1 and maxUnavailable=1 and replicas=5?",
+    options: [
+      "All 5 pods are replaced simultaneously",
+      "One new pod is created and one old pod is deleted at a time, with at least 4 pods always running",
+      "The deployment is paused until all pods are ready",
+      "Two new pods are created, then two old pods are deleted"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "With maxSurge=1, one extra pod can be created above desired (6 total). With maxUnavailable=1, one pod can be unavailable (4 running minimum). The update cycles: create new pod -> wait for readiness -> delete old pod -> repeat."
+  },
+  {
+    question: "Why do StatefulSet pods have stable hostnames and storage while Deployment pods do not?",
+    options: [
+      "StatefulSets use a different container runtime",
+      "StatefulSets are designed for stateful workloads (databases, queues) that need predictable network identity and persistent storage across rescheduling",
+      "StatefulSets run on dedicated nodes",
+      "StatefulSets automatically configure load balancing"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "StatefulSet pods get predictable names (web-0, web-1), stable DNS entries, and PersistentVolumeClaims that follow the pod when rescheduled. Deployments create interchangeable pods with no stable identity."
+  },
+  {
+    question: "Which control plane component is the only one that communicates directly with etcd?",
+    options: [
+      "kube-scheduler",
+      "kube-controller-manager",
+      "kube-apiserver",
+      "kube-proxy"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "The API server is the only component that talks to etcd. All other components (scheduler, controller manager, kubelet) communicate through the API server, which serializes access and ensures consistency."
+  },
+  {
+    question: "What is the purpose of PriorityClasses and preemption in Kubernetes?",
+    options: [
+      "They define container resource limits and requests",
+      "They assign importance levels to pods, allowing the scheduler to evict lower-priority pods to make room for higher-priority ones",
+      "They control the order of init container execution",
+      "They define pod-to-pod affinity and anti-affinity rules"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "PriorityClasses define pod importance. When the scheduler cannot fit a high-priority pod, it preempts (evicts) lower-priority pods to free resources. Evicted pods are gracefully terminated."
+  }
+]} />

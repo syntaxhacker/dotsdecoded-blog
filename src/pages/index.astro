@@ -298,6 +298,44 @@ const filteredEdges = edges.filter(e => filteredNames.has(e.source) && filteredN
         }, 300)
       })
 
+      var blogProgress = {}
+      try {
+        blogProgress = JSON.parse(localStorage.getItem('blogProgress') || '{}')
+      } catch (e) {}
+
+      cards.forEach(function(card) {
+        var slug = card.getAttribute('data-post-slug')
+        if (!slug || !blogProgress[slug]) return
+        var p = blogProgress[slug]
+        if (p.completed) {
+          var ind = document.createElement('span')
+          ind.className = 'post-status post-status-completed'
+          ind.textContent = '\u2713'
+          card.querySelector('.blog-card-title').appendChild(ind)
+        } else if (p.read) {
+          var ind = document.createElement('span')
+          ind.className = 'post-status post-status-read'
+          card.querySelector('.blog-card-title').appendChild(ind)
+        }
+      })
+
+      treeFiles.forEach(function(file) {
+        var href = (file.getAttribute('href') || '').replace(/\/$/, '')
+        var slug = href.split('/').pop()
+        if (!slug || !blogProgress[slug]) return
+        var p = blogProgress[slug]
+        if (p.completed) {
+          var ind = document.createElement('span')
+          ind.className = 'post-status post-status-completed'
+          ind.textContent = '\u2713'
+          file.appendChild(ind)
+        } else if (p.read) {
+          var ind = document.createElement('span')
+          ind.className = 'post-status post-status-read'
+          file.appendChild(ind)
+        }
+      })
+
       window.addEventListener('taghover', function(e) {
         var tag = e.detail && e.detail.tag
         if (typeof tag === 'string') {

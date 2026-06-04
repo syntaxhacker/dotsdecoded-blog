@@ -12,6 +12,7 @@ import TwitterTimelineDemo from '../../components/demos/TwitterTimelineDemo'
 import TrendingTopicsDemo from '../../components/demos/TrendingTopicsDemo'
 import TwitterSearchDemo from '../../components/demos/TwitterSearchDemo'
 import TwitterArchitectureDemo from '../../components/demos/TwitterArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Introduction
 
@@ -396,6 +397,95 @@ We have designed a Twitter-scale social feed system from the ground up. The key 
 7. **Microservices architecture**: Each service independently scalable and owns its data store.
 
 The system handles 500M tweets/day, 20B timeline views/day, and 200M DAU with P99 timeline latency under 500ms. It scales horizontally by adding more service instances, cache nodes, and database shards.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "Why does push fanout not work for celebrity accounts with millions of followers?",
+    options: [
+      "Celebrities don't post enough tweets to justify the cost",
+      "A single tweet from Taylor Swift would generate 100M+ timeline writes, saturating the database",
+      "Push fanout only works for direct messages, not public tweets",
+      "Celebrity accounts are stored in a different database"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If a celebrity with 100M followers tweets, push fanout would generate 100M writes to the timeline table from a single tweet. Instead, celebrity tweets are fetched at read time (pull) and merged with the precomputed feed."
+  },
+  {
+    question: "How does the hybrid fanout model work in practice?",
+    options: [
+      "All users get push fanout regardless of follower count",
+      "Users with fewer than 30,000 followers get push fanout; users above that threshold get pull fanout where followers fetch their tweets at read time",
+      "Push fanout is used for text tweets, pull fanout for media tweets",
+      "The model alternates between push and pull every hour"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Twitter's Fanout Service uses two tiers: push for users with <30K followers (tweets are written to all followers' timelines immediately) and pull for users above that threshold (tweets are fetched at timeline load time)."
+  },
+  {
+    question: "What data structure does Twitter use for approximate trending topic counts?",
+    options: [
+      "A Redis sorted set with exact counts",
+      "A Bloom filter for membership testing",
+      "Count-Min Sketch — a probabilistic structure that counts frequency with sub-linear memory",
+      "A binary search tree for O(log N) lookups"
+    ],
+    correctIndex: 2,
+    points: 15,
+    explanation: "Count-Min Sketch tracks hashtag frequencies using sub-linear memory. It can overcount but never undercounts. A 64KB sketch can track millions of distinct hashtags with 99% accuracy, making real-time trending feasible at 15K tweets/second."
+  },
+  {
+    question: "Why is cursor-based pagination preferred over offset-based for timelines?",
+    options: [
+      "Cursor-based is simpler to implement",
+      "Offset pagination breaks when new tweets arrive mid-query — tweets shift positions, causing duplicates or missed tweets",
+      "Cursor-based uses less database storage",
+      "Offset pagination doesn't work with Redis"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "With offset pagination, if a new tweet is inserted while a user is paginating, all subsequent offsets shift by one. This causes the user to either see duplicate tweets or miss tweets entirely. Cursor-based pagination uses a stable reference point."
+  },
+  {
+    question: "What happens when a Redis timeline cache entry expires?",
+    options: [
+      "The user sees an error page",
+      "The timeline service regenerates the precomputed timeline from the tweet store, repopulates the cache, and serves the result",
+      "The user's follow list is automatically refreshed",
+      "The old timeline is preserved in a backup cache"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "On cache miss, the timeline service queries the tweet store for recent tweets from followed users, merges them, sorts by timestamp, populates the Redis cache, and returns the result. Lock-around regeneration prevents cache stampedes."
+  },
+  {
+    question: "What is the read-to-write ratio for a Twitter-like social feed, and what does it imply for architecture?",
+    options: [
+      "1:1 — reads and writes are balanced, so the system needs equal optimization for both",
+      "40:1 — reads dominate, so every design choice should optimize for reads even if it adds write cost",
+      "100:1 — writes dominate, so the system is write-optimized",
+      "10:1 — reads are slightly more common but not enough to change the architecture"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "With 20B timeline views per day vs 500M tweets, the ratio is 40:1. This means the system should be heavily read-optimized — precompute timelines, cache aggressively, and accept higher write cost for faster reads."
+  },
+  {
+    question: "How does the search ranking formula combine different signals?",
+    options: [
+      "Only text relevance (BM25) matters for search ranking",
+      "A weighted combination: 0.4*text_relevance + 0.3*recency + 0.2*follower_boost + 0.1*engagement_boost",
+      "Results are sorted purely by the number of likes",
+      "Ranking is random to ensure fairness"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Search uses a composite score combining BM25 text relevance (40%), recency with exponential decay (30%), log-scaled follower count (20%), and normalized engagement in the first hour (10%). This balances relevance, freshness, and authority."
+  }
+]} />
 
 Self-check questions to test your understanding:
 

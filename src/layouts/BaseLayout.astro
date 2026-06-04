@@ -92,6 +92,67 @@ const ogImage = new URL(image, siteUrl).href
       });
     });
   </script>
+  <script is:inline>
+    document.addEventListener('DOMContentLoaded', function() {
+      var path = window.location.pathname;
+      if (!path.startsWith('/blog/')) return;
+      
+      var slug = path.replace('/blog/', '');
+      var markedKey = 'markedAsRead_' + slug;
+      
+      if (sessionStorage.getItem(markedKey)) return;
+      
+      function getProgress() {
+        try {
+          var data = localStorage.getItem('blogProgress');
+          return data ? JSON.parse(data) : {};
+        } catch (e) {
+          return {};
+        }
+      }
+      
+      function setProgress(progress) {
+        try {
+          localStorage.setItem('blogProgress', JSON.stringify(progress));
+        } catch (e) {}
+      }
+      
+      var progress = getProgress();
+      if (!progress[slug]) {
+        progress[slug] = { read: false, completed: false };
+      }
+      progress[slug].lastVisited = new Date().toISOString();
+      setProgress(progress);
+      
+      var scrollEl = document.querySelector('.page-inner') || window;
+      
+      function onScroll() {
+        if (sessionStorage.getItem(markedKey)) return;
+        
+        var scrollTop = scrollEl === window ? window.pageYOffset : scrollEl.scrollTop;
+        var scrollHeight = scrollEl === window ? document.documentElement.scrollHeight : scrollEl.scrollHeight;
+        var clientHeight = scrollEl === window ? window.innerHeight : scrollEl.clientHeight;
+        
+        if (clientHeight >= scrollHeight) return;
+        
+        var scrollPercent = scrollTop / (scrollHeight - clientHeight);
+        
+        if (scrollPercent >= 0.5) {
+          sessionStorage.setItem(markedKey, 'true');
+          var prog = getProgress();
+          if (!prog[slug]) {
+            prog[slug] = { read: false, completed: false };
+          }
+          prog[slug].read = true;
+          prog[slug].lastVisited = new Date().toISOString();
+          setProgress(prog);
+          scrollEl.removeEventListener('scroll', onScroll);
+        }
+      }
+      
+      scrollEl.addEventListener('scroll', onScroll, { passive: true });
+    });
+  </script>
   <script>
     import Prism from 'prismjs'
     import 'prismjs/components/prism-bash'

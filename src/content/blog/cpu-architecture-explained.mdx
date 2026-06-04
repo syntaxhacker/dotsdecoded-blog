@@ -16,6 +16,7 @@ import SimdDemo from '../../components/demos/SimdDemo'
 import OutOfOrderDemo from '../../components/demos/OutOfOrderDemo'
 import SpeculativeExecDemo from '../../components/demos/SpeculativeExecDemo'
 import CpuProfilerDemo from '../../components/demos/CpuProfilerDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What is a CPU?
 
@@ -448,6 +449,107 @@ The 90/10 rule applies: 90% of execution time is spent in 10% of the code. Profi
 <CpuProfilerDemo client:visible />
 
 Explore a simulated profiler output above. Click functions to see their performance counters, spot the hot path, and see what optimization would yield.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "A CPU has a clock speed of 3.0 GHz and an IPC of 2.5. How many instructions does it process per second?",
+    options: [
+      "3.0 billion",
+      "2.5 billion",
+      "7.5 billion",
+      "5.5 billion"
+    ],
+    correctIndex: 2,
+    points: 10,
+    explanation: "Performance = Clock Speed × IPC. 3.0 GHz × 2.5 instructions/cycle = 7.5 billion instructions per second (7.5 GIPS). This is why a lower-clock-speed chip with higher IPC can outperform a higher-clock-speed chip with lower IPC."
+  },
+  {
+    question: "What are the four stages of the instruction cycle?",
+    options: [
+      "Load, Store, Compare, Jump",
+      "Fetch, Decode, Execute, Writeback",
+      "Read, Process, Cache, Write",
+      "Allocate, Initialize, Run, Free"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The instruction cycle is: Fetch (read the next instruction from memory), Decode (figure out what it means), Execute (perform the operation), and Writeback (save the result to a register). Every instruction goes through these four stages."
+  },
+  {
+    question: "Why does iterating a 2D array row-first perform better than column-first in C?",
+    options: [
+      "Row-first uses fewer instructions at the assembly level",
+      "Row-first access is sequential in memory, so each cache line serves multiple elements. Column-first jumps across rows, causing cache misses",
+      "The C compiler optimizes row-first loops but not column-first loops",
+      "Row-first avoids branch mispredictions in the loop"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "C stores 2D arrays in row-major order. Row-first iteration accesses contiguous memory addresses, so each 64-byte cache line serves 16 consecutive integers. Column-first iteration jumps by the row stride (N×4 bytes), landing on a different cache line each time — causing expensive cache misses."
+  },
+  {
+    question: "What is the purpose of branch prediction in a pipelined CPU?",
+    options: [
+      "To predict the outcome of arithmetic operations before they execute",
+      "To guess which way a branch will go so the CPU can speculatively fetch and execute instructions without stalling",
+      "To cache branch target addresses in L1 cache",
+      "To detect and prevent data hazards between dependent instructions"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Branches (if statements, loops) create a dilemma: the CPU doesn't know which instructions to fetch next until the branch resolves. Branch prediction guesses the direction and speculatively fetches/executes from the predicted path. A correct guess costs nothing; a wrong guess flushes the pipeline (10-20 cycle penalty)."
+  },
+  {
+    question: "How does out-of-order execution improve performance when a cache miss occurs?",
+    options: [
+      "It reroutes the cache miss to a faster cache level",
+      "It allows independent instructions behind the stalled load to execute and retire while waiting for data",
+      "It duplicates the cache line to avoid the miss entirely",
+      "It switches to a different thread to hide the latency"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "When a load misses cache and stalls for 100+ cycles, out-of-order execution lets the CPU look ahead at upcoming instructions. Instructions that don't depend on the stalled load execute immediately, keeping execution units busy. Results are held in the reorder buffer and retired in program order."
+  },
+  {
+    question: "What is the difference between L1, L2, and L3 cache?",
+    options: [
+      "L1 is the slowest but largest, L3 is the fastest but smallest",
+      "L1 is per-core and fastest (~3-4 cycles), L2 is per-core and larger (~10-15 cycles), L3 is shared across cores and largest (~30-50 cycles)",
+      "L1 stores instructions, L2 stores data, L3 stores both",
+      "L1 is volatile, L2 and L3 are non-volatile"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Cache is organized in levels: L1 (32-64KB, ~3-4 cycles, inside each core), L2 (256-512KB, ~10-15 cycles, per core), L3 (8-32MB, ~30-50 cycles, shared). Each level is larger but slower. The CPU checks L1 first, then L2, then L3, then RAM (~100-300 cycles)."
+  },
+  {
+    question: "Why does Hyper-Threading/SMT provide less than 2x performance even though it presents 2 logical cores?",
+    options: [
+      "Because the two threads share the same execution units, caches, and memory interface — SMT fills gaps when one thread stalls, but both cannot use the same ALU simultaneously",
+      "Because Hyper-Threading requires a license fee that limits its clock speed",
+      "Because the operating system can only schedule one thread per core",
+      "Because SMT doubles the pipeline depth, increasing branch misprediction penalties"
+    ],
+    correctIndex: 0,
+    points: 15,
+    explanation: "SMT duplicates registers and program counters but shares execution units, caches, and memory. When one thread stalls (e.g., on a cache miss), the other can use the idle execution units. But both threads cannot execute on the same ALU simultaneously, so realistic gains are 15-30%."
+  },
+  {
+    question: "What is the security implication of speculative execution?",
+    options: [
+      "Speculative execution can execute arbitrary code from untrusted sources",
+      "Speculative execution can leak data through cache timing — attacks like Spectre and Meltdown exploit this by tricking the CPU into speculatively accessing sensitive memory",
+      "Speculative execution bypasses memory protection entirely",
+      "Speculative execution only affects single-threaded programs"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "Speculative execution is supposed to be invisible — results are discarded on misprediction. But it affects microarchitectural state (what's in the cache). Attackers can trick the CPU into speculatively accessing memory it shouldn't, then detect the access via cache timing, leaking sensitive data like encryption keys."
+  }
+]} />
 
 ## Self-Check Questions
 

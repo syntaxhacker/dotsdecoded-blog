@@ -11,6 +11,7 @@ import Http2ServerPushDemo from '../../components/demos/Http2ServerPushDemo'
 import QuicHandshakeDemo from '../../components/demos/QuicHandshakeDemo'
 import QuicMigrationDemo from '../../components/demos/QuicMigrationDemo'
 import Http3ArchitectureDemo from '../../components/demos/Http3ArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Every time you load a web page, a series of protocol negotiations happens in milliseconds. The browser and server agree on which version of HTTP to use -- HTTP/1.1, HTTP/2, or HTTP/3. Each version brought fundamental changes to how data moves across the internet.
 
@@ -367,3 +368,80 @@ For most web developers, the practical takeaways are:
 - Test with curl `--http3` and DNS HTTPS record queries to verify deployment
 
 The modern web protocols stack is faster, more resilient, and more secure than ever. Understanding how it works helps you debug performance issues, configure servers correctly, and build applications that perform well under real-world network conditions.
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What problem does HTTP/2 multiplexing solve that HTTP/1.1 had?",
+    options: [
+      "It adds encryption to all HTTP traffic",
+      "It allows multiple streams over a single TCP connection, eliminating head-of-line blocking between requests",
+      "It compresses HTTP headers using gzip",
+      "It enables server-initiated resource pushing"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "HTTP/2 breaks requests into frames and interleaves multiple streams over a single TCP connection. A slow stream does not block a fast one, unlike HTTP/1.1 where each connection carries one request at a time."
+  },
+  {
+    question: "Why does QUIC use UDP instead of TCP?",
+    options: [
+      "UDP is faster because it guarantees delivery",
+      "UDP runs in userspace, so QUIC can deploy updates as application updates without requiring kernel changes on every device in the path",
+      "UDP supports encryption natively while TCP does not",
+      "UDP has built-in multiplexing while TCP does not"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "TCP is baked into OS kernels. Changing it requires updating every device in the path. QUIC runs in userspace over UDP (universally allowed through firewalls) and deploys as application updates."
+  },
+  {
+    question: "How does QUIC connection migration work?",
+    options: [
+      "It uses DNS records to track the new IP address",
+      "It identifies connections by a Connection ID rather than the 4-tuple, so the connection survives IP/port changes",
+      "It re-establishes the handshake using cached session tickets",
+      "It tunnels traffic through a persistent TCP connection"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "QUIC identifies connections by a 64-bit Connection ID (CID) instead of the (src IP, src port, dst IP, dst port) 4-tuple. When the client's IP changes (WiFi to cellular), the same CID continues the connection."
+  },
+  {
+    question: "What makes 0-RTT possible in QUIC and what is its security trade-off?",
+    options: [
+      "0-RTT sends no data at all, which is inherently safe",
+      "It allows sending HTTP data in the first packet using cached connection parameters, but the data is replayable by attackers",
+      "It uses a pre-shared key from the previous connection to encrypt the entire stream",
+      "It skips the TLS handshake entirely"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "0-RTT lets returning clients send data in the very first packet using cached parameters. However, 0-RTT data is replayable -- an attacker who captures the packet can replay it. Applications should treat 0-RTT data as idempotent."
+  },
+  {
+    question: "What is the difference between HPACK and QPACK?",
+    options: [
+      "HPACK is for HTTP/1.1, QPACK is for HTTP/2",
+      "HPACK relies on ordered delivery (TCP) while QPACK decouples encoder/decoder state updates using separate unidirectional streams for QUIC",
+      "QPACK is a superset of HPACK with additional features",
+      "They are identical protocols with different names"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "HPACK relies on TCP's ordered delivery for header table synchronization. QPACK uses dedicated encoder and decoder streams so header compression state updates do not block request streams on QUIC."
+  },
+  {
+    question: "How does a browser discover that a server supports HTTP/3?",
+    options: [
+      "The server includes an Upgrade header in every response",
+      "The server advertises HTTP/3 via the Alt-Svc header in HTTP/1.1 or HTTP/2 responses, or via DNS HTTPS records",
+      "The client probes port 443 with a QUIC handshake and falls back if it fails",
+      "The browser automatically detects HTTP/3 support from the server certificate"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Servers announce HTTP/3 via Alt-Svc: h3=':443' in HTTP responses, or via DNS HTTPS/SVCB records with alpn='h3,h2'. The client caches this and uses HTTP/3 on subsequent connections."
+  }
+]} />

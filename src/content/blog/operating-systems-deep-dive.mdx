@@ -11,6 +11,7 @@ import OsSchedulingDemo from '../../components/demos/OsSchedulingDemo'
 import OsVirtualMemoryDemo from '../../components/demos/OsVirtualMemoryDemo'
 import OsContextSwitchDemo from '../../components/demos/OsContextSwitchDemo'
 import OsSyscallDemo from '../../components/demos/OsSyscallDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 Every program you write -- from a tiny shell script to a database server -- runs on top of an operating system. The OS is the invisible layer between your code and the raw hardware. It abstracts the CPU, memory, disk, and network into simple APIs like files, processes, and sockets.
 
@@ -393,9 +394,66 @@ The brilliance is that these mechanisms compose into a system that feels simple 
 
 Your code does not know and does not care. The OS handles it.
 
-Understanding these internals helps you write better software. You know that `fork()` is cheap until the child writes memory. You know that too many threads cause expensive context switches. You know that random file access on a spinning disk is 1000x slower than sequential. And you know that every system call, no matter how small, costs at minimum a mode switch and register save.
+## Test Your Knowledge
 
-### Self-Check Questions
+<QuizDemo client:visible questions={[
+  {
+    question: "Why does fork() return two different values (child PID to parent, 0 to child)?",
+    options: ["It is a bug in the implementation", "So each process knows whether it is the parent or the child and can branch accordingly", "To prevent race conditions in the scheduler", "To assign different privilege levels to each process"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "fork() returns the child's PID to the parent so the parent can track/wait for it, and returns 0 to the child so it knows it is the child. This lets both processes execute different code paths after the fork."
+  },
+  {
+    question: "What is copy-on-write (COW) in fork()?",
+    options: ["The child gets a complete copy of all memory immediately", "Parent and child share physical pages until one writes, triggering a page fault that copies the page", "The child inherits only the stack, not the heap", "Memory is shared permanently between parent and child"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "COW means fork() only copies page table entries, not actual memory. Parent and child share the same physical pages marked read-only. When either writes, the CPU raises a page fault and the kernel copies that specific page. This makes fork nearly instant."
+  },
+  {
+    question: "What happens to the TLB during a context switch?",
+    options: ["Nothing — TLB entries are shared between processes", "The TLB must be flushed because process A's virtual-to-physical mappings are meaningless for process B", "Only the entries for the current process are invalidated", "The TLB is saved to disk and restored"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "The TLB caches virtual-to-physical address translations. Since each process has its own address space, process A's TLB entries map to physical frames that belong to A. After switching to B, those mappings are invalid and must be flushed, which is a major cost of context switching."
+  },
+  {
+    question: "What causes a page fault, and what are the two outcomes?",
+    options: ["A page fault always means a segmentation fault", "A valid address triggers demand paging (load from disk); an invalid address triggers SIGSEGV", "A page fault only happens during context switches", "A page fault means the TLB is full"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "When a program accesses a virtual address with the valid bit clear in the page table, the MMU raises a page fault. If the address is within a mapped region, the kernel loads the page from disk (demand paging). If the address is invalid, the kernel sends SIGSEGV (segmentation fault)."
+  },
+  {
+    question: "Why is context switching expensive?",
+    options: ["It requires disk I/O", "It involves saving registers, flushing the TLB, loading new state, and yields zero productive work during the switch", "It only happens when a process terminates", "It requires a system call to the application"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "A context switch saves all registers to the outgoing process's PCB, flushes the TLB (hundreds of cycles), loads the incoming process's registers, and resumes at its saved instruction pointer. The CPU does zero productive work during this time — pure overhead."
+  },
+  {
+    question: "What is the key difference between a process and a thread?",
+    options: ["Processes are faster than threads", "Threads share the same address space; processes have separate address spaces", "Processes cannot run concurrently", "Threads have their own memory, processes share memory"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Threads within the same process share code, data, and heap (same address space) but have their own stack and registers. Processes have fully separate address spaces with complete isolation. On Linux, both are created with clone() — the difference is in the sharing flags."
+  },
+  {
+    question: "How does the Completely Fair Scheduler (CFS) achieve fairness?",
+    options: ["It gives every process the same fixed time quantum", "It tracks vruntime for each process in a red-black tree and always picks the one with the smallest vruntime", "It uses static priority levels set by the user", "It runs processes in FIFO order"],
+    correctIndex: 1,
+    points: 15,
+    explanation: "CFS tracks virtual runtime (vruntime) — how much CPU time each process has used, weighted by nice value. Processes are stored in a red-black tree keyed by vruntime. CFS always picks the leftmost node (smallest vruntime), ensuring each process gets its fair share of CPU time."
+  },
+  {
+    question: "Why does demand paging make process startup fast?",
+    options: ["It preloads all pages into RAM", "It loads only the first page of code on startup; the rest is loaded lazily from disk on first access", "It compiles code at startup", "It allocates all memory upfront but defers initialization"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Demand paging means pages are only loaded from disk when they are actually accessed. When a process starts, only the first page of code is loaded. The rest stays on disk and is brought in via page faults as needed. Combined with COW, this means processes start instantly and only use memory they actually touch."
+  }
+]} />
 
 - Why does `fork()` return two different values? What would happen if copy-on-write did not exist?
 - What happens to the TLB during a context switch? Why does this matter?

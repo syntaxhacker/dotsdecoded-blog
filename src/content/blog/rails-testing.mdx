@@ -9,6 +9,7 @@ import TestPyramidDemo from '../../components/demos/TestPyramidDemo'
 import RSpecDemo from '../../components/demos/RSpecDemo'
 import CapybaraDemo from '../../components/demos/CapybaraDemo'
 import MockStubDemo from '../../components/demos/MockStubDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## Why Test?
 
@@ -760,3 +761,104 @@ Run your full suite before every commit. Run the relevant subset while developin
 - How do you run a single test case in RSpec? In Minitest?
 - Why should you avoid mocking internal objects?
 - What Capybara driver would you use for a test that needs JavaScript?
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What are the three layers of the test pyramid, from bottom to top?",
+    options: [
+      "System, integration, unit",
+      "Unit (fast, many), integration (medium), system (slow, few)",
+      " acceptance, regression, smoke",
+      "Model, controller, view"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "The test pyramid has many fast unit tests at the base, fewer integration tests in the middle, and the fewest system tests at the top. Inverting it makes the suite slow and flaky."
+  },
+  {
+    question: "In TDD, what is the Red-Green-Refactor cycle?",
+    options: [
+      "Write code, run tests, fix bugs",
+      "Write a failing test (Red), write minimal code to pass (Green), then clean up (Refactor)",
+      "Deploy to production, monitor, roll back",
+      "Design, implement, document"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Red: write a test that fails (code doesn't exist). Green: write the simplest code to pass. Refactor: clean up while tests protect you. This cycle forces you to think about interface before implementation."
+  },
+  {
+    question: "What is the key difference between a stub and a mock?",
+    options: [
+      "Stubs are faster; mocks are slower",
+      "Stubs provide canned data; mocks also verify that a method was called with the right arguments",
+      "There is no difference — they are synonyms",
+      "Stubs work with models; mocks work with controllers"
+    ],
+    correctIndex: 1,
+    points: 15,
+    explanation: "A stub replaces a method with a canned response — it provides data. A mock also verifies the interaction — that the method was called, with the right arguments, the right number of times."
+  },
+  {
+    question: "Why are FactoryBot traits more flexible than separate factories for each variation?",
+    options: [
+      "Traits are faster to create",
+      "Traits let you define reusable variations on a single factory and combine them (create(:user, :admin, :premium))",
+      "Traits automatically generate test data",
+      "Traits work with fixtures but not factories"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Instead of separate factories for admin_user, premium_user, etc., traits are composable. You define them once and combine as needed: create(:user, :admin, :premium, email: 'custom@example.com')."
+  },
+  {
+    question: "When should you use a system test instead of a request/integration test?",
+    options: [
+      "When testing API endpoints",
+      "When you need to test JavaScript behavior or full browser interaction like clicking buttons and filling forms",
+      "When testing model validations",
+      "When you want the fastest possible test"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "System tests use Capybara to drive a real browser. Use them for critical user flows that require JavaScript or browser interaction. Request tests are faster for testing API endpoints."
+  },
+  {
+    question: "Why should you avoid mocking internal objects like ActiveRecord models?",
+    options: [
+      "Mocks don't work with ActiveRecord",
+      "Mocking the exact code that might have the bug hides real failures — tests pass but the app doesn't work",
+      "Internal objects can't be mocked in RSpec",
+      "Mocking slows down the test suite"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If you mock a model, you're stubbing out the code that might have the bug. Your tests pass, but your application doesn't work. Mock at system boundaries (external APIs, services), not internal objects."
+  },
+  {
+    question: "What is the advantage of FactoryBot over Rails fixtures?",
+    options: [
+      "Fixtures are more flexible",
+      "Factories are Ruby templates that support traits, sequences, and dynamic data — unlike static YAML fixtures",
+      "Fixtures run faster in the test suite",
+      "Factories don't require any gems"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Factories are Ruby templates with traits for variations, sequences for unique data, and dynamic attributes. Fixtures are static YAML that are rigid and hard to maintain at scale."
+  },
+  {
+    question: "Which Capybara driver would you use for a system test that needs JavaScript?",
+    options: [
+      "Rack::Test — fastest, no browser needed",
+      "Selenium with headless Chrome — real browser with JavaScript support",
+      "Watir — legacy browser automation",
+      "Mechanize — HTTP-only testing"
+    ],
+    correctIndex: 1,
+    points: 10,
+    explanation: "Selenium with headless Chrome drives a real browser, supports JavaScript, and works in CI. Rack::Test is faster but can't test JavaScript. Playwright is a modern alternative to Selenium."
+  }
+]} />

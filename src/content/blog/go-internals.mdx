@@ -11,6 +11,7 @@ import GoChannelDemo from '../../components/demos/GoChannelDemo'
 import GoSelectDemo from '../../components/demos/GoSelectDemo'
 import GoMemoryModelDemo from '../../components/demos/GoMemoryModelDemo'
 import GoArchitectureDemo from '../../components/demos/GoArchitectureDemo'
+import QuizDemo from '../../components/demos/QuizDemo'
 
 ## What Makes Go Concurrent
 
@@ -674,6 +675,60 @@ Runtime in the binary:
 | Mutex | Spin + futex | Brief spin avoids context switch, starvation mode for fairness |
 | GC | Concurrent mark-sweep | GC assists, write barrier, sub-ms pauses |
 | Memory model | Happens-before | Channels, mutexes, and atomics establish ordering |
+
+## Test Your Knowledge
+
+<QuizDemo client:visible questions={[
+  {
+    question: "What does the 'P' represent in Go's GMP scheduler and why is it critical?",
+    options: ["P stands for Process — it is a physical CPU core", "P stands for Processor (scheduling context) — it limits parallelism to GOMAXPROCS goroutines and holds a local run queue", "P stands for Pool — it manages goroutine memory", "P stands for Priority — it determines goroutine execution order"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "P is a scheduling context, not a physical processor. It holds a local run queue of runnable goroutines and bounds parallelism — at most GOMAXPROCS goroutines run simultaneously because each needs a P, and only N P's exist. This avoids the overhead of true M:N scheduling across all threads."
+  },
+  {
+    question: "What happens when a goroutine makes a blocking syscall in Go?",
+    options: ["All goroutines block until the syscall returns", "The P is detached from the M and made available to another M, so the scheduler continues while the original M blocks", "The goroutine is killed", "The syscall is converted to a non-blocking call automatically"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "When a goroutine enters a blocking syscall, the M enters the syscall but the P is detached and handed to another M. This lets the scheduler continue running other goroutines while only the one M is blocked. When the syscall returns, the G tries to acquire a P (or goes to the global queue)."
+  },
+  {
+    question: "Why does Go's select statement randomize the order of case evaluation?",
+    options: ["To improve performance", "To prevent starvation — without randomization, the first ready case would always be favored, starving other channels", "To detect deadlocks", "To support nil channels"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "If select always checked cases in source order, the first channel that is ready would always be selected. By randomizing the evaluation order with runtime.fastrand, Go ensures uniform probability among ready cases, preventing any single channel from being starved."
+  },
+  {
+    question: "What is the difference between an unbuffered and a buffered channel at the runtime level?",
+    options: ["Unbuffered channels are faster", "Unbuffered channels have no buffer — send blocks until a receiver is ready for direct handoff; buffered channels use a circular buffer and only block when full", "Buffered channels cannot be closed", "Unbuffered channels support select; buffered channels do not"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "An unbuffered channel (dataqsiz=0) requires direct handoff — the sender copies its value directly into the receiver's stack frame. A buffered channel (dataqsiz=N) uses a circular buffer. Sends fill the buffer until full, then block. Receives drain until empty, then block."
+  },
+  {
+    question: "How does Go 1.14+ async preemption prevent a tight loop from starving other goroutines?",
+    options: ["It inserts function calls into the loop", "The sysmon thread sends a SIGURG signal to the M, causing the goroutine to yield at the next safe point", "It kills the goroutine after a timeout", "It reduces the loop's CPU priority"],
+    correctIndex: 1,
+    points: 12,
+    explanation: "Before Go 1.14, a loop without function calls never hit a scheduling point. Now, sysmon monitors running goroutines and sends SIGURG after 10ms. The signal handler sets a flag checked at the next safe point (function entry, loop back-edge), forcing the goroutine to yield."
+  },
+  {
+    question: "What is GC assist and when does it trigger?",
+    options: ["GC assist runs during program startup to initialize the heap", "When an application goroutine allocates faster than the GC can mark, the runtime forces it to help with marking before continuing", "GC assist is a debugging tool for detecting leaks", "GC assist pre-allocates memory to avoid future GC pauses"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "GC assist is a feedback mechanism: if an application goroutine allocates memory faster than the GC background workers can mark, the allocating goroutine is forced to perform some marking work before its allocation completes. This keeps the GC pace matched to the allocation rate."
+  },
+  {
+    question: "How does work stealing improve scheduler efficiency?",
+    options: ["It copies goroutines to the global queue", "When a P's local queue is empty, the M steals half of another P's local queue, balancing load across processors", "It steals OS threads from other processes", "It redistributes memory across goroutine stacks"],
+    correctIndex: 1,
+    points: 10,
+    explanation: "An idle M picks a random P and tries to steal half its local queue. This balances load without a central coordinator — busy P's shed work to idle P's. The steal uses popBack from the victim (preserving FIFO order of remaining items) and pushes to the thief's queue."
+  }
+]} />
 
 ### Self-Check
 
